@@ -1,0 +1,22 @@
+apis:
+  generation:
+    root: ../.claude/backend/openapi.yaml
+
+rules:
+  struct: error
+  spec-strict-refs: error
+  no-invalid-media-type-examples: error
+  no-unresolved-refs: error
+  no-enum-type-mismatch: error
+  operation-operationId: error
+  operation-operationId-unique: error
+  operation-2xx-response: error
+  path-params-defined: error
+  no-identical-paths: error
+  no-ambiguous-paths: error
+
+  security-defined: off
+  no-server-example.com: off
+  operation-4xx-response: off
+  info-license: off
+  tag-description: off

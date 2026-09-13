@@ -1,0 +1,23 @@
+{
+  "generic": {
+    "title": "Something went wrong",
+    "description": "Please try again."
+  },
+  "network": {
+    "title": "No connection",
+    "description": "Check your internet connection and try again."
+  },
+  "code": {
+    "VALIDATION_FAILED": "Some of the details are invalid. Check the form and try again.",
+    "TOPIC_REJECTED": "This topic cannot be generated.",
+    "RATE_LIMITED": "Too many requests. Try again in a moment.",
+    "JOB_NOT_FOUND": "This generation is no longer available.",
+    "JOB_ALREADY_TERMINAL": "This generation has already finished.",
+    "GENERATION_FAILED": "The cards could not be generated. Try a more specific topic.",
+    "UPSTREAM_UNAVAILABLE": "The service is temporarily unavailable.",
+    "INTERNAL_ERROR": "Something went wrong on our side."
+  },
+  "generation": {
+    "timeout": "This is taking longer than expected. You can keep waiting or try again."
+  }
+}

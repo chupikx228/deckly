@@ -1,0 +1,31 @@
+{
+  "session": {
+    "progress": "{{current}} из {{total}}",
+    "showAnswer": "Показать ответ",
+    "typeAnswerPlaceholder": "Введите ответ",
+    "remaining_one": "Осталась {{count}} карточка",
+    "remaining_few": "Осталось {{count}} карточки",
+    "remaining_many": "Осталось {{count}} карточек",
+    "remaining_other": "Осталось {{count}} карточки"
+  },
+  "rating": {
+    "again": "Снова",
+    "hard": "Трудно",
+    "good": "Хорошо",
+    "easy": "Легко"
+  },
+  "summary": {
+    "title": "Сессия завершена",
+    "reviewed_one": "Повторена {{count}} карточка",
+    "reviewed_few": "Повторено {{count}} карточки",
+    "reviewed_many": "Повторено {{count}} карточек",
+    "reviewed_other": "Повторено {{count}} карточки",
+    "accuracy": "{{value}} правильных",
+    "duration": "Заняло {{value}}",
+    "backToDeck": "Вернуться к колоде"
+  },
+  "empty": {
+    "title": "Всё повторено",
+    "description": "В этой колоде сейчас нечего повторять. Возвращайтесь позже."
+  }
+}

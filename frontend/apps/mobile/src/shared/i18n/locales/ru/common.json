@@ -1,0 +1,25 @@
+{
+  "actions": {
+    "cancel": "Отмена",
+    "confirm": "Подтвердить",
+    "save": "Сохранить",
+    "delete": "Удалить",
+    "edit": "Изменить",
+    "retry": "Повторить",
+    "close": "Закрыть",
+    "continue": "Продолжить",
+    "back": "Назад",
+    "done": "Готово"
+  },
+  "state": {
+    "loading": "Загрузка",
+    "offline": "Нет соединения"
+  },
+  "units": {
+    "minutes": "{{count}} мин",
+    "hours": "{{count}} ч",
+    "days": "{{count}} д",
+    "months": "{{count}} мес",
+    "years": "{{count}} г"
+  }
+}

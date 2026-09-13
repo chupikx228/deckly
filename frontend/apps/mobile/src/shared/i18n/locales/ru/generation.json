@@ -1,0 +1,69 @@
+{
+  "wizard": {
+    "title": "Что хотите выучить?",
+    "topicPlaceholder": "Знаки ПДД, неправильные глаголы, цикл Кребса…",
+    "cardCount": "Количество карточек",
+    "difficulty": "Уровень",
+    "contentLanguage": "Язык карточек",
+    "noteTypes": "Типы карточек",
+    "includeImages": "Добавлять картинки",
+    "instructionsPlaceholder": "На чём сделать акцент?",
+    "submit": "Сгенерировать",
+    "instructionsLabel": "Дополнительные указания"
+  },
+  "difficulty": {
+    "beginner": "Начальный",
+    "intermediate": "Средний",
+    "advanced": "Продвинутый"
+  },
+  "noteType": {
+    "basic": "Вопрос и ответ",
+    "basic_reversed": "В обе стороны",
+    "basic_optional_reversed": "Обратная по желанию",
+    "basic_type_in": "Ввести ответ",
+    "cloze": "Заполнить пропуск",
+    "multiple_choice": "Выбор из вариантов",
+    "image_occlusion": "Скрытые области на картинке"
+  },
+  "stage": {
+    "planning": "Составляю план темы",
+    "retrieving_sources": "Ищу источники",
+    "parsing_sources": "Разбираю материал",
+    "generating_cards": "Пишу карточки",
+    "fetching_media": "Подбираю картинки",
+    "finalizing": "Заканчиваю"
+  },
+  "preview": {
+    "title": "Проверьте перед сохранением",
+    "description": "Просмотрите карточки, поправьте всё, что выглядит неверно, и сохраните колоду.",
+    "noteCount_one": "Сгенерирована {{count}} карточка",
+    "noteCount_few": "Сгенерировано {{count}} карточки",
+    "noteCount_many": "Сгенерировано {{count}} карточек",
+    "noteCount_other": "Сгенерировано {{count}} карточки",
+    "sources": "Источники",
+    "regenerate": "Сгенерировать заново",
+    "discard": "Отклонить",
+    "save": "Сохранить колоду",
+    "skipped_one": "{{count}} карточка пропущена — не удалось прочитать",
+    "skipped_few": "{{count}} карточки пропущены — не удалось прочитать",
+    "skipped_many": "{{count}} карточек пропущено — не удалось прочитать",
+    "skipped_other": "{{count}} карточки пропущены — не удалось прочитать",
+    "empty": "Не получилось сгенерировать ничего пригодного. Попробуйте уточнить тему."
+  },
+  "rejection": {
+    "too_easy": "Слишком просто",
+    "too_hard": "Слишком сложно",
+    "incorrect": "Ошибка в карточке",
+    "duplicate": "Дубликат",
+    "off_topic": "Не по теме",
+    "other": "Другое"
+  },
+  "cancel": {
+    "action": "Отменить генерацию",
+    "confirmTitle": "Отменить генерацию?",
+    "confirmDescription": "Сгенерированные карточки будут потеряны."
+  },
+  "status": {
+    "cancelled": "Генерация отменена"
+  }
+}

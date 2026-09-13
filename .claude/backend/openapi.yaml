@@ -1,0 +1,484 @@
+openapi: 3.1.0
+
+info:
+  title: Deckly Generation API
+  version: 1.0.0
+  description: >
+    Generation API for the Deckly mobile app. The app is offline-first: local SQLite owns
+    all user data and scheduling runs on the device. This API exists only to turn a topic
+    into a set of reviewable notes. There are deliberately no deck, review, auth or sync
+    endpoints in v1.
+
+servers:
+  - url: https://api.example.com/v1
+    description: Production
+  - url: http://localhost:8000/v1
+    description: Local development
+
+tags:
+  - name: generations
+    description: Asynchronous deck generation jobs
+  - name: notes
+    description: Single-note operations
+  - name: system
+
+paths:
+  /generations:
+    post:
+      tags: [generations]
+      operationId: createGeneration
+      summary: Start a deck generation job
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/ClientId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerationRequest'
+      responses:
+        '202':
+          description: Job accepted and queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerationJobCreated'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+
+  /generations/{jobId}:
+    get:
+      tags: [generations]
+      operationId: getGeneration
+      summary: Poll a generation job
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+        - $ref: '#/components/parameters/ClientId'
+      responses:
+        '200':
+          description: >
+            Current job state. A failed generation is reported here with status "failed",
+            not as an HTTP error.
+          headers:
+            Retry-After:
+              description: Seconds to wait before polling again. Sent while non-terminal.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerationJob'
+        '404':
+          $ref: '#/components/responses/Problem'
+
+  /generations/{jobId}/cancel:
+    post:
+      tags: [generations]
+      operationId: cancelGeneration
+      summary: Cancel a running job
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+        - $ref: '#/components/parameters/ClientId'
+      responses:
+        '204':
+          description: Cancellation accepted
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+
+  /notes/regenerate:
+    post:
+      tags: [notes]
+      operationId: regenerateNote
+      summary: Regenerate a single rejected note
+      description: Synchronous and cheap. Must respond within 10 seconds.
+      parameters:
+        - $ref: '#/components/parameters/ClientId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegenerateNoteRequest'
+      responses:
+        '200':
+          description: A replacement note
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeneratedNote'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+
+  /health:
+    get:
+      tags: [system]
+      operationId: getHealth
+      summary: Service health
+      parameters:
+        - name: X-Client-Id
+          in: header
+          required: false
+          description: >
+            Optional here. When supplied, the response includes this client's current
+            generation quota, so the app can show the remaining budget before the wizard.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Service is available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+components:
+  parameters:
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        Client-generated UUID. Replaying a request with the same key returns the original
+        job instead of starting a second one.
+      schema:
+        type: string
+        format: uuid
+
+    ClientId:
+      name: X-Client-Id
+      in: header
+      required: true
+      description: Anonymous device identifier, used for rate limiting.
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    Problem:
+      description: RFC 9457 problem details
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    NoteType:
+      type: string
+      enum:
+        - basic
+        - basic_reversed
+        - basic_optional_reversed
+        - basic_type_in
+        - cloze
+        - multiple_choice
+        - image_occlusion
+
+    Difficulty:
+      type: string
+      enum: [beginner, intermediate, advanced]
+
+    JobStatus:
+      type: string
+      enum: [queued, running, succeeded, failed, cancelled]
+
+    JobStage:
+      type: string
+      enum:
+        - planning
+        - retrieving_sources
+        - parsing_sources
+        - generating_cards
+        - fetching_media
+        - finalizing
+
+    ErrorCode:
+      type: string
+      enum:
+        - VALIDATION_FAILED
+        - TOPIC_REJECTED
+        - RATE_LIMITED
+        - JOB_NOT_FOUND
+        - JOB_ALREADY_TERMINAL
+        - GENERATION_FAILED
+        - UPSTREAM_UNAVAILABLE
+        - INTERNAL_ERROR
+
+    RejectionReason:
+      type: string
+      enum: [too_easy, too_hard, incorrect, duplicate, off_topic, other]
+
+    GenerationRequest:
+      type: object
+      required: [topic, language, cardCount]
+      additionalProperties: false
+      properties:
+        topic:
+          type: string
+          minLength: 3
+          maxLength: 200
+        language:
+          type: string
+          description: BCP 47 tag. The language of the cards, not of the interface.
+          example: ru
+        cardCount:
+          type: integer
+          minimum: 5
+          maximum: 200
+          description: A target, not a guarantee. Fewer notes may be returned.
+        difficulty:
+          $ref: '#/components/schemas/Difficulty'
+        noteTypes:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          default: [basic]
+          items:
+            $ref: '#/components/schemas/NoteType'
+        includeImages:
+          type: boolean
+          default: false
+        instructions:
+          type: string
+          maxLength: 500
+
+    GenerationJobCreated:
+      type: object
+      required: [jobId, status, createdAt]
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        createdAt:
+          type: string
+          format: date-time
+        quota:
+          $ref: '#/components/schemas/Quota'
+          description: This client's generation budget after this job was accepted.
+
+    GenerationJob:
+      type: object
+      required: [jobId, status, progress, createdAt, updatedAt]
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        stage:
+          oneOf:
+            - $ref: '#/components/schemas/JobStage'
+            - type: 'null'
+        progress:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Monotonic. Must never decrease between polls.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        result:
+          oneOf:
+            - $ref: '#/components/schemas/GenerationResult'
+            - type: 'null'
+          description: Present only when status is "succeeded".
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/Problem'
+            - type: 'null'
+          description: Present only when status is "failed".
+
+    GenerationResult:
+      type: object
+      required: [deck, notes]
+      properties:
+        deck:
+          $ref: '#/components/schemas/GeneratedDeck'
+        notes:
+          type: array
+          items:
+            $ref: '#/components/schemas/GeneratedNote'
+
+    GeneratedDeck:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          maxLength: 120
+        description:
+          type: string
+          maxLength: 500
+        tags:
+          type: array
+          items:
+            type: string
+
+    GeneratedNote:
+      type: object
+      required: [clientId, noteType, fields]
+      properties:
+        clientId:
+          type: string
+          format: uuid
+          description: Unique within a result. The client tracks edits and regenerations by it.
+        noteType:
+          $ref: '#/components/schemas/NoteType'
+        fields:
+          type: object
+          description: >
+            Shape depends on noteType. basic/basic_reversed/basic_type_in: front, back.
+            cloze: text with {{cN::...}} markers, optional extra. multiple_choice: question,
+            answer, distractors. image_occlusion: imageId, regions, optional extra.
+          additionalProperties: true
+        media:
+          type: array
+          items:
+            $ref: '#/components/schemas/Media'
+        sources:
+          type: array
+          description: Required for generated content. Shown to the user so claims can be verified.
+          items:
+            $ref: '#/components/schemas/Source'
+        tags:
+          type: array
+          items:
+            type: string
+
+    Media:
+      type: object
+      required: [mediaId, kind, url, license]
+      properties:
+        mediaId:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [image, audio]
+        url:
+          type: string
+          format: uri
+          description: Directly downloadable without auth, valid for at least 24 hours.
+        alt:
+          type: string
+          description: Mandatory for images. Accessibility text and download-failure fallback.
+        width:
+          type: integer
+        height:
+          type: integer
+        license:
+          type: string
+          description: Required. Content with no known licence must not be returned.
+
+    Source:
+      type: object
+      required: [title, url]
+      properties:
+        title:
+          type: string
+        url:
+          type: string
+          format: uri
+        retrievedAt:
+          type: string
+          format: date-time
+
+    RegenerateNoteRequest:
+      type: object
+      required: [topic, language, noteType, rejectedNote]
+      additionalProperties: false
+      properties:
+        topic:
+          type: string
+          minLength: 3
+          maxLength: 200
+        language:
+          type: string
+        noteType:
+          $ref: '#/components/schemas/NoteType'
+        rejectedNote:
+          type: object
+          required: [fields]
+          properties:
+            fields:
+              type: object
+              additionalProperties: true
+        reason:
+          $ref: '#/components/schemas/RejectionReason'
+
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+          description: Not localised. For logs. The client never renders this directly.
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        retryAfterSeconds:
+          type: integer
+
+    Health:
+      type: object
+      required: [status, version]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        version:
+          type: string
+        quota:
+          $ref: '#/components/schemas/Quota'
+          description: Present only when the request carried an X-Client-Id header.
+
+    Quota:
+      type: object
+      required: [limit, remaining, resetsAt]
+      description: A client's generation budget. Counts generation jobs per client, per day.
+      properties:
+        limit:
+          type: integer
+          minimum: 0
+          description: Jobs allowed in the current window.
+        remaining:
+          type: integer
+          minimum: 0
+          description: Jobs left in the current window. Zero means the next request gets 429.
+        resetsAt:
+          type: string
+          format: date-time
+          description: When the window resets and remaining returns to limit.

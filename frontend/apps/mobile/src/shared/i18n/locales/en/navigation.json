@@ -1,0 +1,21 @@
+{
+  "tabs": {
+    "home": "Home",
+    "create": "Create",
+    "decks": "Decks",
+    "profile": "Profile"
+  },
+  "screens": {
+    "home": "Home",
+    "create": "Create a deck",
+    "decks": "Your decks",
+    "profile": "Profile",
+    "deckDetail": "Deck",
+    "noteEditor": "Edit note",
+    "study": "Study",
+    "sessionSummary": "Session complete",
+    "settings": "Settings",
+    "notFound": "Not found",
+    "generation": "Generating"
+  }
+}

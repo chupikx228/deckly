@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-background: 244 245 247;
+    --color-surface: 255 255 255;
+    --color-surface-raised: 255 255 255;
+    --color-border: 230 231 233;
+    --color-foreground: 11 13 18;
+    --color-muted: 104 106 110;
+    --color-primary: 91 75 247;
+    --color-primary-soft: 239 237 254;
+    --color-primary-foreground: 255 255 255;
+    --color-accent: 255 138 76;
+    --color-success: 22 163 74;
+    --color-warning: 217 119 6;
+    --color-danger: 220 38 38;
+    --color-rating-again: 225 62 62;
+    --color-rating-hard: 217 119 6;
+    --color-rating-good: 22 163 74;
+    --color-rating-easy: 37 118 214;
+  }
+
+  .dark:root {
+    --color-background: 12 13 18;
+    --color-surface: 22 24 31;
+    --color-surface-raised: 31 34 43;
+    --color-border: 43 47 58;
+    --color-foreground: 240 241 245;
+    --color-muted: 147 154 170;
+    --color-primary: 138 132 255;
+    --color-primary-soft: 38 36 66;
+    --color-primary-foreground: 14 15 20;
+    --color-accent: 255 158 106;
+    --color-success: 74 222 128;
+    --color-warning: 251 191 36;
+    --color-danger: 248 113 113;
+    --color-rating-again: 248 113 113;
+    --color-rating-hard: 251 191 36;
+    --color-rating-good: 74 222 128;
+    --color-rating-easy: 96 165 250;
+  }
+}

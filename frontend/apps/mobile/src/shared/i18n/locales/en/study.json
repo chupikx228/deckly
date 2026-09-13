@@ -1,0 +1,27 @@
+{
+  "session": {
+    "progress": "{{current}} of {{total}}",
+    "showAnswer": "Show answer",
+    "typeAnswerPlaceholder": "Type your answer",
+    "remaining_one": "{{count}} card left",
+    "remaining_other": "{{count}} cards left"
+  },
+  "rating": {
+    "again": "Again",
+    "hard": "Hard",
+    "good": "Good",
+    "easy": "Easy"
+  },
+  "summary": {
+    "title": "Session complete",
+    "reviewed_one": "{{count}} card reviewed",
+    "reviewed_other": "{{count}} cards reviewed",
+    "accuracy": "{{value}} correct",
+    "duration": "Took {{value}}",
+    "backToDeck": "Back to deck"
+  },
+  "empty": {
+    "title": "All caught up",
+    "description": "Nothing is due in this deck right now. Come back later."
+  }
+}

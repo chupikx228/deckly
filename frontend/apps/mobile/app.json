@@ -1,0 +1,60 @@
+{
+  "expo": {
+    "name": "Deckly",
+    "slug": "deckly",
+    "scheme": "deckly",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.deckly.mobile"
+    },
+    "android": {
+      "package": "com.deckly.mobile",
+      "adaptiveIcon": {
+        "backgroundColor": "#0C0D12",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-router",
+        {
+          "root": "./app"
+        }
+      ],
+      "expo-localization",
+      "expo-sqlite",
+      [
+        "expo-font",
+        {
+          "fonts": ["./assets/fonts/BricolageGrotesque-ExtraBold.ttf"]
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#F4F5F7",
+          "dark": {
+            "backgroundColor": "#0C0D12"
+          }
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "tsconfigPaths": true
+    }
+  }
+}

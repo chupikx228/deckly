@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: true
+
+jobs:
+  frontend:
+    name: Frontend & packages (strict)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No JavaScript in source (TypeScript-only rule)
+        run: |
+          matches=$(git ls-files \
+            'apps/*/src/**/*.js' 'apps/*/src/**/*.jsx' \
+            'packages/*/src/**/*.js' 'packages/*/src/**/*.jsx')
+          if [ -n "$matches" ]; then
+            echo "::error::JavaScript files found in source. This repo is TypeScript-only."
+            echo "$matches"
+            exit 1
+          fi
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (incl. OpenAPI/Zod contract assertions)
+        run: pnpm typecheck
+
+      - name: Lint (FSD boundaries + strict TS + complexity)
+        run: pnpm lint
+
+      - name: Format check (Prettier)
+        run: pnpm format:check
+
+      - name: Test
+        run: pnpm test
+
+  contract:
+    name: API contract (OpenAPI)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Lint OpenAPI spec
+        run: pnpm api:lint
+      - name: Verify generated types are in sync with the spec
+        run: |
+          pnpm api:generate
+          if ! git diff --quiet -- packages/api-contract/src/generated; then
+            echo "::error::Generated API types are stale. Run 'pnpm api:generate' and commit."
+            git diff -- packages/api-contract/src/generated
+            exit 1
+          fi
+
+  backend:
+    name: Backend (SOLID & layering gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run backend checks when code exists, otherwise enforce the ruleset is documented
+        run: |
+          code=$(find backend apps/backend services/backend -type f \
+            \( -name '*.py' -o -name 'pyproject.toml' \) 2>/dev/null | head -1)
+          if [ -n "$code" ]; then
+            echo "Backend code detected — its own CI gate is not wired yet."
+            echo "::error::Backend code exists but its CI gate is not implemented. See .claude/backend/engineering-guide.md (CI enforcement)."
+            exit 1
+          fi
+          echo "No backend code yet. Enforcement ruleset lives in .claude/backend/engineering-guide.md."
+          test -f .claude/backend/engineering-guide.md

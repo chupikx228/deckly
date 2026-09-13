@@ -1,0 +1,65 @@
+{
+  "wizard": {
+    "title": "What do you want to learn?",
+    "topicPlaceholder": "Road signs, irregular verbs, Krebs cycle…",
+    "cardCount": "Number of cards",
+    "difficulty": "Level",
+    "contentLanguage": "Card language",
+    "noteTypes": "Card types",
+    "includeImages": "Include images",
+    "instructionsPlaceholder": "Anything specific to focus on?",
+    "submit": "Generate",
+    "instructionsLabel": "Extra instructions"
+  },
+  "difficulty": {
+    "beginner": "Beginner",
+    "intermediate": "Intermediate",
+    "advanced": "Advanced"
+  },
+  "noteType": {
+    "basic": "Question and answer",
+    "basic_reversed": "Both directions",
+    "basic_optional_reversed": "Optional reverse",
+    "basic_type_in": "Type the answer",
+    "cloze": "Fill in the blank",
+    "multiple_choice": "Multiple choice",
+    "image_occlusion": "Hidden image regions"
+  },
+  "stage": {
+    "planning": "Working out the structure",
+    "retrieving_sources": "Searching for sources",
+    "parsing_sources": "Reading the material",
+    "generating_cards": "Writing the cards",
+    "fetching_media": "Finding images",
+    "finalizing": "Finishing up"
+  },
+  "preview": {
+    "title": "Review before saving",
+    "description": "Check the cards, edit anything that looks wrong, then save the deck.",
+    "noteCount_one": "{{count}} card generated",
+    "noteCount_other": "{{count}} cards generated",
+    "sources": "Sources",
+    "regenerate": "Regenerate",
+    "discard": "Discard",
+    "save": "Save deck",
+    "skipped_one": "{{count}} card was skipped as unreadable",
+    "skipped_other": "{{count}} cards were skipped as unreadable",
+    "empty": "Nothing usable was generated. Try a more specific topic."
+  },
+  "rejection": {
+    "too_easy": "Too easy",
+    "too_hard": "Too hard",
+    "incorrect": "Incorrect",
+    "duplicate": "Duplicate",
+    "off_topic": "Off topic",
+    "other": "Something else"
+  },
+  "cancel": {
+    "action": "Cancel generation",
+    "confirmTitle": "Cancel generation?",
+    "confirmDescription": "The cards generated so far will be discarded."
+  },
+  "status": {
+    "cancelled": "Generation cancelled"
+  }
+}

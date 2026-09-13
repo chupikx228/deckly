@@ -1,0 +1,71 @@
+{
+  "card": {
+    "dueCount_one": "{{count}} карточка к повторению",
+    "dueCount_few": "{{count}} карточки к повторению",
+    "dueCount_many": "{{count}} карточек к повторению",
+    "dueCount_other": "{{count}} карточки к повторению",
+    "totalCount_one": "{{count}} карточка",
+    "totalCount_few": "{{count}} карточки",
+    "totalCount_many": "{{count}} карточек",
+    "totalCount_other": "{{count}} карточки",
+    "noneDue": "Сегодня повторять нечего",
+    "noneDueHint": "Добавьте колоду, чтобы видеть повторения здесь",
+    "lastStudied": "Последнее повторение {{date}}"
+  },
+  "actions": {
+    "study": "Повторять",
+    "addNote": "Добавить карточку",
+    "createDeck": "Новая колода",
+    "rename": "Переименовать",
+    "archive": "В архив",
+    "deleteNote": "Удалить карточку",
+    "deleteDeck": "Удалить колоду"
+  },
+  "empty": {
+    "title": "Колод пока нет",
+    "description": "Создайте первую колоду, чтобы начать учиться.",
+    "notesTitle": "Колода пустая",
+    "notesDescription": "Добавьте первую карточку."
+  },
+  "list": {
+    "recent": "Недавние",
+    "all": "Все колоды",
+    "searchPlaceholder": "Поиск по колодам"
+  },
+  "form": {
+    "titleLabel": "Название колоды",
+    "titlePlaceholder": "Неправильные глаголы",
+    "descriptionLabel": "Описание",
+    "descriptionPlaceholder": "Необязательно",
+    "create": "Создать колоду"
+  },
+  "note": {
+    "invalid": "Не удалось прочитать эту карточку",
+    "frontLabel": "Лицевая сторона",
+    "frontPlaceholder": "dog",
+    "backLabel": "Обратная сторона",
+    "backPlaceholder": "собака",
+    "textLabel": "Текст с пропусками",
+    "textPlaceholder": "Люди высадились на Луне в {{example}}",
+    "extraLabel": "Дополнение",
+    "extraPlaceholder": "Необязательный контекст рядом с ответом",
+    "clozeHelp": "Оберните скрываемое в {{syntax}}. Каждый номер станет отдельной карточкой.",
+    "clozeInvalid": "Добавьте хотя бы один пропуск, нумерация с 1 без пропусков.",
+    "typeLabel": "Тип карточки",
+    "cardCount_one": "Даёт {{count}} карточку",
+    "cardCount_few": "Даёт {{count}} карточки",
+    "cardCount_many": "Даёт {{count}} карточек",
+    "cardCount_other": "Даёт {{count}} карточки",
+    "newTitle": "Новая карточка",
+    "editTitle": "Редактирование карточки",
+    "typeHintBasic": "Одна карточка: лицо → оборот",
+    "typeHintReversed": "Две карточки, в обе стороны",
+    "typeHintCloze": "По карточке на каждый пропуск",
+    "previewLabel": "Предпросмотр",
+    "previewEmpty": "Заполните поля — здесь появится карточка"
+  },
+  "deleteConfirm": {
+    "title": "Удалить колоду?",
+    "description": "Все её карточки и вся история повторений будут удалены. Отменить это нельзя."
+  }
+}

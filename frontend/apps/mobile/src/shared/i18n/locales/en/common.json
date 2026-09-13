@@ -1,0 +1,25 @@
+{
+  "actions": {
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "save": "Save",
+    "delete": "Delete",
+    "edit": "Edit",
+    "retry": "Try again",
+    "close": "Close",
+    "continue": "Continue",
+    "back": "Back",
+    "done": "Done"
+  },
+  "state": {
+    "loading": "Loading",
+    "offline": "No connection"
+  },
+  "units": {
+    "minutes": "{{count}}m",
+    "hours": "{{count}}h",
+    "days": "{{count}}d",
+    "months": "{{count}}mo",
+    "years": "{{count}}y"
+  }
+}

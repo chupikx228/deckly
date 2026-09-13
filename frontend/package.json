@@ -1,0 +1,33 @@
+{
+  "name": "deckly",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "mobile": "pnpm --filter @deckly/mobile",
+    "start": "pnpm --filter @deckly/mobile start",
+    "ios": "pnpm --filter @deckly/mobile ios",
+    "android": "pnpm --filter @deckly/mobile android",
+    "prebuild": "pnpm --filter @deckly/mobile prebuild",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "format": "prettier --write --config ./.prettierrc.json \"**/*.{ts,tsx,json,md,yaml,yml}\" \"../*.md\" \"../.claude/**/*.{md,json,yaml,yml}\" \"../.github/**/*.{yml,yaml}\" \"../backend/**/*.{md,json,yaml,yml}\"",
+    "format:check": "prettier --check --config ./.prettierrc.json \"**/*.{ts,tsx,json,md,yaml,yml}\" \"../*.md\" \"../.claude/**/*.{md,json,yaml,yml}\" \"../.github/**/*.{yml,yaml}\" \"../backend/**/*.{md,json,yaml,yml}\"",
+    "api:generate": "pnpm --filter @deckly/api-contract generate",
+    "api:lint": "redocly lint generation",
+    "ci": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test && pnpm api:lint",
+    "prepare": "cd .. && husky"
+  },
+  "devDependencies": {
+    "@redocly/cli": "^2.51.0",
+    "eslint": "^9.39.5",
+    "husky": "^9.1.7",
+    "prettier": "^3.4.2",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.69.0"
+  }
+}

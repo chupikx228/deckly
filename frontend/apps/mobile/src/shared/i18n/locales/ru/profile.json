@@ -1,0 +1,32 @@
+{
+  "stats": {
+    "title": "Ваш прогресс",
+    "streak_one": "{{count}} день подряд",
+    "streak_few": "{{count}} дня подряд",
+    "streak_many": "{{count}} дней подряд",
+    "streak_other": "{{count}} дня подряд",
+    "reviewedToday_one": "{{count}} повторение сегодня",
+    "reviewedToday_few": "{{count}} повторения сегодня",
+    "reviewedToday_many": "{{count}} повторений сегодня",
+    "reviewedToday_other": "{{count}} повторения сегодня",
+    "totalCards_one": "Выучена {{count}} карточка",
+    "totalCards_few": "Выучено {{count}} карточки",
+    "totalCards_many": "Выучено {{count}} карточек",
+    "totalCards_other": "Выучено {{count}} карточки",
+    "retention": "Удержание {{value}}"
+  },
+  "settings": {
+    "title": "Настройки",
+    "appearance": "Внешний вид",
+    "theme": "Тема",
+    "themeSystem": "Как в системе",
+    "themeLight": "Светлая",
+    "themeDark": "Тёмная",
+    "language": "Язык интерфейса",
+    "contentLanguage": "Язык карточек по умолчанию",
+    "scheduling": "Планирование",
+    "dailyNewLimit": "Новых карточек в день",
+    "dailyReviewLimit": "Повторений в день",
+    "targetRetention": "Целевое удержание"
+  }
+}

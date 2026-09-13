@@ -1,0 +1,26 @@
+{
+  "stats": {
+    "title": "Your progress",
+    "streak_one": "{{count}} day streak",
+    "streak_other": "{{count}} day streak",
+    "reviewedToday_one": "{{count}} review today",
+    "reviewedToday_other": "{{count}} reviews today",
+    "totalCards_one": "{{count}} card learned",
+    "totalCards_other": "{{count}} cards learned",
+    "retention": "Retention {{value}}"
+  },
+  "settings": {
+    "title": "Settings",
+    "appearance": "Appearance",
+    "theme": "Theme",
+    "themeSystem": "System",
+    "themeLight": "Light",
+    "themeDark": "Dark",
+    "language": "Interface language",
+    "contentLanguage": "Default card language",
+    "scheduling": "Scheduling",
+    "dailyNewLimit": "New cards per day",
+    "dailyReviewLimit": "Reviews per day",
+    "targetRetention": "Target retention"
+  }
+}

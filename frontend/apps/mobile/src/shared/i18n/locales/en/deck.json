@@ -1,0 +1,65 @@
+{
+  "card": {
+    "dueCount_one": "{{count}} card due",
+    "dueCount_other": "{{count}} cards due",
+    "totalCount_one": "{{count}} card",
+    "totalCount_other": "{{count}} cards",
+    "noneDue": "Nothing due today",
+    "noneDueHint": "Add a deck to see reviews here",
+    "lastStudied": "Last studied {{date}}"
+  },
+  "actions": {
+    "study": "Study",
+    "addNote": "Add a card",
+    "createDeck": "New deck",
+    "rename": "Rename",
+    "archive": "Archive",
+    "deleteNote": "Delete card",
+    "deleteDeck": "Delete deck"
+  },
+  "empty": {
+    "title": "No decks yet",
+    "description": "Create your first deck to start learning.",
+    "notesTitle": "This deck is empty",
+    "notesDescription": "Add your first card to get started."
+  },
+  "list": {
+    "recent": "Recent",
+    "all": "All decks",
+    "searchPlaceholder": "Search decks"
+  },
+  "form": {
+    "titleLabel": "Deck name",
+    "titlePlaceholder": "Irregular verbs",
+    "descriptionLabel": "Description",
+    "descriptionPlaceholder": "Optional",
+    "create": "Create deck"
+  },
+  "note": {
+    "invalid": "This card could not be read",
+    "frontLabel": "Front",
+    "frontPlaceholder": "dog",
+    "backLabel": "Back",
+    "backPlaceholder": "собака",
+    "textLabel": "Text with blanks",
+    "textPlaceholder": "Humans landed on the moon in {{example}}",
+    "extraLabel": "Extra",
+    "extraPlaceholder": "Optional context shown with the answer",
+    "clozeHelp": "Wrap what should be hidden in {{syntax}}. Each number becomes its own card.",
+    "clozeInvalid": "Add at least one blank, numbered from 1 with no gaps.",
+    "typeLabel": "Card type",
+    "cardCount_one": "Makes {{count}} card",
+    "cardCount_other": "Makes {{count}} cards",
+    "newTitle": "New card",
+    "editTitle": "Edit card",
+    "typeHintBasic": "One card, front to back",
+    "typeHintReversed": "Two cards, one in each direction",
+    "typeHintCloze": "One card for every blank you mark",
+    "previewLabel": "Preview",
+    "previewEmpty": "Fill in the fields and the card will appear here"
+  },
+  "deleteConfirm": {
+    "title": "Delete this deck?",
+    "description": "Every card in it and its whole review history will be deleted. This cannot be undone."
+  }
+}
