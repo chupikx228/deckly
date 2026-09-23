@@ -43,7 +43,7 @@ frontend/             pnpm workspace — everything JavaScript/TypeScript
   apps/mobile/        Expo app — React Native, expo-router, Feature-Sliced Design
   packages/srs/       Scheduler interface + ts-fsrs (FSRS) implementation, pure and offline
   packages/api-contract/  TypeScript types + Zod schemas generated from the OpenAPI spec
-backend/              FastAPI + PostgreSQL + Arq — generation service (empty until it starts)
+backend/              FastAPI + PostgreSQL + Arq — generation service (see backend/README.md)
 .claude/
   docs/               Frontend guides — FSD, code style, state, i18n, data model
   backend/            API contract + engineering, testing & handoff guides
