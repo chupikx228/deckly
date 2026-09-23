@@ -8,11 +8,11 @@ services:
       POSTGRES_PASSWORD: deckly
       POSTGRES_DB: deckly
     ports:
-      - "5433:5432"
+      - '5433:5432'
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U deckly -d deckly"]
+      test: ['CMD-SHELL', 'pg_isready -U deckly -d deckly']
       interval: 2s
       timeout: 3s
       retries: 15
@@ -20,9 +20,9 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6380:6379"
+      - '6380:6379'
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ['CMD', 'redis-cli', 'ping']
       interval: 2s
       timeout: 3s
       retries: 15
