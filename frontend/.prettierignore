@@ -9,3 +9,7 @@ apps/mobile/drizzle
 
 **/dist
 **/generated
+
+../backend/.venv
+../backend/.pytest_cache
+../backend/.import_linter_cache

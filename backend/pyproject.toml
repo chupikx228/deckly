@@ -1,0 +1,119 @@
+[project]
+name = "deckly-backend"
+version = "0.1.0"
+description = "Deckly generation service"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "alembic>=1.20.0",
+    "arq>=0.28.0",
+    "asyncpg>=0.31.0",
+    "fastapi>=0.141.1",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "sqlalchemy[asyncio]>=2.0.54",
+    "uvicorn>=0.53.0",
+]
+
+[project.scripts]
+deckly-worker = "deckly.worker.main:main"
+
+[build-system]
+requires = ["uv_build>=0.12.4,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "deckly"
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13.1",
+    "import-linter>=2.15",
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.8",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D",
+    "CPY",
+    "COM812",
+    "ISC001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004"]
+"migrations/**" = ["INP001"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.pylint]
+max-args = 4
+max-statements = 40
+max-nested-blocks = 4
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+files = ["src", "tests", "migrations"]
+explicit_package_bases = true
+disallow_any_explicit = true
+disallow_any_unimported = true
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool", "possibly-undefined"]
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.importlinter]
+root_package = "deckly"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Dependencies point inward: entrypoints -> transport | infrastructure -> application -> domain"
+type = "layers"
+layers = [
+    "deckly.main : deckly.worker : deckly.config",
+    "deckly.transport | deckly.infrastructure",
+    "deckly.application",
+    "deckly.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "Domain and application stay free of I/O, HTTP and SDK types"
+type = "forbidden"
+source_modules = ["deckly.domain", "deckly.application"]
+forbidden_modules = [
+    "fastapi",
+    "starlette",
+    "uvicorn",
+    "sqlalchemy",
+    "asyncpg",
+    "alembic",
+    "redis",
+    "arq",
+    "pydantic_settings",
+]
+
+[[tool.importlinter.contracts]]
+name = "Transport reaches infrastructure only through application ports"
+type = "forbidden"
+source_modules = ["deckly.transport"]
+forbidden_modules = ["sqlalchemy", "asyncpg", "alembic", "redis", "arq", "pydantic_settings"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config"]
+xfail_strict = true
+filterwarnings = ["error"]

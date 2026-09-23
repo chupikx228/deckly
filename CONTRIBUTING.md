@@ -201,8 +201,9 @@ Defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
   the tests.
 - **API contract** — the OpenAPI spec is linted, and the build fails if the generated types have
   drifted from it.
-- **Backend** — a placeholder gate today: it passes while there is no backend code and fails the
-  moment backend code appears without its own CI, whose ruleset is in
-  [`.claude/backend/engineering-guide.md`](.claude/backend/engineering-guide.md).
+- **Backend** — `make check` (Ruff format check, Ruff lint, mypy strict, import-linter layering
+  contracts) and `make test`, run from `backend/`. The rest of the ruleset in
+  [`.claude/backend/engineering-guide.md`](.claude/backend/engineering-guide.md) → "CI
+  enforcement" (complexity budget, contract tests, coverage, audits) is still to be wired.
 
 A red CI is never merged.

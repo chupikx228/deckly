@@ -60,7 +60,7 @@ Do not revisit these without an explicit instruction from the user.
 │   └── packages/
 │       ├── srs/               Scheduler interface + ts-fsrs implementation
 │       └── api-contract/      TypeScript types generated from the OpenAPI spec
-└── backend/                   Python generation service (empty until it starts)
+└── backend/                   Python generation service (FastAPI, see backend/README.md)
 ```
 
 ## Toolchain constraints
