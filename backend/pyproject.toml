@@ -107,6 +107,36 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "Domain is pure: no I/O, clock, randomness, serialisation or schema types"
+type = "forbidden"
+source_modules = ["deckly.domain"]
+forbidden_modules = [
+    "pydantic",
+    "pydantic_core",
+    "httpx",
+    "anthropic",
+    "openai",
+    "asyncio",
+    "concurrent",
+    "http",
+    "io",
+    "json",
+    "logging",
+    "os",
+    "pathlib",
+    "random",
+    "secrets",
+    "shutil",
+    "socket",
+    "sqlite3",
+    "ssl",
+    "subprocess",
+    "tempfile",
+    "threading",
+    "time",
+]
+
+[[tool.importlinter.contracts]]
 name = "Transport reaches infrastructure only through application ports"
 type = "forbidden"
 source_modules = ["deckly.transport"]
