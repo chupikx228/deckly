@@ -28,9 +28,13 @@ module-name = "deckly"
 dev = [
     "httpx2>=2.13.1",
     "import-linter>=2.15",
+    "jsonschema>=4.26.0",
     "mypy>=2.3.1",
     "pytest>=9.1.1",
+    "pyyaml>=6.0.3",
     "ruff>=0.16.8",
+    "types-jsonschema>=4.26.0.20260518",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [tool.ruff]
@@ -144,6 +148,7 @@ forbidden_modules = ["sqlalchemy", "asyncpg", "alembic", "redis", "arq", "pydant
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["--strict-markers", "--strict-config"]
+addopts = ["--strict-markers", "--strict-config", "-m", "not integration"]
+markers = ["integration: needs the local Postgres and Redis (make up && make migrate)"]
 xfail_strict = true
 filterwarnings = ["error"]

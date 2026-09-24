@@ -16,6 +16,7 @@ from deckly.application.exceptions import (
 )
 from deckly.domain.exceptions import (
     DomainError,
+    InvalidGenerationRequestError,
     JobAlreadyTerminalError,
     JobNotFoundError,
     TopicRejectedError,
@@ -39,6 +40,7 @@ VALIDATION_FAILED = ProblemKind(HTTPStatus.BAD_REQUEST, ErrorCode.VALIDATION_FAI
 INTERNAL_ERROR = ProblemKind(HTTPStatus.INTERNAL_SERVER_ERROR, ErrorCode.INTERNAL_ERROR, "Internal error")
 
 PROBLEM_KINDS: Mapping[type[Exception], ProblemKind] = {
+    InvalidGenerationRequestError: VALIDATION_FAILED,
     JobNotFoundError: ProblemKind(HTTPStatus.NOT_FOUND, ErrorCode.JOB_NOT_FOUND, "Job not found"),
     JobAlreadyTerminalError: ProblemKind(
         HTTPStatus.CONFLICT, ErrorCode.JOB_ALREADY_TERMINAL, "Job already terminal"

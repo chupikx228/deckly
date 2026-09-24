@@ -7,9 +7,9 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from deckly.config import DatabaseSettings
-from deckly.infrastructure.database import Base
+from deckly.infrastructure import tables
 
-target_metadata = Base.metadata
+target_metadata = tables.metadata
 
 if context.config.config_file_name is not None:
     fileConfig(context.config.config_file_name)
