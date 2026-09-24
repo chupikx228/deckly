@@ -4,6 +4,7 @@ from deckly.domain.exceptions import InvalidGenerationRequestError
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE
+from tests.domain.builders import unregister
 
 
 def request_with(*note_types: NoteType) -> GenerationRequest:
@@ -34,11 +35,12 @@ def test_duplicate_note_types_are_rejected() -> None:
         request_with(NoteType.BASIC, NoteType.CLOZE, NoteType.BASIC)
 
 
-@pytest.mark.parametrize("unregistered", sorted(set(NoteType) - set(NOTE_FIELDS_BY_TYPE)))
-def test_note_type_without_a_field_shape_is_rejected(unregistered: NoteType) -> None:
-    with pytest.raises(InvalidGenerationRequestError, match=unregistered):
-        request_with(NoteType.BASIC, unregistered)
+def test_note_type_without_a_field_shape_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    unregister(monkeypatch, NoteType.CLOZE)
+
+    with pytest.raises(InvalidGenerationRequestError, match="cloze"):
+        request_with(NoteType.BASIC, NoteType.CLOZE)
 
 
-def test_basic_optional_reversed_is_still_unregistered() -> None:
-    assert NoteType.BASIC_OPTIONAL_REVERSED not in NOTE_FIELDS_BY_TYPE
+def test_basic_optional_reversed_can_be_requested() -> None:
+    assert request_with(NoteType.BASIC_OPTIONAL_REVERSED).note_types == (NoteType.BASIC_OPTIONAL_REVERSED,)

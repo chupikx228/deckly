@@ -270,7 +270,8 @@ The model and search providers _will_ be slow, rate-limited or down. Design for 
 - Filter **generated** content for policy violations before it reaches the client. The model's
   output is untrusted; a topic passing the gate does not mean every generated card is safe.
 - `sources` exist so the user can verify claims — they are a product feature, not decoration.
-  Return real, reachable sources for generated factual content.
+  Every returned note carries at least one real, reachable source; a note without one is
+  dropped.
 - Media without a known `license` must not be returned at all. Licensing is a legal
   requirement, not a nice-to-have.
 

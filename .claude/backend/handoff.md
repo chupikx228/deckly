@@ -35,8 +35,8 @@ what is still yours to do.
 
 - **Scope is locked:** the backend does AI generation only. No deck/note/card CRUD, no review,
   no auth, no sync in v1. Adding any of those is a contract change, not a quiet addition.
-- **Topic:** open-domain — any topic; the model generates the cards. Content policy still gates
-  (`TOPIC_REJECTED`).
+- **Topic:** open-domain — any topic; the model generates the cards. Every note must still carry
+  at least one source or it is dropped. Content policy still gates (`TOPIC_REJECTED`).
 - **Images:** sourced by the model when `includeImages` is set. Every image must carry a real
   `license` and `alt`, or it is dropped — never ship unlicensed media.
 - **Quota:** N generation jobs per day per client, already specced in the contract (`Quota` on

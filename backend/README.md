@@ -19,7 +19,10 @@ migrations/          Alembic (async)
 
 Dependencies point inward only. `make check` runs import-linter, which fails the build if
 `domain` or `application` import an outer layer or an I/O/SDK package (FastAPI, SQLAlchemy,
-Redis, Arq…), or if `transport` reaches infrastructure directly.
+Redis, Arq…), or if `transport` reaches infrastructure directly. Ruff's `TID251` (banned-api,
+scoped to `src/deckly/domain/` in `pyproject.toml`) also fails it if domain code reads the clock
+(`datetime.now()`, `utcnow()`, `today()`) or generates ids (`uuid4()`, `uuid1()`) instead of
+receiving them as arguments.
 
 ## Errors
 

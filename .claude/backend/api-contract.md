@@ -69,7 +69,7 @@ Request:
 
 | Field           | Required | Notes                                                                   |
 | --------------- | -------- | ----------------------------------------------------------------------- |
-| `topic`         | yes      | 3–200 characters after trimming                                         |
+| `topic`         | yes      | 3–200 characters after trimming, at least 3 of them visible (see below) |
 | `language`      | yes      | BCP 47 tag. The language of the **cards**, not the interface.           |
 | `cardCount`     | yes      | 5–200. A target, not a guarantee; the response may return fewer.        |
 | `difficulty`    | no       | `beginner` \| `intermediate` \| `advanced`. Defaults to `intermediate`. |
@@ -83,10 +83,16 @@ The server also enforces these rules, which the schema cannot express. Each one 
 - **`topic` is trimmed before its length is checked.** Leading and trailing whitespace is
   removed, and the result must be 3–200 characters. A blank or whitespace-only topic such as
   `"   "` is rejected. The trimmed value is what the server stores and generates from.
-- **`topic` must contain at least one visible character.** A topic made only of whitespace,
-  control characters, format characters (zero-width space, BOM, zero-width joiner, bidi
-  marks) and combining marks is rejected, whatever its length. This is the same definition of
-  blank the server applies to generated deck titles and note fields.
+- **`topic` must contain at least 3 visible characters.** Only characters that render count
+  toward the minimum. These do not: whitespace, control characters, format characters
+  (zero-width space, BOM, zero-width joiner, bidi marks), combining marks, and characters that
+  render blank — the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), the blank Braille
+  pattern (U+2800), U+1D159 and the reserved default-ignorable code points. A combining mark
+  counts with the letter it attaches to, and a space between words does not count. So
+  `"a\u200Bb"` and `"a b"` are rejected even though each is 3 characters long, and a topic
+  made only of such characters is rejected whatever its length. This is the same definition
+  of blank the server applies to generated deck titles and note fields. The 200-character
+  maximum still counts every character.
 - **`cardCount` must be a plain JSON integer literal.** `40` is accepted. `1e2`, `4e1` and
   `40.0` are rejected even though they are whole numbers.
 - **`language` must be a well-formed BCP 47 tag.** The server checks the syntax from RFC 5646,
@@ -96,7 +102,7 @@ The server also enforces these rules, which the schema cannot express. Each one 
 - **`topic` and `instructions` must not contain NUL (`\u0000`).**
 - **Every entry in `noteTypes` must be a type the server can generate.** The enum lists every
   type the contract knows about. A type the generator does not support yet is rejected, even
-  though it is in the enum. `basic_optional_reversed` is currently the only one.
+  though it is in the enum. Every type in the enum is currently supported.
 
 Headers:
 
@@ -203,6 +209,11 @@ client polls every 2 seconds by default and gives up after 5 minutes.
 }
 ```
 
+`deck.title` is at most 120 and `deck.description` at most 500 characters, counted in **UTF-16
+code units**, not Unicode code points. That is what JavaScript's `String.length` returns, so the
+client's own check agrees with the server's. A character outside the Basic Multilingual Plane,
+such as most emoji, counts as 2: a title of 60 emoji is at the limit, and 61 is over it.
+
 ### `POST /v1/generations/{jobId}/cancel`
 
 Cancels a running job. Returns `204`. Cancelling an already-terminal job returns `409`.
@@ -266,22 +277,45 @@ request is rejected with `429 RATE_LIMITED` and a `retryAfterSeconds`.
 schema chosen by `noteType`, and rejects a note whose shape does not match rather than
 rendering an empty card.
 
-| Note type         | Fields                                                                                               |
-| ----------------- | ---------------------------------------------------------------------------------------------------- |
-| `basic`           | `front`, `back`                                                                                      |
-| `basic_reversed`  | `front`, `back`                                                                                      |
-| `basic_type_in`   | `front`, `back`                                                                                      |
-| `cloze`           | `text` containing `{{c1::…}}` markers, optional `extra`                                              |
-| `multiple_choice` | `question`, `answer`, `distractors` (2–4 strings)                                                    |
-| `image_occlusion` | `imageId`, `regions` (array of `{ ordinal, x, y, width, height }`, normalised 0–1), optional `extra` |
+| Note type                 | Fields                                                                                               |
+| ------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `basic`                   | `front`, `back`                                                                                      |
+| `basic_reversed`          | `front`, `back`                                                                                      |
+| `basic_optional_reversed` | `front`, `back`, `addReverse` (boolean: `true` also produces the back-to-front card)                 |
+| `basic_type_in`           | `front`, `back`                                                                                      |
+| `cloze`                   | `text` containing `{{c1::…}}` markers, optional `extra`                                              |
+| `multiple_choice`         | `question`, `answer`, `distractors` (2–4 strings)                                                    |
+| `image_occlusion`         | `imageId`, `regions` (array of `{ ordinal, x, y, width, height }`, normalised 0–1), optional `extra` |
 
 Rules the backend must uphold:
 
+- `basic_optional_reversed` always carries `addReverse` as a JSON boolean, never as a string
+  or a number.
 - Cloze text contains at least one `{{cN::…}}` marker, numbered from 1 with no gaps.
 - Multiple-choice `distractors` are plausible, mutually exclusive, and never contain the
   correct answer.
+- Image-occlusion `imageId` is the `mediaId` of one of the note's **own** `media` entries of
+  kind `image`, spelled exactly as that `mediaId` is (canonical lowercase UUID). A note whose
+  `imageId` matches none of them is rejected.
+- Image-occlusion regions have at least one entry, and their `ordinal` values are unique and
+  at least 1. They need not be consecutive: `1, 3, 7` is valid, `1, 1` is not.
+- Every image-occlusion region lies entirely inside the image: `x`, `y`, `width` and `height`
+  are each within 0–1, `x + width ≤ 1`, `y + height ≤ 1`, and neither `width` nor `height` is
+  zero.
 - `clientId` is unique within a result and is what the client uses to track edits and
   regenerations in the preview screen.
+
+## Sources
+
+Every note in a result carries at least one source in `sources`. They are the
+anti-hallucination guard and a product feature: the preview screen shows them so the user can
+verify a card before saving it.
+
+- `sources` is never empty. A note the backend cannot source is **dropped**, the same
+  repair-or-drop posture as any other invalid note: only that note is removed, and the job
+  still succeeds with the notes that remain.
+- Each source has a non-blank `title` and an `http(s)` `url`. `retrievedAt`, when present,
+  carries an explicit offset.
 
 ## Media
 
@@ -329,16 +363,31 @@ localised and is for logs.
 | `JOB_NOT_FOUND`            | 404                 | Unknown job id                                    |
 | `JOB_ALREADY_TERMINAL`     | 409                 | Cancel on a finished job                          |
 | `IDEMPOTENCY_KEY_CONFLICT` | 409                 | `Idempotency-Key` reused with a different request |
-| `GENERATION_FAILED`        | 200 in the job body | The job itself failed; not an HTTP error          |
+| `PROVIDER_UNAVAILABLE`     | 200 in the job body | The model or search provider failed the job       |
+| `NO_VALID_CONTENT`         | 200 in the job body | Every note was dropped; nothing safe to return    |
+| `GENERATION_FAILED`        | 200 in the job body | The job failed for any other reason               |
 | `UPSTREAM_UNAVAILABLE`     | 503                 | Model or search provider is down                  |
 | `ROUTE_NOT_FOUND`          | 404                 | No endpoint exists at this path                   |
 | `METHOD_NOT_ALLOWED`       | 405                 | Endpoint exists but not for this HTTP method      |
 | `INTERNAL_ERROR`           | 500                 | Anything else                                     |
 
-Note the `GENERATION_FAILED` row: a **failed job is not an HTTP error**. `GET
+Note the three "200 in the job body" rows: a **failed job is not an HTTP error**. `GET
 /generations/{jobId}` returns `200` with `status: "failed"` and a populated `error` object.
 Returning a 5xx for a failed job would make the client's polling logic conflate a transport
 problem with a generation problem.
+
+A failed job's `error.code` is always exactly one of these three, never any other code:
+
+- `PROVIDER_UNAVAILABLE` — an upstream model or search provider failed or timed out, and
+  retrying did not help. The same request may succeed later.
+- `NO_VALID_CONTENT` — generation ran, but every note was dropped during validation (see
+  "Sources" and "Note field shapes"), so there is nothing safe to return. A result is never
+  returned with zero notes.
+- `GENERATION_FAILED` — the catch-all for any other failure.
+
+`PROVIDER_UNAVAILABLE` and `UPSTREAM_UNAVAILABLE` describe the same kind of outage at different
+points. `UPSTREAM_UNAVAILABLE` is an HTTP `503` on a request the server could not serve at all.
+`PROVIDER_UNAVAILABLE` is inside the body of a job that was already accepted and later failed.
 
 `ROUTE_NOT_FOUND` and `JOB_NOT_FOUND` share the 404 status, so the client must branch on
 `code`, not on status. `ROUTE_NOT_FOUND` means the client called a path the server does not
@@ -360,9 +409,12 @@ carry an `Allow` header listing the methods the path does accept.
 ## Resolved decisions
 
 1. **Topic and retrieval — open-domain.** Any topic the user types is accepted; the model
-   generates the questions and cards itself. There is no curated per-subject provider set. The
-   content policy still applies: a topic that violates it is rejected with `TOPIC_REJECTED`, and
-   generated content is filtered before it reaches the client.
+   writes the questions and cards itself rather than copying them from a curated per-subject
+   provider set. That does not make sources optional: every returned note still carries at
+   least one source the user can check its claims against, and a note the backend cannot
+   source is dropped (see "Sources" below). The content policy still applies: a topic that
+   violates it is rejected with `TOPIC_REJECTED`, and generated content is filtered before it
+   reaches the client.
 2. **Images — found by the model / image search.** `includeImages` triggers the model to source
    images. The contract's media rules are the hard constraint on this: every returned image
    carries a real `license` and `alt`, and an image whose licence cannot be established is not

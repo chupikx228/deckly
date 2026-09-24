@@ -2,12 +2,14 @@ import math
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import FrozenInstanceError
+from typing import cast
 from uuid import UUID
 
 import pytest
 
 from deckly.domain.exceptions import (
     ConflictError,
+    InvalidFailureCodeError,
     InvalidJobIdError,
     InvalidJobTransitionError,
     InvalidProgressError,
@@ -18,6 +20,8 @@ from deckly.domain.exceptions import (
 )
 from deckly.domain.job import (
     STAGE_ORDER,
+    Failed,
+    FailureCode,
     GenerationJob,
     JobStage,
     JobStatus,
@@ -53,7 +57,7 @@ def succeeded() -> GenerationJob:
 
 
 def failed() -> GenerationJob:
-    return running(JobStage.GENERATING_CARDS, 0.5).fail("model returned garbage", at(3))
+    return running(JobStage.GENERATING_CARDS, 0.5).fail(FailureCode.NO_VALID_CONTENT, at(3))
 
 
 def cancelled() -> GenerationJob:
@@ -64,7 +68,7 @@ ALL_TRANSITIONS: dict[str, Transition] = {
     "start": lambda job: job.start(at(10)),
     "advance": lambda job: job.advance(JobStage.FINALIZING, 1.0, at(10)),
     "succeed": lambda job: job.succeed(result_with(basic_note(1)), at(10)),
-    "fail": lambda job: job.fail("boom", at(10)),
+    "fail": lambda job: job.fail(FailureCode.GENERATION_FAILED, at(10)),
     "cancel": lambda job: job.cancel(at(10)),
 }
 
@@ -145,11 +149,40 @@ def test_active_job_can_be_cancelled(make_job: Callable[[], GenerationJob]) -> N
 
 @pytest.mark.parametrize("make_job", [queued, running], ids=["queued", "running"])
 def test_active_job_can_fail(make_job: Callable[[], GenerationJob]) -> None:
-    assert make_job().fail("boom", at(10)).status is JobStatus.FAILED
+    assert make_job().fail(FailureCode.GENERATION_FAILED, at(10)).status is JobStatus.FAILED
+
+
+@pytest.mark.parametrize("code", list(FailureCode))
+def test_failed_job_records_its_failure_code(code: FailureCode) -> None:
+    job = running().fail(code, at(10))
+
+    assert isinstance(job.state, Failed)
+    assert job.state.code is code
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["boom", "", "generation_failed", "UPSTREAM_UNAVAILABLE", "VALIDATION_FAILED", "INTERNAL_ERROR"],
+)
+def test_failing_with_an_unrecognised_code_is_rejected_and_leaves_the_job_running(code: str) -> None:
+    job = running()
+
+    with pytest.raises(InvalidFailureCodeError):
+        job.fail(cast("FailureCode", code), at(10))
+
+    assert job.status is JobStatus.RUNNING
+
+
+def test_failure_vocabulary_is_the_contract_one() -> None:
+    assert {str(code) for code in FailureCode} == {
+        "PROVIDER_UNAVAILABLE",
+        "NO_VALID_CONTENT",
+        "GENERATION_FAILED",
+    }
 
 
 def test_failed_job_keeps_the_stage_and_progress_it_stopped_at() -> None:
-    job = running(JobStage.GENERATING_CARDS, 0.62).fail("boom", at(10))
+    job = running(JobStage.GENERATING_CARDS, 0.62).fail(FailureCode.GENERATION_FAILED, at(10))
 
     assert job.stage is JobStage.GENERATING_CARDS
     assert job.progress == Progress(0.62)

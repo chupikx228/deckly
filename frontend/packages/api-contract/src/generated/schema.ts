@@ -105,11 +105,11 @@ export interface components {
         /** @enum {string} */
         JobStage: "planning" | "retrieving_sources" | "parsing_sources" | "generating_cards" | "fetching_media" | "finalizing";
         /** @enum {string} */
-        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "GENERATION_FAILED" | "UPSTREAM_UNAVAILABLE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
+        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "UPSTREAM_UNAVAILABLE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
         /** @enum {string} */
         RejectionReason: "too_easy" | "too_hard" | "incorrect" | "duplicate" | "off_topic" | "other";
         GenerationRequest: {
-            /** @description Length is checked after trimming leading and trailing whitespace, so a blank or whitespace-only topic is rejected. The trimmed value is what the server uses. A topic made only of whitespace, control characters, format characters such as zero-width space or BOM, and combining marks is rejected at any length. Must not contain NUL (U+0000). */
+            /** @description Length is checked after trimming leading and trailing whitespace, so a blank or whitespace-only topic is rejected. The trimmed value is what the server uses. The server also requires at least 3 visible characters. Whitespace, control characters, format characters such as zero-width space or BOM, combining marks, and characters that render blank (Hangul fillers, the blank Braille pattern U+2800) do not count toward that minimum, so "a\u200Bb" and "a b" are rejected. Must not contain NUL (U+0000). */
             topic: string;
             /**
              * @description BCP 47 tag. The language of the cards, not of the interface. Checked for well-formed syntax only, not against the language subtag registry.
@@ -153,7 +153,7 @@ export interface components {
             updatedAt: string;
             /** @description Present only when status is "succeeded". */
             result?: components["schemas"]["GenerationResult"] | null;
-            /** @description Present only when status is "failed". */
+            /** @description Present only when status is "failed". Its code is always one of PROVIDER_UNAVAILABLE (an upstream model or search provider failed), NO_VALID_CONTENT (every note was dropped during validation) or GENERATION_FAILED (anything else). */
             error?: components["schemas"]["Problem"] | null;
         };
         GenerationResult: {
@@ -161,7 +161,9 @@ export interface components {
             notes: components["schemas"]["GeneratedNote"][];
         };
         GeneratedDeck: {
+            /** @description maxLength is counted in UTF-16 code units, not Unicode code points, matching JavaScript's String.length. A character outside the Basic Multilingual Plane, such as most emoji, counts as 2. */
             title: string;
+            /** @description maxLength is counted in UTF-16 code units, not Unicode code points, matching JavaScript's String.length. A character outside the Basic Multilingual Plane, such as most emoji, counts as 2. */
             description?: string;
             tags?: string[];
         };
@@ -172,13 +174,13 @@ export interface components {
              */
             clientId: string;
             noteType: components["schemas"]["NoteType"];
-            /** @description Shape depends on noteType. basic/basic_reversed/basic_type_in: front, back. cloze: text with {{cN::...}} markers, optional extra. multiple_choice: question, answer, distractors. image_occlusion: imageId, regions, optional extra. */
+            /** @description Shape depends on noteType. basic/basic_reversed/basic_type_in: front, back. basic_optional_reversed: front, back, addReverse (boolean). cloze: text with {{cN::...}} markers, optional extra. multiple_choice: question, answer, distractors. image_occlusion: imageId (the mediaId of one of this note's own images), regions with unique ordinals that lie entirely within the image, optional extra. */
             fields: {
                 [key: string]: unknown;
             };
             media?: components["schemas"]["Media"][];
-            /** @description Required for generated content. Shown to the user so claims can be verified. */
-            sources?: components["schemas"]["Source"][];
+            /** @description Never empty. Shown to the user so claims can be verified. A note the server cannot source is dropped from the result rather than returned without one. */
+            sources: components["schemas"]["Source"][];
             tags?: string[];
         };
         Media: {
