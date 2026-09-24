@@ -6,6 +6,7 @@ from uuid import UUID
 
 from deckly.domain.deck import GenerationResult
 from deckly.domain.exceptions import (
+    InvalidFailureCodeError,
     InvalidJobIdError,
     InvalidJobTransitionError,
     InvalidProgressError,
@@ -46,6 +47,15 @@ class JobStage(StrEnum):
 
 
 STAGE_ORDER: tuple[JobStage, ...] = tuple(JobStage)
+
+
+class FailureCode(StrEnum):
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    NO_VALID_CONTENT = "NO_VALID_CONTENT"
+    GENERATION_FAILED = "GENERATION_FAILED"
+
+
+FAILURE_CODES = frozenset(FailureCode)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,9 +104,14 @@ class Succeeded:
 @dataclass(frozen=True, slots=True)
 class Failed:
     status: ClassVar[JobStatus] = JobStatus.FAILED
-    reason: str
+    code: FailureCode
     stage: JobStage | None
     progress: Progress
+
+    def __post_init__(self) -> None:
+        if self.code not in FAILURE_CODES:
+            message = f"failure code must be one of {sorted(FAILURE_CODES)}, got {self.code!r}"
+            raise InvalidFailureCodeError(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,9 +177,9 @@ class GenerationJob:
         self._require_running("succeed")
         return self._transition(Succeeded(result=result), now)
 
-    def fail(self, reason: str, now: datetime) -> Self:
+    def fail(self, code: FailureCode, now: datetime) -> Self:
         self._require_status("fail", JobStatus.QUEUED, JobStatus.RUNNING)
-        return self._transition(Failed(reason=reason, stage=self.stage, progress=self.progress), now)
+        return self._transition(Failed(code=code, stage=self.stage, progress=self.progress), now)
 
     def cancel(self, now: datetime) -> Self:
         self._require_status("cancel", JobStatus.QUEUED, JobStatus.RUNNING)

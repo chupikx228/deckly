@@ -20,7 +20,7 @@ from deckly.application.ports import IdempotencyScope
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import JobStatus
 from deckly.domain.notes.note_type import NoteType
-from deckly.domain.text import is_blank, is_uuid_v4
+from deckly.domain.text import is_uuid_v4, visible_length
 from deckly.transport.dependencies import create_generation_use_case
 
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
@@ -112,9 +112,9 @@ class GenerationRequestBody(BaseModel):
 
     @field_validator("topic")
     @classmethod
-    def reject_blank_topic(cls, value: str) -> str:
-        if is_blank(value):
-            message = "topic must contain visible characters"
+    def require_visible_topic(cls, value: str) -> str:
+        if visible_length(value) < MIN_TOPIC_LENGTH:
+            message = f"topic must contain at least {MIN_TOPIC_LENGTH} visible characters"
             raise ValueError(message)
         return value
 

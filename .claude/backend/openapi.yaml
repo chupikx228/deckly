@@ -236,6 +236,8 @@ components:
         - JOB_NOT_FOUND
         - JOB_ALREADY_TERMINAL
         - IDEMPOTENCY_KEY_CONFLICT
+        - PROVIDER_UNAVAILABLE
+        - NO_VALID_CONTENT
         - GENERATION_FAILED
         - UPSTREAM_UNAVAILABLE
         - ROUTE_NOT_FOUND
@@ -258,8 +260,10 @@ components:
           description: >
             Length is checked after trimming leading and trailing whitespace, so a blank or
             whitespace-only topic is rejected. The trimmed value is what the server uses.
-            A topic made only of whitespace, control characters, format characters such as
-            zero-width space or BOM, and combining marks is rejected at any length.
+            The server also requires at least 3 visible characters. Whitespace, control
+            characters, format characters such as zero-width space or BOM, combining marks,
+            and characters that render blank (Hangul fillers, the blank Braille pattern
+            U+2800) do not count toward that minimum, so "a\u200Bb" and "a b" are rejected.
             Must not contain NUL (U+0000).
         language:
           type: string
@@ -343,7 +347,10 @@ components:
           oneOf:
             - $ref: '#/components/schemas/Problem'
             - type: 'null'
-          description: Present only when status is "failed".
+          description: >
+            Present only when status is "failed". Its code is always one of
+            PROVIDER_UNAVAILABLE (an upstream model or search provider failed), NO_VALID_CONTENT
+            (every note was dropped during validation) or GENERATION_FAILED (anything else).
 
     GenerationResult:
       type: object
@@ -363,9 +370,17 @@ components:
         title:
           type: string
           maxLength: 120
+          description: >
+            maxLength is counted in UTF-16 code units, not Unicode code points, matching
+            JavaScript's String.length. A character outside the Basic Multilingual Plane, such as
+            most emoji, counts as 2.
         description:
           type: string
           maxLength: 500
+          description: >
+            maxLength is counted in UTF-16 code units, not Unicode code points, matching
+            JavaScript's String.length. A character outside the Basic Multilingual Plane, such as
+            most emoji, counts as 2.
         tags:
           type: array
           items:
@@ -373,7 +388,7 @@ components:
 
     GeneratedNote:
       type: object
-      required: [clientId, noteType, fields]
+      required: [clientId, noteType, fields, sources]
       properties:
         clientId:
           type: string
@@ -385,8 +400,11 @@ components:
           type: object
           description: >
             Shape depends on noteType. basic/basic_reversed/basic_type_in: front, back.
+            basic_optional_reversed: front, back, addReverse (boolean).
             cloze: text with {{cN::...}} markers, optional extra. multiple_choice: question,
-            answer, distractors. image_occlusion: imageId, regions, optional extra.
+            answer, distractors. image_occlusion: imageId (the mediaId of one of this note's own
+            images), regions with unique ordinals that lie entirely within the image, optional
+            extra.
           additionalProperties: true
         media:
           type: array
@@ -394,7 +412,10 @@ components:
             $ref: '#/components/schemas/Media'
         sources:
           type: array
-          description: Required for generated content. Shown to the user so claims can be verified.
+          minItems: 1
+          description: >
+            Never empty. Shown to the user so claims can be verified. A note the server cannot
+            source is dropped from the result rather than returned without one.
           items:
             $ref: '#/components/schemas/Source'
         tags:

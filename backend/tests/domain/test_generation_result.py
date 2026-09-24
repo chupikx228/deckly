@@ -4,7 +4,7 @@ from deckly.domain.deck import MAX_DESCRIPTION_LENGTH, MAX_TITLE_LENGTH, Deck
 from deckly.domain.exceptions import DuplicateClientIdError, InvalidDeckError
 from deckly.domain.notes.cloze import ClozeFields
 from deckly.domain.notes.note import Note
-from tests.domain.builders import basic_note, client_id, result_with
+from tests.domain.builders import SOURCES, basic_note, client_id, result_with
 
 
 def test_result_with_unique_client_ids_is_accepted() -> None:
@@ -19,7 +19,7 @@ def test_duplicate_client_id_is_rejected() -> None:
 
 
 def test_duplicate_client_id_is_rejected_even_when_the_notes_differ() -> None:
-    cloze = Note(client_id=client_id(7), fields=ClozeFields(text="{{c1::Paris}}"))
+    cloze = Note(client_id=client_id(7), fields=ClozeFields(text="{{c1::Paris}}"), sources=SOURCES)
 
     with pytest.raises(DuplicateClientIdError):
         result_with(basic_note(7), cloze)

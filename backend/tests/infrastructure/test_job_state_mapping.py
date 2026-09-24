@@ -2,7 +2,7 @@ from collections.abc import Callable
 
 import pytest
 
-from deckly.domain.job import GenerationJob, JobStage
+from deckly.domain.job import FailureCode, GenerationJob, JobStage
 from deckly.infrastructure.job_store import (
     CorruptStoredJobError,
     StoredState,
@@ -24,10 +24,11 @@ def running() -> GenerationJob:
 STORABLE_JOBS: dict[str, Callable[[], GenerationJob]] = {
     "queued": queued,
     "running": running,
-    "failed": lambda: running().fail("model returned garbage", at(3)),
+    "failed with no valid content": lambda: running().fail(FailureCode.NO_VALID_CONTENT, at(3)),
+    "failed with the provider unavailable": lambda: running().fail(FailureCode.PROVIDER_UNAVAILABLE, at(3)),
     "cancelled while running": lambda: running().cancel(at(3)),
     "cancelled while queued": lambda: queued().cancel(at(3)),
-    "failed while queued": lambda: queued().fail("boom", at(3)),
+    "failed while queued": lambda: queued().fail(FailureCode.GENERATION_FAILED, at(3)),
 }
 
 
@@ -53,6 +54,7 @@ def test_succeeded_state_is_refused_rather_than_silently_losing_the_result() -> 
         StoredState("running", None, 0.5, None),
         StoredState("running", "dreaming", 0.5, None),
         StoredState("failed", "planning", 0.5, None),
+        StoredState("failed", "planning", 0.5, "model returned garbage"),
         StoredState("succeeded", None, 1.0, None),
     ],
     ids=[
@@ -61,6 +63,7 @@ def test_succeeded_state_is_refused_rather_than_silently_losing_the_result() -> 
         "running without a stage",
         "unknown stage",
         "failed without a reason",
+        "failed with a free-text reason instead of a code",
         "succeeded without a result",
     ],
 )

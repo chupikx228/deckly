@@ -25,6 +25,12 @@ class OcclusionRegion:
             if not (math.isfinite(value) and 0.0 <= value <= 1.0):
                 message = f"region {name} must be normalised to 0-1, got {value}"
                 raise InvalidNoteError(message)
+        if self.width == 0.0 or self.height == 0.0:
+            message = f"region must have a non-zero width and height, got {self.width} x {self.height}"
+            raise InvalidNoteError(message)
+        if self.x + self.width > 1.0 or self.y + self.height > 1.0:
+            message = "region must lie entirely within the image"
+            raise InvalidNoteError(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,3 +46,11 @@ class ImageOcclusionFields(NoteFields):
         if not self.regions:
             message = "image occlusion needs at least one region"
             raise InvalidNoteError(message)
+        ordinals = [region.ordinal for region in self.regions]
+        if len(set(ordinals)) != len(ordinals):
+            message = f"region ordinals must be unique, got {sorted(ordinals)}"
+            raise InvalidNoteError(message)
+
+    @property
+    def referenced_image_ids(self) -> frozenset[str]:
+        return frozenset({self.image_id})

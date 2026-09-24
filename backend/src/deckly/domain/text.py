@@ -4,15 +4,54 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 WEB_URL_SCHEMES = frozenset({"http", "https"})
-INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Mn", "Mc", "Me"})
+INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf"})
+MARK_CATEGORIES = frozenset({"Mn", "Mc", "Me"})
+BLANK_LOOKING_CHARACTERS = frozenset(
+    {
+        "\N{HANGUL CHOSEONG FILLER}",
+        "\N{HANGUL JUNGSEONG FILLER}",
+        "\N{HANGUL FILLER}",
+        "\N{HALFWIDTH HANGUL FILLER}",
+        "\N{BRAILLE PATTERN BLANK}",
+        "\N{MUSICAL SYMBOL NULL NOTEHEAD}",
+    }
+)
+DEFAULT_IGNORABLE_RANGES = (
+    range(0x034F, 0x0350),
+    range(0x17B4, 0x17B6),
+    range(0x180B, 0x1810),
+    range(0x2065, 0x2066),
+    range(0xFE00, 0xFE10),
+    range(0xFFF0, 0xFFF9),
+    range(0xE0000, 0xE1000),
+)
+EMOJI_TAG_CHARACTERS = range(0xE0020, 0xE0080)
 UUID_VERSION = 4
 UTF16_CODE_UNIT_BYTES = 2
 
 
-def is_blank(value: str) -> bool:
-    return all(
-        character.isspace() or unicodedata.category(character) in INVISIBLE_CATEGORIES for character in value
+def is_invisible_character(character: str) -> bool:
+    return (
+        unicodedata.category(character) in INVISIBLE_CATEGORIES
+        or character in BLANK_LOOKING_CHARACTERS
+        or any(ord(character) in ignorable for ignorable in DEFAULT_IGNORABLE_RANGES)
     )
+
+
+def is_blank_character(character: str) -> bool:
+    return (
+        character.isspace()
+        or unicodedata.category(character) in MARK_CATEGORIES
+        or is_invisible_character(character)
+    )
+
+
+def is_blank(value: str) -> bool:
+    return all(is_blank_character(character) for character in value)
+
+
+def visible_length(value: str) -> int:
+    return sum(1 for character in value if not is_blank_character(character))
 
 
 def utf16_length(value: str) -> int:
@@ -23,8 +62,15 @@ def is_uuid_v4(value: UUID) -> bool:
     return value.version == UUID_VERSION
 
 
+def is_insignificant_character(character: str) -> bool:
+    return is_invisible_character(character) and ord(character) not in EMOJI_TAG_CHARACTERS
+
+
 def normalise_for_comparison(value: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", value).split()).casefold()
+    visible = "".join(
+        character for character in value if character.isspace() or not is_insignificant_character(character)
+    )
+    return " ".join(unicodedata.normalize("NFKC", visible).split()).casefold()
 
 
 def is_web_url(value: str) -> bool:

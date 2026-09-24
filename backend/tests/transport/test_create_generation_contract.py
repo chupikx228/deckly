@@ -7,12 +7,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE
 from deckly.main import API_PREFIX
 from deckly.transport import generations
 from deckly.transport.error_handlers import register_error_handlers
 from deckly.transport.generations import CLIENT_ID_HEADER, IDEMPOTENCY_KEY_HEADER
 from deckly.transport.problem import PROBLEM_JSON_MEDIA_TYPE
+from tests.domain.builders import unregister
 from tests.fakes import Harness
 from tests.transport.openapi import spec_errors
 
@@ -70,6 +72,7 @@ ACCEPTED_PAYLOADS: dict[str, dict[str, object]] = {
     "topic at 200": with_(topic="x" * 200),
     "topic at 200 astral code points": with_(topic="\N{GRINNING FACE}" * 200),
     "topic at 3 after trimming": with_(topic="  abc  "),
+    "topic at 3 visible characters around invisibles": with_(topic="a\N{ZERO WIDTH SPACE}bc"),
     "topic with a zero-width joiner emoji": with_(
         topic="\N{WOMAN}\N{ZERO WIDTH JOINER}\N{PERSONAL COMPUTER} basics"
     ),
@@ -143,7 +146,6 @@ SPEC_AND_SERVER_REJECT: dict[str, object] = {
 }
 
 SERVER_ONLY_REJECT: dict[str, dict[str, object]] = {
-    "note type not registered yet": with_(noteTypes=["basic", "basic_optional_reversed"]),
     "language empty": with_(language=""),
     "language with underscore": with_(language="en_US"),
     "language single letter": with_(language="e"),
@@ -175,6 +177,12 @@ SERVER_ONLY_REJECT: dict[str, dict[str, object]] = {
     "topic of invisibles padded with whitespace": with_(
         topic="  \N{ZERO WIDTH SPACE}\N{ZERO WIDTH NO-BREAK SPACE}\t\N{ZERO WIDTH SPACE}  "
     ),
+    "topic of hangul fillers only": with_(topic="\N{HANGUL FILLER}" * 5),
+    "topic of blank braille patterns only": with_(topic="\N{BRAILLE PATTERN BLANK}" * 5),
+    "topic of two letters and a zero-width space": with_(topic="a\N{ZERO WIDTH SPACE}b"),
+    "topic of two letters and a hangul filler": with_(topic="ab\N{HANGUL FILLER}"),
+    "topic of two letters and a blank braille pattern": with_(topic="\N{BRAILLE PATTERN BLANK}ab"),
+    "topic of two letters around a space": with_(topic="a b"),
     "topic with NUL": with_(topic="Road\x00signs"),
     "instructions with NUL": with_(instructions="Focus\x00"),
 }
@@ -240,10 +248,17 @@ def test_unparseable_body_is_validation_failed_not_internal_error(content: str |
     assert harness.store.jobs == {}
 
 
-def test_rejected_request_creates_and_enqueues_nothing() -> None:
+def test_note_type_without_a_field_shape_is_validation_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    unregister(monkeypatch, NoteType.CLOZE)
+
+    assert_validation_failed(post(build_client(Harness()), with_(noteTypes=["basic", "cloze"])))
+
+
+def test_rejected_request_creates_and_enqueues_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    unregister(monkeypatch, NoteType.CLOZE)
     harness = Harness()
 
-    post(build_client(harness), with_(noteTypes=["basic_optional_reversed"]))
+    post(build_client(harness), with_(noteTypes=["cloze"]))
 
     assert harness.store.jobs == {}
     assert harness.queue.enqueued == []

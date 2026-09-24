@@ -38,6 +38,10 @@ class InvalidJobIdError(InvariantViolationError):
     pass
 
 
+class InvalidFailureCodeError(InvariantViolationError):
+    pass
+
+
 class InvalidTimestampError(InvariantViolationError):
     pass
 
@@ -63,6 +67,10 @@ class InvalidClozeError(InvalidNoteError):
 
 
 class DistractorMatchesAnswerError(InvalidNoteError):
+    pass
+
+
+class MissingSourceError(InvalidNoteError):
     pass
 
 

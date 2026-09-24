@@ -10,6 +10,7 @@ from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import (
     Cancelled,
     Failed,
+    FailureCode,
     GenerationJob,
     JobStage,
     JobState,
@@ -43,7 +44,7 @@ def store_state(state: JobState) -> StoredState:
     if isinstance(state, Succeeded):
         message = "persisting a generation result is not supported yet"
         raise UnstorableJobStateError(message)
-    failure_reason = state.reason if isinstance(state, Failed) else None
+    failure_reason = state.code if isinstance(state, Failed) else None
     return StoredState(state.status, state.stage, state.progress.value, failure_reason)
 
 
@@ -51,6 +52,7 @@ def restore_state(stored: StoredState) -> JobState:
     try:
         status = JobStatus(stored.status)
         stage = None if stored.stage is None else JobStage(stored.stage)
+        failure_code = None if stored.failure_reason is None else FailureCode(stored.failure_reason)
     except ValueError as error:
         raise CorruptStoredJobError(str(error)) from error
     progress = Progress(stored.progress)
@@ -59,8 +61,8 @@ def restore_state(stored: StoredState) -> JobState:
             return Queued()
         case JobStatus.RUNNING if stage is not None:
             return Running(stage=stage, progress=progress)
-        case JobStatus.FAILED if stored.failure_reason is not None:
-            return Failed(reason=stored.failure_reason, stage=stage, progress=progress)
+        case JobStatus.FAILED if failure_code is not None:
+            return Failed(code=failure_code, stage=stage, progress=progress)
         case JobStatus.CANCELLED:
             return Cancelled(stage=stage, progress=progress)
     message = f"stored job state {stored} cannot be restored"

@@ -2,7 +2,12 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from deckly.domain.exceptions import UnsupportedNoteTypeError
-from deckly.domain.notes.basic import BasicFields, BasicReversedFields, BasicTypeInFields
+from deckly.domain.notes.basic import (
+    BasicFields,
+    BasicOptionalReversedFields,
+    BasicReversedFields,
+    BasicTypeInFields,
+)
 from deckly.domain.notes.cloze import ClozeFields
 from deckly.domain.notes.fields import NoteFields
 from deckly.domain.notes.image_occlusion import ImageOcclusionFields
@@ -15,6 +20,7 @@ NOTE_FIELDS_BY_TYPE: Mapping[NoteType, type[NoteFields]] = MappingProxyType(
         for fields_type in (
             BasicFields,
             BasicReversedFields,
+            BasicOptionalReversedFields,
             BasicTypeInFields,
             ClozeFields,
             MultipleChoiceFields,

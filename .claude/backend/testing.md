@@ -61,8 +61,9 @@ reliably return the wire format; the backend must. Test that it enforces this:
 - Cloze text with no `{{cN::}}` marker, or markers numbered with a gap (`c1`, `c3`) — repaired
   or dropped.
 - Multiple-choice `distractors` that contain the correct answer, or fewer than two — dropped.
-- Missing `sources` on generated content — dropped (sources are required, they are the
-  anti-hallucination guard).
+- A note with missing or empty `sources` — that note is dropped, not the whole job; the job
+  still succeeds with the remaining notes. Every returned note carries at least one source,
+  even though the model writes the cards itself (sources are the anti-hallucination guard).
 - Media with no `license`, or a URL that 404s — not returned.
 - A model returning 40 notes when 50 were asked — accepted; `cardCount` is a target. Assert
   the response is _valid and smaller_, not that it equals the request.

@@ -54,6 +54,15 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "PLR2004"]
 "migrations/**" = ["INP001"]
+"!src/deckly/domain/**" = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"datetime.datetime.now".msg = "Domain code must receive the clock as an argument."
+"datetime.datetime.utcnow".msg = "Domain code must receive the clock as an argument."
+"datetime.datetime.today".msg = "Domain code must receive the clock as an argument."
+"datetime.date.today".msg = "Domain code must receive the clock as an argument."
+"uuid.uuid1".msg = "Domain code must receive ids as arguments."
+"uuid.uuid4".msg = "Domain code must receive ids as arguments."
 
 [tool.ruff.lint.mccabe]
 max-complexity = 12
