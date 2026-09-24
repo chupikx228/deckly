@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
+from deckly.application.exceptions import IdempotencyKeyConflictError
 from deckly.application.ports import IdempotencyScope, JobQueue, JobStore, Quota, QuotaReader
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import GenerationJob, JobStatus
@@ -27,7 +28,10 @@ class CreateGeneration:
 
     async def __call__(self, request: GenerationRequest, scope: IdempotencyScope) -> JobCreated:
         now = self.clock()
-        job = await self.store.add(GenerationJob.queue(self.new_job_id(), now), request, scope)
-        if job.status is JobStatus.QUEUED:
-            await self.queue.enqueue(job.job_id)
-        return JobCreated(job=job, quota=await self.quota.current(scope.client_id, now))
+        stored = await self.store.add(GenerationJob.queue(self.new_job_id(), now), request, scope)
+        if stored.request != request:
+            message = f"{scope} was first used for a different request"
+            raise IdempotencyKeyConflictError(message)
+        if stored.job.status is JobStatus.QUEUED:
+            await self.queue.enqueue(stored.job.job_id)
+        return JobCreated(job=stored.job, quota=await self.quota.current(scope.client_id, now))

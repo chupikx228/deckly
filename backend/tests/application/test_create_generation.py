@@ -2,6 +2,7 @@ from datetime import timedelta
 
 import pytest
 
+from deckly.application.exceptions import IdempotencyKeyConflictError
 from deckly.domain.job import JobStatus
 from tests.fakes import QUOTA_LIMIT, Harness, generation_request, job_id, scope
 
@@ -25,11 +26,31 @@ async def test_same_key_and_client_returns_the_original_job_without_a_second_one
     first = await harness.create(generation_request(), scope(client=1, key=7))
     harness.now += timedelta(seconds=30)
 
-    replay = await harness.create(generation_request("Something else"), scope(client=1, key=7))
+    replay = await harness.create(generation_request(), scope(client=1, key=7))
 
     assert replay.job == first.job
     assert list(harness.store.jobs) == [first.job.job_id]
+
+
+async def test_same_key_and_client_with_a_different_request_is_a_conflict() -> None:
+    harness = Harness()
+    first = await harness.create(generation_request(), scope(client=1, key=7))
+
+    with pytest.raises(IdempotencyKeyConflictError):
+        await harness.create(generation_request("Something else"), scope(client=1, key=7))
+
+    assert list(harness.store.jobs) == [first.job.job_id]
     assert harness.store.requests[first.job.job_id] == generation_request()
+    assert harness.queue.enqueued == [first.job.job_id]
+
+
+async def test_same_key_with_a_different_request_from_another_client_is_not_a_conflict() -> None:
+    harness = Harness()
+    first = await harness.create(generation_request(), scope(client=1, key=7))
+
+    second = await harness.create(generation_request("Something else"), scope(client=2, key=7))
+
+    assert second.job.job_id != first.job.job_id
 
 
 async def test_same_key_from_a_different_client_is_a_different_job() -> None:

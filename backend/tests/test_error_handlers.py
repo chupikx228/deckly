@@ -5,6 +5,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException
 
 from deckly.application.exceptions import RateLimitedError, UpstreamUnavailableError
 from deckly.domain.exceptions import (
@@ -118,14 +119,36 @@ def test_unmapped_errors_become_internal_error_without_leaking(
         ("{}", {"content-type": "application/json"}),
         ('{"topic": ', {"content-type": "application/json"}),
         ("", {}),
+        ('{"topic": ' + "9" * 5000 + "}", {"content-type": "application/json"}),
+        (b'{"topic": "\xff\xfe"}', {"content-type": "application/json"}),
+        ('{"topic": ' + "[" * 100_000 + "]" * 100_000 + "}", {"content-type": "application/json"}),
+    ],
+    ids=[
+        "too short",
+        "missing field",
+        "truncated json",
+        "empty body",
+        "integer beyond the digit limit",
+        "invalid utf-8",
+        "nesting beyond the recursion limit",
     ],
 )
-def test_invalid_request_becomes_validation_failed(content: str, headers: dict[str, str]) -> None:
+def test_invalid_request_becomes_validation_failed(content: str | bytes, headers: dict[str, str]) -> None:
     response = build_client(JobNotFoundError).post("/payload", content=content, headers=headers)
 
     assert response.status_code == HTTPStatus.BAD_REQUEST
     assert response.headers["content-type"] == PROBLEM_JSON_MEDIA_TYPE
     assert response.json()["code"] == "VALIDATION_FAILED"
+
+
+def test_unparseable_body_is_not_logged_as_an_unhandled_exception(caplog: pytest.LogCaptureFixture) -> None:
+    content = '{"topic": ' + "9" * 5000 + "}"
+
+    build_client(JobNotFoundError).post(
+        "/payload", content=content, headers={"content-type": "application/json"}
+    )
+
+    assert not any(record.exc_info for record in caplog.records)
 
 
 def test_routing_errors_keep_their_status_as_problems() -> None:
@@ -136,9 +159,20 @@ def test_routing_errors_keep_their_status_as_problems() -> None:
 
     assert not_found.status_code == HTTPStatus.NOT_FOUND
     assert not_found.headers["content-type"] == PROBLEM_JSON_MEDIA_TYPE
+    assert not_found.json()["code"] == "ROUTE_NOT_FOUND"
+    assert not_found.json()["type"] == f"{PROBLEM_TYPE_BASE_URL}/route-not-found"
     assert wrong_method.status_code == HTTPStatus.METHOD_NOT_ALLOWED
     assert wrong_method.headers["allow"] == "GET"
     assert wrong_method.json()["status"] == HTTPStatus.METHOD_NOT_ALLOWED
+    assert wrong_method.json()["code"] == "METHOD_NOT_ALLOWED"
+    assert wrong_method.json()["type"] == f"{PROBLEM_TYPE_BASE_URL}/method-not-allowed"
+
+
+def test_unmapped_http_error_status_stays_internal_error() -> None:
+    response = build_client(lambda: HTTPException(HTTPStatus.IM_A_TEAPOT)).get("/boom")
+
+    assert response.status_code == HTTPStatus.IM_A_TEAPOT
+    assert response.json()["code"] == "INTERNAL_ERROR"
 
 
 def test_trailing_slash_in_base_url_does_not_double_up() -> None:

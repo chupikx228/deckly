@@ -4,8 +4,9 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deckly.application.ports import IdempotencyScope
-from deckly.domain.generation import GenerationRequest
+from deckly.application.ports import IdempotencyScope, StoredJob
+from deckly.domain.exceptions import InvalidGenerationRequestError
+from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import (
     Cancelled,
     Failed,
@@ -18,6 +19,7 @@ from deckly.domain.job import (
     Running,
     Succeeded,
 )
+from deckly.domain.notes.note_type import NoteType
 from deckly.infrastructure.tables import GenerationJobRow
 
 
@@ -75,13 +77,26 @@ def restore_job(row: GenerationJobRow) -> GenerationJob:
     )
 
 
+def restore_request(row: GenerationJobRow) -> GenerationRequest:
+    try:
+        return GenerationRequest(
+            topic=row.topic,
+            language=row.language,
+            card_count=row.card_count,
+            difficulty=Difficulty(row.difficulty),
+            note_types=tuple(NoteType(note_type) for note_type in row.note_types),
+            include_images=row.include_images,
+            instructions=row.instructions,
+        )
+    except (ValueError, InvalidGenerationRequestError) as error:
+        raise CorruptStoredJobError(str(error)) from error
+
+
 class PostgresJobStore:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
-    async def add(
-        self, job: GenerationJob, request: GenerationRequest, scope: IdempotencyScope
-    ) -> GenerationJob:
+    async def add(self, job: GenerationJob, request: GenerationRequest, scope: IdempotencyScope) -> StoredJob:
         stored = store_state(job.state)
         statement = (
             insert(GenerationJobRow)
@@ -110,7 +125,7 @@ class PostgresJobStore:
         )
         async with self._session_factory.begin() as session:
             if await session.scalar(statement) is not None:
-                return job
+                return StoredJob(job=job, request=request)
             existing = await session.scalar(
                 select(GenerationJobRow).where(
                     GenerationJobRow.client_id == scope.client_id,
@@ -120,4 +135,4 @@ class PostgresJobStore:
         if existing is None:
             message = f"idempotency conflict for {scope} but no stored job was found"
             raise CorruptStoredJobError(message)
-        return restore_job(existing)
+        return StoredJob(job=restore_job(existing), request=restore_request(existing))

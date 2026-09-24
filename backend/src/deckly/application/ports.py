@@ -14,6 +14,12 @@ class IdempotencyScope:
 
 
 @dataclass(frozen=True, slots=True)
+class StoredJob:
+    job: GenerationJob
+    request: GenerationRequest
+
+
+@dataclass(frozen=True, slots=True)
 class Quota:
     limit: int
     remaining: int
@@ -23,7 +29,7 @@ class Quota:
 class JobStore(Protocol):
     async def add(
         self, job: GenerationJob, request: GenerationRequest, scope: IdempotencyScope
-    ) -> GenerationJob: ...
+    ) -> StoredJob: ...
 
 
 class JobQueue(Protocol):

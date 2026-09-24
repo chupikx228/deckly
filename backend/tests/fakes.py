@@ -3,7 +3,7 @@ from datetime import datetime
 from uuid import UUID
 
 from deckly.application.generations import CreateGeneration
-from deckly.application.ports import IdempotencyScope, Quota
+from deckly.application.ports import IdempotencyScope, Quota, StoredJob
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import GenerationJob
 from deckly.domain.notes.note_type import NoteType
@@ -46,16 +46,14 @@ class InMemoryJobStore:
         self.requests: dict[UUID, GenerationRequest] = {}
         self.job_ids_by_scope: dict[IdempotencyScope, UUID] = {}
 
-    async def add(
-        self, job: GenerationJob, request: GenerationRequest, scope: IdempotencyScope
-    ) -> GenerationJob:
+    async def add(self, job: GenerationJob, request: GenerationRequest, scope: IdempotencyScope) -> StoredJob:
         existing = self.job_ids_by_scope.get(scope)
         if existing is not None:
-            return self.jobs[existing]
+            return StoredJob(job=self.jobs[existing], request=self.requests[existing])
         self.job_ids_by_scope[scope] = job.job_id
         self.jobs[job.job_id] = job
         self.requests[job.job_id] = request
-        return job
+        return StoredJob(job=job, request=request)
 
     def replace(self, job: GenerationJob) -> None:
         self.jobs[job.job_id] = job

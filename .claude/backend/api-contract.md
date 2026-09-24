@@ -34,6 +34,7 @@ raise it as a contract change first.
 | Errors          | RFC 9457 `application/problem+json`                                                                    |
 | Idempotency     | `POST /generations` requires an `Idempotency-Key` header                                               |
 | Client identity | `X-Client-Id` header carrying the anonymous device id, for rate limiting                               |
+| Header UUIDs    | Version 4, canonical form only: lowercase, hyphenated (`2c9e8f7a-6b5d-4c3e-8f1a-0b9c8d7e6f5a`)         |
 | Locale          | `Accept-Language` header, used for error messages only — card language is explicit in the request body |
 
 ## Why generation is asynchronous
@@ -68,13 +69,61 @@ Request:
 
 | Field           | Required | Notes                                                                   |
 | --------------- | -------- | ----------------------------------------------------------------------- |
-| `topic`         | yes      | 3–200 characters                                                        |
+| `topic`         | yes      | 3–200 characters after trimming                                         |
 | `language`      | yes      | BCP 47 tag. The language of the **cards**, not the interface.           |
 | `cardCount`     | yes      | 5–200. A target, not a guarantee; the response may return fewer.        |
 | `difficulty`    | no       | `beginner` \| `intermediate` \| `advanced`. Defaults to `intermediate`. |
 | `noteTypes`     | no       | Which types the generator may produce. Defaults to `["basic"]`.         |
 | `includeImages` | no       | Defaults to `false`. Images add significant latency and cost.           |
 | `instructions`  | no       | Free-form user steering, up to 500 characters.                          |
+
+The server also enforces these rules, which the schema cannot express. Each one fails with
+`400 VALIDATION_FAILED`:
+
+- **`topic` is trimmed before its length is checked.** Leading and trailing whitespace is
+  removed, and the result must be 3–200 characters. A blank or whitespace-only topic such as
+  `"   "` is rejected. The trimmed value is what the server stores and generates from.
+- **`topic` must contain at least one visible character.** A topic made only of whitespace,
+  control characters, format characters (zero-width space, BOM, zero-width joiner, bidi
+  marks) and combining marks is rejected, whatever its length. This is the same definition of
+  blank the server applies to generated deck titles and note fields.
+- **`cardCount` must be a plain JSON integer literal.** `40` is accepted. `1e2`, `4e1` and
+  `40.0` are rejected even though they are whole numbers.
+- **`language` must be a well-formed BCP 47 tag.** The server checks the syntax from RFC 5646,
+  including the irregular grandfathered tags such as `i-klingon`. The check ignores case and
+  accepts ASCII only. It does not check the tag against the subtag registry, so `xx-YY` passes
+  and `en_US`, `english` and `en-` do not.
+- **`topic` and `instructions` must not contain NUL (`\u0000`).**
+- **Every entry in `noteTypes` must be a type the server can generate.** The enum lists every
+  type the contract knows about. A type the generator does not support yet is rejected, even
+  though it is in the enum. `basic_optional_reversed` is currently the only one.
+
+Headers:
+
+| Header            | Required | Notes                                                                         |
+| ----------------- | -------- | ----------------------------------------------------------------------------- |
+| `Idempotency-Key` | yes      | Client-generated UUID in canonical form. See "Idempotency" below.             |
+| `X-Client-Id`     | yes      | Anonymous device id in canonical form. Scopes idempotency keys and the quota. |
+
+Both headers must be version 4 UUIDs in canonical form: lowercase hex, hyphenated 8-4-4-4-12,
+version nibble `4` and RFC 9562 variant (`8`, `9`, `a` or `b` as the first digit of the fourth
+group). The server rejects anything else with `400 VALIDATION_FAILED` and does not normalise
+it. That includes uppercase, `{…}` braces, the `urn:uuid:` prefix, the unhyphenated
+32-character form, the nil UUID `00000000-0000-0000-0000-000000000000` and UUIDs of any other
+version.
+
+**Idempotency.** Keys are scoped per `X-Client-Id`, so two clients can use the same key
+without colliding.
+
+- Replaying the same request with the same key returns the original job instead of starting
+  a second one.
+- Reusing a key with a different request returns `409 IDEMPOTENCY_KEY_CONFLICT` and leaves
+  the original job untouched. Replaying the original request with that key still works.
+
+Requests are compared after defaults are applied and `topic` is trimmed. Key order, defaults
+sent explicitly, and whitespace around the topic therefore do not count as differences.
+Everything else is compared exactly, including the case of `language` and the order of
+`noteTypes`. A client retrying a request should resend exactly the same body.
 
 Response `202`:
 
@@ -272,21 +321,29 @@ localised and is for logs.
 }
 ```
 
-| Code                   | Status              | Meaning                                  |
-| ---------------------- | ------------------- | ---------------------------------------- |
-| `VALIDATION_FAILED`    | 400                 | Request body failed validation           |
-| `TOPIC_REJECTED`       | 422                 | Topic violates the content policy        |
-| `RATE_LIMITED`         | 429                 | Too many jobs for this client            |
-| `JOB_NOT_FOUND`        | 404                 | Unknown job id                           |
-| `JOB_ALREADY_TERMINAL` | 409                 | Cancel on a finished job                 |
-| `GENERATION_FAILED`    | 200 in the job body | The job itself failed; not an HTTP error |
-| `UPSTREAM_UNAVAILABLE` | 503                 | Model or search provider is down         |
-| `INTERNAL_ERROR`       | 500                 | Anything else                            |
+| Code                       | Status              | Meaning                                           |
+| -------------------------- | ------------------- | ------------------------------------------------- |
+| `VALIDATION_FAILED`        | 400                 | Request body failed validation                    |
+| `TOPIC_REJECTED`           | 422                 | Topic violates the content policy                 |
+| `RATE_LIMITED`             | 429                 | Too many jobs for this client                     |
+| `JOB_NOT_FOUND`            | 404                 | Unknown job id                                    |
+| `JOB_ALREADY_TERMINAL`     | 409                 | Cancel on a finished job                          |
+| `IDEMPOTENCY_KEY_CONFLICT` | 409                 | `Idempotency-Key` reused with a different request |
+| `GENERATION_FAILED`        | 200 in the job body | The job itself failed; not an HTTP error          |
+| `UPSTREAM_UNAVAILABLE`     | 503                 | Model or search provider is down                  |
+| `ROUTE_NOT_FOUND`          | 404                 | No endpoint exists at this path                   |
+| `METHOD_NOT_ALLOWED`       | 405                 | Endpoint exists but not for this HTTP method      |
+| `INTERNAL_ERROR`           | 500                 | Anything else                                     |
 
-Note the fourth row from the bottom: a **failed job is not an HTTP error**. `GET
+Note the `GENERATION_FAILED` row: a **failed job is not an HTTP error**. `GET
 /generations/{jobId}` returns `200` with `status: "failed"` and a populated `error` object.
 Returning a 5xx for a failed job would make the client's polling logic conflate a transport
 problem with a generation problem.
+
+`ROUTE_NOT_FOUND` and `JOB_NOT_FOUND` share the 404 status, so the client must branch on
+`code`, not on status. `ROUTE_NOT_FOUND` means the client called a path the server does not
+serve, which is a client or deployment bug, not a missing job. `METHOD_NOT_ALLOWED` responses
+carry an `Allow` header listing the methods the path does accept.
 
 ## Non-functional requirements
 

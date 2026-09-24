@@ -46,6 +46,8 @@ paths:
                 $ref: '#/components/schemas/GenerationJobCreated'
         '400':
           $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
         '422':
           $ref: '#/components/responses/Problem'
         '429':
@@ -135,9 +137,11 @@ paths:
           description: >
             Optional here. When supplied, the response includes this client's current
             generation quota, so the app can show the remaining budget before the wizard.
+            Same format as the required X-Client-Id header.
           schema:
             type: string
             format: uuid
+            pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
       responses:
         '200':
           description: Service is available
@@ -161,20 +165,29 @@ components:
       in: header
       required: true
       description: >
-        Client-generated UUID. Replaying a request with the same key returns the original
-        job instead of starting a second one.
+        Client-generated version 4 UUID in canonical form: lowercase, hyphenated, no braces or
+        urn:uuid: prefix. The nil UUID and other versions are rejected. Replaying the same
+        request body with the same key returns the original job instead of starting a second
+        one. Reusing the key with a different body returns 409 IDEMPOTENCY_KEY_CONFLICT. Bodies
+        are compared after defaults are applied and the topic is trimmed, so key order and
+        explicitly sent defaults do not matter.
       schema:
         type: string
         format: uuid
+        pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
 
     ClientId:
       name: X-Client-Id
       in: header
       required: true
-      description: Anonymous device identifier, used for rate limiting.
+      description: >
+        Anonymous device identifier, used for rate limiting. Version 4 UUID in canonical form
+        only: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other
+        versions are rejected.
       schema:
         type: string
         format: uuid
+        pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
 
   responses:
     Problem:
@@ -222,8 +235,11 @@ components:
         - RATE_LIMITED
         - JOB_NOT_FOUND
         - JOB_ALREADY_TERMINAL
+        - IDEMPOTENCY_KEY_CONFLICT
         - GENERATION_FAILED
         - UPSTREAM_UNAVAILABLE
+        - ROUTE_NOT_FOUND
+        - METHOD_NOT_ALLOWED
         - INTERNAL_ERROR
 
     RejectionReason:
@@ -239,15 +255,25 @@ components:
           type: string
           minLength: 3
           maxLength: 200
+          description: >
+            Length is checked after trimming leading and trailing whitespace, so a blank or
+            whitespace-only topic is rejected. The trimmed value is what the server uses.
+            A topic made only of whitespace, control characters, format characters such as
+            zero-width space or BOM, and combining marks is rejected at any length.
+            Must not contain NUL (U+0000).
         language:
           type: string
-          description: BCP 47 tag. The language of the cards, not of the interface.
+          description: >
+            BCP 47 tag. The language of the cards, not of the interface. Checked for
+            well-formed syntax only, not against the language subtag registry.
           example: ru
         cardCount:
           type: integer
           minimum: 5
           maximum: 200
-          description: A target, not a guarantee. Fewer notes may be returned.
+          description: >
+            A target, not a guarantee. Fewer notes may be returned. Must be a plain JSON
+            integer literal; 1e2 and 40.0 are rejected.
         difficulty:
           $ref: '#/components/schemas/Difficulty'
         noteTypes:
@@ -255,6 +281,9 @@ components:
           minItems: 1
           uniqueItems: true
           default: [basic]
+          description: >
+            A note type the server cannot generate yet is rejected with VALIDATION_FAILED,
+            even though it is in the enum.
           items:
             $ref: '#/components/schemas/NoteType'
         includeImages:
@@ -263,6 +292,7 @@ components:
         instructions:
           type: string
           maxLength: 500
+          description: Must not contain NUL (U+0000).
 
     GenerationJobCreated:
       type: object

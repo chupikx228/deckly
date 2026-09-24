@@ -11,6 +11,7 @@ from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE
 from deckly.main import API_PREFIX
 from deckly.transport import generations
 from deckly.transport.error_handlers import register_error_handlers
+from deckly.transport.generations import CLIENT_ID_HEADER, IDEMPOTENCY_KEY_HEADER
 from deckly.transport.problem import PROBLEM_JSON_MEDIA_TYPE
 from tests.fakes import Harness
 from tests.transport.openapi import spec_errors
@@ -50,13 +51,17 @@ def assert_created(response: httpx2.Response) -> None:
     assert spec_errors("GenerationJobCreated", response.json()) == []
 
 
-def assert_validation_failed(response: httpx2.Response) -> None:
-    assert response.status_code == HTTPStatus.BAD_REQUEST, response.text
+def assert_problem(response: httpx2.Response, status: HTTPStatus, code: str) -> None:
+    assert response.status_code == status, response.text
     assert response.headers["content-type"] == PROBLEM_JSON_MEDIA_TYPE
     body = response.json()
     assert spec_errors("Problem", body) == []
-    assert body["code"] == "VALIDATION_FAILED"
-    assert body["status"] == HTTPStatus.BAD_REQUEST
+    assert body["code"] == code
+    assert body["status"] == status
+
+
+def assert_validation_failed(response: httpx2.Response) -> None:
+    assert_problem(response, HTTPStatus.BAD_REQUEST, "VALIDATION_FAILED")
 
 
 ACCEPTED_PAYLOADS: dict[str, dict[str, object]] = {
@@ -64,6 +69,12 @@ ACCEPTED_PAYLOADS: dict[str, dict[str, object]] = {
     "topic at 3": with_(topic="abc"),
     "topic at 200": with_(topic="x" * 200),
     "topic at 200 astral code points": with_(topic="\N{GRINNING FACE}" * 200),
+    "topic at 3 after trimming": with_(topic="  abc  "),
+    "topic with a zero-width joiner emoji": with_(
+        topic="\N{WOMAN}\N{ZERO WIDTH JOINER}\N{PERSONAL COMPUTER} basics"
+    ),
+    "topic with combining marks on letters": with_(topic="Cafe\N{COMBINING ACUTE ACCENT} culture"),
+    "topic in Devanagari with spacing marks": with_(topic="\u0939\u093f\u0928\u094d\u0926\u0940"),
     "cardCount at 5": with_(cardCount=5),
     "cardCount at 200": with_(cardCount=200),
     "every field": {
@@ -148,6 +159,22 @@ SERVER_ONLY_REJECT: dict[str, dict[str, object]] = {
     "language cyrillic": with_(language="\N{CYRILLIC SMALL LETTER ER}\N{CYRILLIC SMALL LETTER U}"),
     "language natural name": with_(language="Russian language"),
     "language irregular tag with kelvin sign": with_(language="i-\N{KELVIN SIGN}lingon"),
+    "topic whitespace only": with_(topic="   "),
+    "topic of mixed whitespace": with_(topic=" \t\n\r\u3000\u00a0 "),
+    "topic at 2 after trimming": with_(topic="  ab  "),
+    "topic of zero-width spaces only": with_(topic="\N{ZERO WIDTH SPACE}" * 5),
+    "topic of byte order marks only": with_(topic="\N{ZERO WIDTH NO-BREAK SPACE}" * 5),
+    "topic of invisible format characters": with_(
+        topic="\N{ZERO WIDTH JOINER}\N{ZERO WIDTH NON-JOINER}\N{LEFT-TO-RIGHT MARK}\N{WORD JOINER}"
+    ),
+    "topic of control characters": with_(topic="\x01\x7f\x1b\u0085"),
+    "topic of combining marks only": with_(
+        topic="\N{COMBINING ACUTE ACCENT}\N{COMBINING GRAVE ACCENT}\N{COMBINING ENCLOSING CIRCLE}"
+    ),
+    "topic of spacing combining marks only": with_(topic="\u093e\u093f\u0940"),
+    "topic of invisibles padded with whitespace": with_(
+        topic="  \N{ZERO WIDTH SPACE}\N{ZERO WIDTH NO-BREAK SPACE}\t\N{ZERO WIDTH SPACE}  "
+    ),
     "topic with NUL": with_(topic="Road\x00signs"),
     "instructions with NUL": with_(instructions="Focus\x00"),
 }
@@ -159,6 +186,16 @@ ADVERSARIAL_LANGUAGE_TAGS = {
     "many extlang-sized subtags": "zh" + "-abc" * 40_000,
 }
 MAX_VALIDATION_SECONDS = 1.0
+
+
+UNPARSEABLE_BODIES: dict[str, str | bytes] = {
+    "cardCount beyond the integer digit limit": '{"topic": "Road signs", "language": "ru", "cardCount": '
+    + "9" * 5000
+    + "}",
+    "truncated json": '{"topic": "Road signs", "language": "ru", "cardCount": ',
+    "invalid utf-8": b'{"topic": "Road \xff signs", "language": "ru", "cardCount": 40}',
+    "nesting beyond the recursion limit": '{"topic": ' + "[" * 100_000 + "]" * 100_000 + "}",
+}
 
 
 @pytest.mark.parametrize("payload", ACCEPTED_PAYLOADS.values(), ids=ACCEPTED_PAYLOADS.keys())
@@ -191,6 +228,18 @@ def test_pathological_language_tag_is_rejected_quickly(language: str) -> None:
     assert_validation_failed(response)
 
 
+@pytest.mark.parametrize("content", UNPARSEABLE_BODIES.values(), ids=UNPARSEABLE_BODIES.keys())
+def test_unparseable_body_is_validation_failed_not_internal_error(content: str | bytes) -> None:
+    harness = Harness()
+
+    response = build_client(harness).post(
+        ENDPOINT, content=content, headers={**VALID_HEADERS, "content-type": "application/json"}
+    )
+
+    assert_validation_failed(response)
+    assert harness.store.jobs == {}
+
+
 def test_rejected_request_creates_and_enqueues_nothing() -> None:
     harness = Harness()
 
@@ -198,6 +247,14 @@ def test_rejected_request_creates_and_enqueues_nothing() -> None:
 
     assert harness.store.jobs == {}
     assert harness.queue.enqueued == []
+
+
+def test_topic_is_stored_trimmed() -> None:
+    harness = Harness()
+
+    body = post(build_client(harness), with_(topic="  Road signs \n")).json()
+
+    assert harness.store.requests[UUID(body["jobId"])].topic == "Road signs"
 
 
 def test_defaults_are_applied_to_the_stored_request() -> None:
@@ -250,17 +307,136 @@ def test_missing_or_malformed_headers_are_validation_failed(headers: dict[str, s
     assert harness.store.jobs == {}
 
 
+NON_CANONICAL_UUIDS = {
+    "uppercase": IDEMPOTENCY_KEY.upper(),
+    "braced": f"{{{IDEMPOTENCY_KEY}}}",
+    "urn": f"urn:uuid:{IDEMPOTENCY_KEY}",
+    "unhyphenated": IDEMPOTENCY_KEY.replace("-", ""),
+    "hyphens misplaced": IDEMPOTENCY_KEY.replace("-", "")[:4] + "-" + IDEMPOTENCY_KEY.replace("-", "")[4:],
+    "extra hyphen": IDEMPOTENCY_KEY + "-",
+}
+
+
+@pytest.mark.parametrize("header", [IDEMPOTENCY_KEY_HEADER, CLIENT_ID_HEADER])
+@pytest.mark.parametrize("value", NON_CANONICAL_UUIDS.values(), ids=NON_CANONICAL_UUIDS.keys())
+def test_non_canonical_uuid_header_is_validation_failed(header: str, value: str) -> None:
+    harness = Harness()
+
+    response = post(build_client(harness), MINIMAL, {**VALID_HEADERS, header: value})
+
+    assert_validation_failed(response)
+    assert harness.store.jobs == {}
+
+
+NON_V4_UUIDS = {
+    "nil": "00000000-0000-0000-0000-000000000000",
+    "max": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+    "version 1": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+    "version 7": "01890a5d-ac96-774b-bcce-b302099a8057",
+    "version 4 with the NCS variant": "2c9e8f7a-6b5d-4c3e-0f1a-0b9c8d7e6f5a",
+    "version 4 with the Microsoft variant": "2c9e8f7a-6b5d-4c3e-cf1a-0b9c8d7e6f5a",
+}
+
+
+@pytest.mark.parametrize("header", [IDEMPOTENCY_KEY_HEADER, CLIENT_ID_HEADER])
+@pytest.mark.parametrize("value", NON_V4_UUIDS.values(), ids=NON_V4_UUIDS.keys())
+def test_canonical_uuid_header_that_is_not_version_4_is_validation_failed(header: str, value: str) -> None:
+    harness = Harness()
+
+    response = post(build_client(harness), MINIMAL, {**VALID_HEADERS, header: value})
+
+    assert_validation_failed(response)
+    assert harness.store.jobs == {}
+
+
 def test_replaying_the_same_key_for_the_same_client_returns_the_same_job() -> None:
     harness = Harness()
     client = build_client(harness)
 
     first = post(client, MINIMAL)
-    replay = post(client, with_(topic="A different topic"))
+    replay = post(client, MINIMAL)
 
     assert_created(replay)
     assert replay.json()["jobId"] == first.json()["jobId"]
     assert replay.json()["createdAt"] == first.json()["createdAt"]
     assert len(harness.store.jobs) == 1
+
+
+EQUIVALENT_REPLAYS: dict[str, dict[str, object]] = {
+    "fields reordered": {"cardCount": 40, "language": "ru", "topic": "Road signs"},
+    "defaults spelled out": with_(difficulty="intermediate", noteTypes=["basic"], includeImages=False),
+    "topic padded with whitespace": with_(topic="  Road signs\n"),
+}
+
+
+@pytest.mark.parametrize("replay", EQUIVALENT_REPLAYS.values(), ids=EQUIVALENT_REPLAYS.keys())
+def test_replaying_an_equivalent_body_returns_the_same_job(replay: dict[str, object]) -> None:
+    harness = Harness()
+    client = build_client(harness)
+
+    first = post(client, MINIMAL)
+    second = post(client, replay)
+
+    assert_created(second)
+    assert second.json()["jobId"] == first.json()["jobId"]
+
+
+DIFFERENT_REPLAYS: dict[str, tuple[dict[str, object], dict[str, object]]] = {
+    "topic": (MINIMAL, with_(topic="A different topic")),
+    "topic case": (MINIMAL, with_(topic="road signs")),
+    "language": (MINIMAL, with_(language="en")),
+    "language case": (MINIMAL, with_(language="RU")),
+    "cardCount": (MINIMAL, with_(cardCount=41)),
+    "difficulty": (MINIMAL, with_(difficulty="advanced")),
+    "noteTypes": (MINIMAL, with_(noteTypes=["cloze"])),
+    "noteTypes order": (with_(noteTypes=["basic", "cloze"]), with_(noteTypes=["cloze", "basic"])),
+    "includeImages": (MINIMAL, with_(includeImages=True)),
+    "instructions added": (MINIMAL, with_(instructions="Focus on warning signs")),
+    "instructions empty": (MINIMAL, with_(instructions="")),
+}
+
+
+@pytest.mark.parametrize(("original", "replay"), DIFFERENT_REPLAYS.values(), ids=DIFFERENT_REPLAYS.keys())
+def test_replaying_the_key_with_a_different_body_is_a_conflict(
+    original: dict[str, object], replay: dict[str, object]
+) -> None:
+    harness = Harness()
+    client = build_client(harness)
+    first = post(client, original)
+
+    response = post(client, replay)
+
+    assert_problem(response, HTTPStatus.CONFLICT, "IDEMPOTENCY_KEY_CONFLICT")
+    assert list(harness.store.jobs) == [UUID(first.json()["jobId"])]
+    assert harness.queue.enqueued == [UUID(first.json()["jobId"])]
+
+
+def test_original_body_still_replays_after_a_conflict() -> None:
+    harness = Harness()
+    client = build_client(harness)
+    first = post(client, MINIMAL)
+
+    post(client, with_(topic="A different topic"))
+    replay = post(client, MINIMAL)
+
+    assert_created(replay)
+    assert replay.json()["jobId"] == first.json()["jobId"]
+
+
+def test_unknown_route_is_route_not_found() -> None:
+    response = build_client(Harness()).post(f"{API_PREFIX}/generation", json=MINIMAL, headers=VALID_HEADERS)
+
+    assert_problem(response, HTTPStatus.NOT_FOUND, "ROUTE_NOT_FOUND")
+
+
+def test_wrong_method_on_an_existing_route_is_method_not_allowed() -> None:
+    harness = Harness()
+
+    response = build_client(harness).put(ENDPOINT, json=MINIMAL, headers=VALID_HEADERS)
+
+    assert_problem(response, HTTPStatus.METHOD_NOT_ALLOWED, "METHOD_NOT_ALLOWED")
+    assert response.headers["allow"] == "POST"
+    assert harness.store.jobs == {}
 
 
 def test_same_key_from_a_different_client_is_a_different_job() -> None:

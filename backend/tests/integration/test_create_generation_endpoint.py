@@ -73,6 +73,23 @@ def test_created_job_is_persisted_enqueued_and_replayable(
     assert asyncio.run(queued_job_exists(settings, str(first["jobId"])))
 
 
+def test_reusing_a_key_for_a_different_body_is_a_conflict(client: TestClient, cleanup: Cleanup) -> None:
+    client_id, key = uuid4(), uuid4()
+    first = post(client, cleanup, client_id, key)
+
+    response = client.post(
+        ENDPOINT,
+        json={**PAYLOAD, "topic": "A different topic"},
+        headers={"Idempotency-Key": str(key), "X-Client-Id": str(client_id)},
+    )
+    replay = post(client, cleanup, client_id, key)
+
+    assert response.status_code == HTTPStatus.CONFLICT
+    assert response.json()["code"] == "IDEMPOTENCY_KEY_CONFLICT"
+    assert spec_errors("Problem", response.json()) == []
+    assert replay["jobId"] == first["jobId"]
+
+
 def test_p95_latency_is_within_budget(client: TestClient, cleanup: Cleanup) -> None:
     client_id = uuid4()
     for _ in range(WARMUP_REQUESTS):

@@ -5,13 +5,22 @@ from typing import Annotated, Self
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+)
 
 from deckly.application.generations import CreateGeneration, JobCreated
 from deckly.application.ports import IdempotencyScope
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import JobStatus
 from deckly.domain.notes.note_type import NoteType
+from deckly.domain.text import is_blank, is_uuid_v4
 from deckly.transport.dependencies import create_generation_use_case
 
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
@@ -23,6 +32,8 @@ MIN_CARD_COUNT = 5
 MAX_CARD_COUNT = 200
 MAX_INSTRUCTIONS_LENGTH = 500
 NUL = "\x00"
+
+CANONICAL_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 LANGUAGE_TAG = re.compile(
     r"(?:"
@@ -58,10 +69,30 @@ IRREGULAR_LANGUAGE_TAGS = frozenset(
 )
 
 
+def require_canonical_uuid(value: object) -> object:
+    if not isinstance(value, str) or CANONICAL_UUID.fullmatch(value) is None:
+        message = "must be a lowercase hyphenated UUID"
+        raise ValueError(message)
+    return value
+
+
+def require_uuid_v4(value: UUID) -> UUID:
+    if not is_uuid_v4(value):
+        message = "must be a version 4 UUID"
+        raise ValueError(message)
+    return value
+
+
+type CanonicalUuid = Annotated[UUID, BeforeValidator(require_canonical_uuid), AfterValidator(require_uuid_v4)]
+
+
 class GenerationRequestBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    topic: str = Field(min_length=MIN_TOPIC_LENGTH, max_length=MAX_TOPIC_LENGTH)
+    topic: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=MIN_TOPIC_LENGTH, max_length=MAX_TOPIC_LENGTH),
+    ]
     language: str
     card_count: int = Field(alias="cardCount", ge=MIN_CARD_COUNT, le=MAX_CARD_COUNT, strict=True)
     difficulty: Difficulty = Difficulty.INTERMEDIATE
@@ -76,6 +107,14 @@ class GenerationRequestBody(BaseModel):
             LANGUAGE_TAG.fullmatch(value) is None and value.lower() not in IRREGULAR_LANGUAGE_TAGS
         ):
             message = "language must be a well-formed BCP 47 tag"
+            raise ValueError(message)
+        return value
+
+    @field_validator("topic")
+    @classmethod
+    def reject_blank_topic(cls, value: str) -> str:
+        if is_blank(value):
+            message = "topic must contain visible characters"
             raise ValueError(message)
         return value
 
@@ -143,8 +182,8 @@ router = APIRouter()
 @router.post("/generations", status_code=HTTPStatus.ACCEPTED)
 async def create_generation(
     body: GenerationRequestBody,
-    idempotency_key: Annotated[UUID, Header(alias=IDEMPOTENCY_KEY_HEADER)],
-    client_id: Annotated[UUID, Header(alias=CLIENT_ID_HEADER)],
+    idempotency_key: Annotated[CanonicalUuid, Header(alias=IDEMPOTENCY_KEY_HEADER)],
+    client_id: Annotated[CanonicalUuid, Header(alias=CLIENT_ID_HEADER)],
     create: Annotated[CreateGeneration, Depends(create_generation_use_case)],
 ) -> GenerationJobCreatedBody:
     scope = IdempotencyScope(client_id=client_id, idempotency_key=idempotency_key)

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deckly.application.ports import IdempotencyScope
 from deckly.config import Settings
-from deckly.domain.generation import Difficulty
+from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import GenerationJob, JobStatus
 from deckly.domain.notes.note_type import NoteType
 from deckly.infrastructure.database import create_engine, create_session_factory
@@ -58,7 +58,8 @@ async def test_new_job_is_persisted_with_its_request(
 
     stored = await store.add(job, request, cleanup.scope())
 
-    assert stored == job
+    assert stored.job == job
+    assert stored.request == request
     [row] = await rows_for(session_factory, job)
     assert (row.status, row.stage, row.progress) == ("queued", None, 0.0)
     assert (row.topic, row.language, row.card_count) == (request.topic, request.language, request.card_count)
@@ -69,20 +70,41 @@ async def test_new_job_is_persisted_with_its_request(
     assert row.created_at == T0
 
 
-async def test_replaying_a_scope_returns_the_original_job_and_keeps_its_request(
-    session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
+ROUND_TRIPPED_REQUESTS = {
+    "every field set": replace(
+        generation_request(),
+        language="en-GB",
+        card_count=77,
+        difficulty=Difficulty.ADVANCED,
+        note_types=(NoteType.CLOZE, NoteType.BASIC),
+        include_images=True,
+        instructions="Focus on warning signs",
+    ),
+    "empty instructions": replace(generation_request(), instructions=""),
+    "decomposed and astral text": replace(
+        generation_request("Cafe\N{COMBINING ACUTE ACCENT} \N{GRINNING FACE}"), language="zh-Hant-TW"
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "original_request", ROUND_TRIPPED_REQUESTS.values(), ids=ROUND_TRIPPED_REQUESTS.keys()
+)
+async def test_replaying_a_scope_returns_the_original_job_and_its_original_request(
+    session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup, original_request: GenerationRequest
 ) -> None:
     store = PostgresJobStore(session_factory)
     scope = cleanup.scope()
-    original = await store.add(new_job(), generation_request(), scope)
+    original = await store.add(new_job(), original_request, scope)
 
     replay = await store.add(
         GenerationJob.queue(uuid4(), at(60)), generation_request("A different topic"), scope
     )
 
     assert replay == original
-    [row] = await rows_for(session_factory, original)
-    assert row.topic == generation_request().topic
+    assert replay.request == original_request
+    [row] = await rows_for(session_factory, original.job)
+    assert row.topic == original_request.topic
     assert await count_for_client(session_factory, cleanup) == 1
 
 
@@ -96,7 +118,7 @@ async def test_same_key_from_another_client_is_a_separate_job(
     first = await store.add(new_job(), generation_request(), first_scope)
     other = await store.add(new_job(), generation_request(), other_scope)
 
-    assert first.job_id != other.job_id
+    assert first.job.job_id != other.job.job_id
     assert await count_for_client(session_factory, cleanup) == 2
 
 
@@ -110,7 +132,7 @@ async def test_concurrent_requests_with_one_scope_create_exactly_one_job(
         *(store.add(new_job(), generation_request(), scope) for _ in range(CONCURRENT_REPLAYS))
     )
 
-    assert len({job.job_id for job in results}) == 1
+    assert len({stored.job.job_id for stored in results}) == 1
     assert await count_for_client(session_factory, cleanup) == 1
 
 
@@ -119,7 +141,8 @@ async def add_through_a_fresh_pool(
 ) -> GenerationJob:
     engine = create_engine(str(settings.database.url), pool_size=1, max_overflow=0, pool_timeout_seconds=10)
     try:
-        return await PostgresJobStore(create_session_factory(engine)).add(job, generation_request(), scope)
+        stored = await PostgresJobStore(create_session_factory(engine)).add(job, generation_request(), scope)
+        return stored.job
     finally:
         await engine.dispose()
 
@@ -158,4 +181,4 @@ async def test_replays_from_two_clients_sharing_a_key_each_get_their_own_job(
     first_replay = await store.add(new_job(), generation_request(), first_scope)
     other_replay = await store.add(new_job(), generation_request(), other_scope)
 
-    assert (first_replay.job_id, other_replay.job_id) == (first.job_id, other.job_id)
+    assert (first_replay.job.job_id, other_replay.job.job_id) == (first.job.job_id, other.job.job_id)
