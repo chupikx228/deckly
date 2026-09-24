@@ -105,20 +105,22 @@ export interface components {
         /** @enum {string} */
         JobStage: "planning" | "retrieving_sources" | "parsing_sources" | "generating_cards" | "fetching_media" | "finalizing";
         /** @enum {string} */
-        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "GENERATION_FAILED" | "UPSTREAM_UNAVAILABLE" | "INTERNAL_ERROR";
+        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "GENERATION_FAILED" | "UPSTREAM_UNAVAILABLE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
         /** @enum {string} */
         RejectionReason: "too_easy" | "too_hard" | "incorrect" | "duplicate" | "off_topic" | "other";
         GenerationRequest: {
+            /** @description Length is checked after trimming leading and trailing whitespace, so a blank or whitespace-only topic is rejected. The trimmed value is what the server uses. A topic made only of whitespace, control characters, format characters such as zero-width space or BOM, and combining marks is rejected at any length. Must not contain NUL (U+0000). */
             topic: string;
             /**
-             * @description BCP 47 tag. The language of the cards, not of the interface.
+             * @description BCP 47 tag. The language of the cards, not of the interface. Checked for well-formed syntax only, not against the language subtag registry.
              * @example ru
              */
             language: string;
-            /** @description A target, not a guarantee. Fewer notes may be returned. */
+            /** @description A target, not a guarantee. Fewer notes may be returned. Must be a plain JSON integer literal; 1e2 and 40.0 are rejected. */
             cardCount: number;
             difficulty?: components["schemas"]["Difficulty"];
             /**
+             * @description A note type the server cannot generate yet is rejected with VALIDATION_FAILED, even though it is in the enum.
              * @default [
              *       "basic"
              *     ]
@@ -126,6 +128,7 @@ export interface components {
             noteTypes: components["schemas"]["NoteType"][];
             /** @default false */
             includeImages: boolean;
+            /** @description Must not contain NUL (U+0000). */
             instructions?: string;
         };
         GenerationJobCreated: {
@@ -256,9 +259,9 @@ export interface components {
     };
     parameters: {
         JobId: string;
-        /** @description Client-generated UUID. Replaying a request with the same key returns the original job instead of starting a second one. */
+        /** @description Client-generated version 4 UUID in canonical form: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. Replaying the same request body with the same key returns the original job instead of starting a second one. Reusing the key with a different body returns 409 IDEMPOTENCY_KEY_CONFLICT. Bodies are compared after defaults are applied and the topic is trimmed, so key order and explicitly sent defaults do not matter. */
         IdempotencyKey: string;
-        /** @description Anonymous device identifier, used for rate limiting. */
+        /** @description Anonymous device identifier, used for rate limiting. Version 4 UUID in canonical form only: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. */
         ClientId: string;
     };
     requestBodies: never;
@@ -271,9 +274,9 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description Client-generated UUID. Replaying a request with the same key returns the original job instead of starting a second one. */
+                /** @description Client-generated version 4 UUID in canonical form: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. Replaying the same request body with the same key returns the original job instead of starting a second one. Reusing the key with a different body returns 409 IDEMPOTENCY_KEY_CONFLICT. Bodies are compared after defaults are applied and the topic is trimmed, so key order and explicitly sent defaults do not matter. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
-                /** @description Anonymous device identifier, used for rate limiting. */
+                /** @description Anonymous device identifier, used for rate limiting. Version 4 UUID in canonical form only: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. */
                 "X-Client-Id": components["parameters"]["ClientId"];
             };
             path?: never;
@@ -295,6 +298,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
             429: components["responses"]["Problem"];
             503: components["responses"]["Problem"];
@@ -304,7 +308,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description Anonymous device identifier, used for rate limiting. */
+                /** @description Anonymous device identifier, used for rate limiting. Version 4 UUID in canonical form only: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. */
                 "X-Client-Id": components["parameters"]["ClientId"];
             };
             path: {
@@ -332,7 +336,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description Anonymous device identifier, used for rate limiting. */
+                /** @description Anonymous device identifier, used for rate limiting. Version 4 UUID in canonical form only: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. */
                 "X-Client-Id": components["parameters"]["ClientId"];
             };
             path: {
@@ -357,7 +361,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description Anonymous device identifier, used for rate limiting. */
+                /** @description Anonymous device identifier, used for rate limiting. Version 4 UUID in canonical form only: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. */
                 "X-Client-Id": components["parameters"]["ClientId"];
             };
             path?: never;
@@ -387,7 +391,7 @@ export interface operations {
         parameters: {
             query?: never;
             header?: {
-                /** @description Optional here. When supplied, the response includes this client's current generation quota, so the app can show the remaining budget before the wizard. */
+                /** @description Optional here. When supplied, the response includes this client's current generation quota, so the app can show the remaining budget before the wizard. Same format as the required X-Client-Id header. */
                 "X-Client-Id"?: string;
             };
             path?: never;
