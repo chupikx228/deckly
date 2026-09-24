@@ -93,6 +93,29 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: deckly
+          POSTGRES_PASSWORD: deckly
+          POSTGRES_DB: deckly
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U deckly -d deckly"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
     steps:
       - uses: actions/checkout@v4
 
@@ -109,3 +132,12 @@ jobs:
 
       - name: Test
         run: make test
+
+      - name: Configure environment
+        run: cp .env.example .env
+
+      - name: Migrate
+        run: make migrate
+
+      - name: Integration test (Postgres + Redis)
+        run: make test-integration

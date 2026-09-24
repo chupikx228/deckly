@@ -84,3 +84,7 @@ class InvalidDeckError(InvariantViolationError):
 
 class DuplicateClientIdError(InvariantViolationError):
     pass
+
+
+class InvalidGenerationRequestError(InvariantViolationError):
+    pass

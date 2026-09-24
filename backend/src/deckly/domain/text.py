@@ -4,13 +4,15 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 WEB_URL_SCHEMES = frozenset({"http", "https"})
-BYTE_ORDER_MARK = "\ufeff"
+INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Mn", "Mc", "Me"})
 UUID_VERSION = 4
 UTF16_CODE_UNIT_BYTES = 2
 
 
 def is_blank(value: str) -> bool:
-    return not value.replace(BYTE_ORDER_MARK, "").strip()
+    return all(
+        character.isspace() or unicodedata.category(character) in INVISIBLE_CATEGORIES for character in value
+    )
 
 
 def utf16_length(value: str) -> int:

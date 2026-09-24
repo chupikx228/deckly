@@ -14,7 +14,7 @@ src/deckly/
   domain/            pure business rules; domain errors
   infrastructure/    adapters: async SQLAlchemy + asyncpg, Arq/Redis, JSON logging
   worker/            Arq worker entrypoint and WorkerSettings
-migrations/          Alembic (async), baseline revision only
+migrations/          Alembic (async)
 ```
 
 Dependencies point inward only. `make check` runs import-linter, which fails the build if
@@ -52,7 +52,9 @@ one; it becomes runnable once the generation task lands.
 ```bash
 make check          # ruff format --check, ruff check, mypy --strict, import-linter
 make fix            # ruff format + ruff check --fix
-make test           # pytest
+make test           # pytest, no infrastructure needed
+make test-integration  # Postgres + Redis tests; needs make up && make migrate
 ```
 
-CI runs `make install`, `make check` and `make test` (`.github/workflows/ci.yml`, `backend` job).
+CI runs `make install`, `make check`, `make test`, then `make migrate` and `make test-integration`
+against Postgres and Redis service containers (`.github/workflows/ci.yml`, `backend` job).

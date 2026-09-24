@@ -10,12 +10,14 @@ from starlette.exceptions import HTTPException
 
 from deckly.application.exceptions import (
     ApplicationError,
+    IdempotencyKeyConflictError,
     RateLimitedError,
     RetryableError,
     UpstreamUnavailableError,
 )
 from deckly.domain.exceptions import (
     DomainError,
+    InvalidGenerationRequestError,
     JobAlreadyTerminalError,
     JobNotFoundError,
     TopicRejectedError,
@@ -38,10 +40,22 @@ class ProblemKind:
 VALIDATION_FAILED = ProblemKind(HTTPStatus.BAD_REQUEST, ErrorCode.VALIDATION_FAILED, "Validation failed")
 INTERNAL_ERROR = ProblemKind(HTTPStatus.INTERNAL_SERVER_ERROR, ErrorCode.INTERNAL_ERROR, "Internal error")
 
+HTTP_ERROR_KINDS: Mapping[int, ProblemKind] = {
+    HTTPStatus.BAD_REQUEST: VALIDATION_FAILED,
+    HTTPStatus.NOT_FOUND: ProblemKind(HTTPStatus.NOT_FOUND, ErrorCode.ROUTE_NOT_FOUND, "Route not found"),
+    HTTPStatus.METHOD_NOT_ALLOWED: ProblemKind(
+        HTTPStatus.METHOD_NOT_ALLOWED, ErrorCode.METHOD_NOT_ALLOWED, "Method not allowed"
+    ),
+}
+
 PROBLEM_KINDS: Mapping[type[Exception], ProblemKind] = {
+    InvalidGenerationRequestError: VALIDATION_FAILED,
     JobNotFoundError: ProblemKind(HTTPStatus.NOT_FOUND, ErrorCode.JOB_NOT_FOUND, "Job not found"),
     JobAlreadyTerminalError: ProblemKind(
         HTTPStatus.CONFLICT, ErrorCode.JOB_ALREADY_TERMINAL, "Job already terminal"
+    ),
+    IdempotencyKeyConflictError: ProblemKind(
+        HTTPStatus.CONFLICT, ErrorCode.IDEMPOTENCY_KEY_CONFLICT, "Idempotency key conflict"
     ),
     TopicRejectedError: ProblemKind(
         HTTPStatus.UNPROCESSABLE_ENTITY, ErrorCode.TOPIC_REJECTED, "Topic rejected"
@@ -115,7 +129,12 @@ class ProblemResponder:
         return self.respond(VALIDATION_FAILED, detail=describe_validation_errors(exc))
 
     async def handle_http_error(self, _request: Request, exc: HTTPException) -> JSONResponse:
-        response = self.respond(INTERNAL_ERROR, status=exc.status_code)
+        kind = HTTP_ERROR_KINDS.get(exc.status_code)
+        response = (
+            self.respond(INTERNAL_ERROR, status=exc.status_code)
+            if kind is None
+            else self.respond(kind, detail=exc.detail)
+        )
         response.headers.update(exc.headers or {})
         return response
 

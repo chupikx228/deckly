@@ -22,7 +22,17 @@ from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE, fields_type_for
 from tests.domain.builders import client_id
 
 FRONT_BACK_TYPES: list[type[FrontBackFields]] = [BasicFields, BasicReversedFields, BasicTypeInFields]
-BLANKS = ["", " ", "\n\t", "\N{NO-BREAK SPACE}", "\N{ZERO WIDTH NO-BREAK SPACE}"]
+BLANKS = [
+    "",
+    " ",
+    "\n\t",
+    "\N{NO-BREAK SPACE}",
+    "\N{ZERO WIDTH NO-BREAK SPACE}",
+    "\N{ZERO WIDTH SPACE}",
+    "\N{ZERO WIDTH JOINER} \N{RIGHT-TO-LEFT MARK}",
+    "\x07\x1b",
+    "\N{COMBINING ACUTE ACCENT}",
+]
 
 
 VALID_REGION = OcclusionRegion(ordinal=1, x=0.1, y=0.1, width=0.2, height=0.2)
