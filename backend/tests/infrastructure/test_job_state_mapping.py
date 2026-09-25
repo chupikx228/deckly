@@ -3,14 +3,9 @@ from collections.abc import Callable
 import pytest
 
 from deckly.domain.job import FailureCode, GenerationJob, JobStage
-from deckly.infrastructure.job_store import (
-    CorruptStoredJobError,
-    StoredState,
-    UnstorableJobStateError,
-    restore_state,
-    store_state,
-)
-from tests.domain.builders import JOB_ID, T0, at, basic_note, result_with
+from deckly.infrastructure.job_store import CorruptStoredJobError, StoredState, restore_state, store_state
+from deckly.infrastructure.stored_result import dump_result
+from tests.domain.builders import FULL_RESULT, JOB_ID, T0, at, basic_note, result_with
 
 
 def queued() -> GenerationJob:
@@ -24,6 +19,8 @@ def running() -> GenerationJob:
 STORABLE_JOBS: dict[str, Callable[[], GenerationJob]] = {
     "queued": queued,
     "running": running,
+    "succeeded with every note type": lambda: running().succeed(FULL_RESULT, at(3)),
+    "succeeded with a bare deck and no notes": lambda: running().succeed(result_with(), at(3)),
     "failed with no valid content": lambda: running().fail(FailureCode.NO_VALID_CONTENT, at(3)),
     "failed with the provider unavailable": lambda: running().fail(FailureCode.PROVIDER_UNAVAILABLE, at(3)),
     "cancelled while running": lambda: running().cancel(at(3)),
@@ -39,32 +36,49 @@ def test_every_storable_state_survives_a_round_trip(make_job: Callable[[], Gener
     assert restore_state(store_state(state)) == state
 
 
-def test_succeeded_state_is_refused_rather_than_silently_losing_the_result() -> None:
-    succeeded = running().succeed(result_with(basic_note(1)), at(3))
+def test_only_a_succeeded_state_carries_a_result() -> None:
+    stored = {name: store_state(make_job().state) for name, make_job in STORABLE_JOBS.items()}
 
-    with pytest.raises(UnstorableJobStateError):
-        store_state(succeeded.state)
+    assert {name for name, state in stored.items() if state.result is not None} == {
+        "succeeded with every note type",
+        "succeeded with a bare deck and no notes",
+    }
+
+
+def test_stored_state_keeps_the_result_out_of_its_repr() -> None:
+    stored = store_state(running().succeed(FULL_RESULT, at(3)).state)
+
+    assert FULL_RESULT.deck.title not in repr(stored)
+
+
+BASIC_RESULT = dump_result(result_with(basic_note(1)))
 
 
 @pytest.mark.parametrize(
     "stored",
     [
-        StoredState("paused", None, 0.0, None),
-        StoredState("queued", "planning", 0.0, None),
-        StoredState("running", None, 0.5, None),
-        StoredState("running", "dreaming", 0.5, None),
-        StoredState("failed", "planning", 0.5, None),
-        StoredState("failed", "planning", 0.5, "model returned garbage"),
-        StoredState("succeeded", None, 1.0, None),
+        StoredState("paused", None, 0.0, None, None),
+        StoredState("queued", "planning", 0.0, None, None),
+        StoredState("running", None, 0.5, None, None),
+        StoredState("running", "dreaming", 0.5, None, None),
+        StoredState("failed", "planning", 0.5, None, None),
+        StoredState("failed", "planning", 0.5, "model returned garbage", None),
+        StoredState("succeeded", None, 1.0, None, None),
+        StoredState("succeeded", "finalizing", 1.0, None, BASIC_RESULT),
+        StoredState("succeeded", None, 1.0, None, {"deck": {"title": "Road signs"}}),
+        StoredState("succeeded", None, 1.0, None, {**BASIC_RESULT, "notes": [{"note_type": "basic"}]}),
     ],
     ids=[
         "unknown status",
         "queued with a stage",
         "running without a stage",
         "unknown stage",
-        "failed without a reason",
+        "failed without a code",
         "failed with a free-text reason instead of a code",
         "succeeded without a result",
+        "succeeded with a stage",
+        "succeeded with a result that has no notes",
+        "succeeded with a malformed note",
     ],
 )
 def test_corrupt_stored_state_is_rejected(stored: StoredState) -> None:

@@ -160,8 +160,8 @@ Small, purpose-specific interfaces.
 
 High-level policy does not depend on low-level detail; both depend on abstractions.
 
-- The generation use case depends on `SourceRetriever`, `CardGenerator`, `MediaFetcher`,
-  `JobStore` **interfaces**, defined in the inner layers. The concrete provider clients
+- The generation use case depends on `SourceRetriever`, `SourceParser`, `CardGenerator`,
+  `MediaFetcher`, `JobStore` **interfaces**, defined in the inner layers. The concrete provider clients
   implement them and are injected at the composition root (startup).
 - This is what makes the whole thing testable and the provider replaceable. Never construct a
   model client or open a DB connection inside domain or application code — receive it.

@@ -15,7 +15,7 @@ from deckly.infrastructure.database import create_engine, create_session_factory
 from deckly.infrastructure.job_store import PostgresJobStore
 from deckly.infrastructure.tables import GenerationJobRow
 from deckly.main import API_PREFIX, create_app
-from tests.domain.builders import T0, at
+from tests.domain.builders import FULL_RESULT, T0, at
 from tests.fakes import generation_request
 from tests.integration.conftest import Cleanup
 from tests.transport.openapi import spec_errors
@@ -80,6 +80,7 @@ ACTIVE_JOBS: dict[str, Callable[[], GenerationJob]] = {
     "running": lambda: queued().start(at(1)).advance(JobStage.PARSING_SOURCES, 0.3, at(20)),
 }
 TERMINAL_JOBS: dict[str, Callable[[], GenerationJob]] = {
+    "succeeded": lambda: queued().start(at(1)).succeed(FULL_RESULT, at(90)),
     "failed": failed,
     "cancelled": lambda: queued().start(at(1)).cancel(at(2)),
 }

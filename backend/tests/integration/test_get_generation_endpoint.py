@@ -11,13 +11,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import update
 
 from deckly.config import Settings
-from deckly.domain.job import Failed, FailureCode, GenerationJob, JobStage
+from deckly.domain.job import Failed, FailureCode, GenerationJob, JobStage, Succeeded
 from deckly.infrastructure.database import create_engine, create_session_factory
 from deckly.infrastructure.job_store import PostgresJobStore, store_state
 from deckly.infrastructure.tables import GenerationJobRow
 from deckly.main import API_PREFIX, create_app
 from deckly.transport.generations import POLL_RETRY_AFTER_SECONDS
-from tests.domain.builders import T0, at
+from tests.domain.builders import FULL_RESULT, T0, at
 from tests.fakes import generation_request
 from tests.integration.conftest import Cleanup
 from tests.transport.openapi import spec_errors
@@ -61,7 +61,8 @@ async def write(settings: Settings, cleanup: Cleanup, job: GenerationJob) -> Non
                     status=stored.status,
                     stage=stored.stage,
                     progress=stored.progress,
-                    failure_reason=stored.failure_reason,
+                    failure_code=stored.failure_code,
+                    result=stored.result,
                     updated_at=job.updated_at,
                 )
             )
@@ -88,6 +89,7 @@ def failed_with(code: FailureCode) -> Callable[[], GenerationJob]:
 
 STORED_JOBS: dict[str, Callable[[], GenerationJob]] = {
     "running": lambda: queued().start(at(1)).advance(JobStage.PARSING_SOURCES, 0.3, at(20)),
+    "succeeded": lambda: queued().start(at(1)).succeed(FULL_RESULT, at(90)),
     **{f"failed with {code}": failed_with(code) for code in FailureCode},
     "cancelled": lambda: queued().start(at(1)).cancel(at(2)),
 }
@@ -121,6 +123,14 @@ def test_every_storable_state_polls_as_200_against_the_spec(
 
     assert (body["status"], body["stage"], body["progress"]) == (job.status, job.stage, job.progress.value)
     assert body["updatedAt"] == job.updated_at.isoformat().replace("+00:00", "Z")
+    result = body["result"]
+    if isinstance(job.state, Succeeded):
+        assert isinstance(result, dict)
+        assert [note["clientId"] for note in result["notes"]] == [
+            str(note.client_id) for note in job.state.result.notes
+        ]
+    else:
+        assert result is None
     error = body["error"]
     if isinstance(job.state, Failed):
         assert isinstance(error, dict)
