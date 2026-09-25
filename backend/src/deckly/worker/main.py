@@ -3,7 +3,7 @@ from arq.worker import run_worker
 from deckly.config import load_settings
 from deckly.infrastructure.logging import configure_logging
 from deckly.infrastructure.queue import create_redis_settings
-from deckly.worker.settings import WorkerSettings
+from deckly.worker.settings import SETTINGS_KEY, WorkerSettings
 
 
 def main() -> None:
@@ -17,6 +17,7 @@ def main() -> None:
             connect_retries=settings.redis.connect_retries,
         ),
         job_timeout=settings.limits.generation_job_timeout_seconds,
+        ctx={SETTINGS_KEY: settings},
     )
 
 

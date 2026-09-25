@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID
 
 from sqlalchemy import select
@@ -6,6 +6,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deckly.application.ports import IdempotencyScope, JobTransition, StoredJob
+from deckly.domain.deck import GenerationResult
 from deckly.domain.exceptions import InvalidGenerationRequestError
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import (
@@ -22,11 +23,8 @@ from deckly.domain.job import (
     Succeeded,
 )
 from deckly.domain.notes.note_type import NoteType
+from deckly.infrastructure.stored_result import dump_result, load_result
 from deckly.infrastructure.tables import GenerationJobRow
-
-
-class UnstorableJobStateError(Exception):
-    pass
 
 
 class CorruptStoredJobError(Exception):
@@ -38,22 +36,21 @@ class StoredState:
     status: str
     stage: str | None
     progress: float
-    failure_reason: str | None
+    failure_code: str | None
+    result: dict[str, object] | None = field(repr=False)
 
 
 def store_state(state: JobState) -> StoredState:
-    if isinstance(state, Succeeded):
-        message = "persisting a generation result is not supported yet"
-        raise UnstorableJobStateError(message)
-    failure_reason = state.code if isinstance(state, Failed) else None
-    return StoredState(state.status, state.stage, state.progress.value, failure_reason)
+    failure_code = state.code if isinstance(state, Failed) else None
+    result = dump_result(state.result) if isinstance(state, Succeeded) else None
+    return StoredState(state.status, state.stage, state.progress.value, failure_code, result)
 
 
 def restore_state(stored: StoredState) -> JobState:
     try:
         status = JobStatus(stored.status)
         stage = None if stored.stage is None else JobStage(stored.stage)
-        failure_code = None if stored.failure_reason is None else FailureCode(stored.failure_reason)
+        failure_code = None if stored.failure_code is None else FailureCode(stored.failure_code)
     except ValueError as error:
         raise CorruptStoredJobError(str(error)) from error
     progress = Progress(stored.progress)
@@ -62,6 +59,8 @@ def restore_state(stored: StoredState) -> JobState:
             return Queued()
         case JobStatus.RUNNING if stage is not None:
             return Running(stage=stage, progress=progress)
+        case JobStatus.SUCCEEDED if stage is None and stored.result is not None:
+            return Succeeded(result=restore_result(stored.result))
         case JobStatus.FAILED if failure_code is not None:
             return Failed(code=failure_code, stage=stage, progress=progress)
         case JobStatus.CANCELLED:
@@ -70,8 +69,15 @@ def restore_state(stored: StoredState) -> JobState:
     raise CorruptStoredJobError(message)
 
 
+def restore_result(payload: dict[str, object]) -> GenerationResult:
+    try:
+        return load_result(payload)
+    except ValueError as error:
+        raise CorruptStoredJobError(str(error)) from error
+
+
 def restore_job(row: GenerationJobRow) -> GenerationJob:
-    stored = StoredState(row.status, row.stage, row.progress, row.failure_reason)
+    stored = StoredState(row.status, row.stage, row.progress, row.failure_code, row.result)
     return GenerationJob(
         job_id=row.job_id,
         created_at=row.created_at,
@@ -117,7 +123,8 @@ class PostgresJobStore:
                 status=stored.status,
                 stage=stored.stage,
                 progress=stored.progress,
-                failure_reason=stored.failure_reason,
+                failure_code=stored.failure_code,
+                result=stored.result,
                 created_at=job.created_at,
                 updated_at=job.updated_at,
             )
@@ -145,6 +152,11 @@ class PostgresJobStore:
             row = await session.get(GenerationJobRow, job_id)
         return None if row is None else restore_job(row)
 
+    async def get_stored(self, job_id: UUID) -> StoredJob | None:
+        async with self._session_factory() as session:
+            row = await session.get(GenerationJobRow, job_id)
+        return None if row is None else StoredJob(job=restore_job(row), request=restore_request(row))
+
     async def update(self, job_id: UUID, transition: JobTransition) -> GenerationJob | None:
         async with self._session_factory.begin() as session:
             row = await session.get(GenerationJobRow, job_id, with_for_update=True)
@@ -155,6 +167,7 @@ class PostgresJobStore:
             row.status = stored.status
             row.stage = stored.stage
             row.progress = stored.progress
-            row.failure_reason = stored.failure_reason
+            row.failure_code = stored.failure_code
+            row.result = stored.result
             row.updated_at = job.updated_at
         return job

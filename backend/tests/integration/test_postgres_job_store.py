@@ -1,22 +1,26 @@
 import asyncio
+import threading
 from collections.abc import Callable
 from dataclasses import replace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deckly.application.ports import IdempotencyScope, JobTransition
+from deckly.application.ports import IdempotencyScope, JobTransition, StoredJob
 from deckly.config import Settings
-from deckly.domain.exceptions import JobAlreadyTerminalError
+from deckly.domain.exceptions import InvalidJobTransitionError, JobAlreadyTerminalError
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import FailureCode, GenerationJob, JobStage, JobStatus
+from deckly.domain.notes.basic import BasicFields
 from deckly.domain.notes.note_type import NoteType
 from deckly.infrastructure.database import create_engine, create_session_factory
-from deckly.infrastructure.job_store import PostgresJobStore, UnstorableJobStateError
+from deckly.infrastructure.job_store import PostgresJobStore
+from deckly.infrastructure.stored_result import dump_result
 from deckly.infrastructure.tables import GenerationJobRow
-from tests.domain.builders import T0, at, basic_note, result_with
+from tests.domain.builders import FULL_RESULT, T0, at, basic_note, result_with
 from tests.fakes import generation_request
 from tests.integration.conftest import Cleanup
 
@@ -24,6 +28,14 @@ pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 CONCURRENT_REPLAYS = 20
 CONCURRENT_CANCELS = 20
+CONCURRENT_CLAIMS = 20
+LOCK_WAIT_TIMEOUT_SECONDS = 10
+LOCK_POLL_INTERVAL_SECONDS = 0.01
+AN_UPDATE_IS_BLOCKED = text(
+    "SELECT count(*) > 0 FROM pg_stat_activity "
+    "WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0"
+)
+UNSTORABLE_TEXT = {"NUL": "Red\x00triangle", "lone surrogate": "Red \ud800 triangle"}
 
 
 def new_job() -> GenerationJob:
@@ -161,15 +173,18 @@ async def test_a_stored_job_survives_a_new_connection_pool(settings: Settings, c
     assert restored.created_at == T0
 
 
-async def test_succeeded_job_is_refused_and_nothing_is_written(
+async def test_succeeded_job_is_persisted_with_its_full_result(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    succeeded = new_job().start(at(1)).succeed(result_with(basic_note(1)), at(2))
+    store = PostgresJobStore(session_factory)
+    succeeded = new_job().start(at(1)).succeed(FULL_RESULT, at(2))
 
-    with pytest.raises(UnstorableJobStateError):
-        await PostgresJobStore(session_factory).add(succeeded, generation_request(), cleanup.scope())
+    await store.add(succeeded, generation_request(), cleanup.scope())
 
-    assert await rows_for(session_factory, succeeded) == []
+    assert await store.get(succeeded.job_id) == succeeded
+    [row] = await rows_for(session_factory, succeeded)
+    assert (row.status, row.stage, row.progress, row.failure_code) == ("succeeded", None, 1.0, None)
+    assert row.result == dump_result(FULL_RESULT)
 
 
 async def test_replays_from_two_clients_sharing_a_key_each_get_their_own_job(
@@ -190,6 +205,7 @@ async def test_replays_from_two_clients_sharing_a_key_each_get_their_own_job(
 STORED_STATES: dict[str, Callable[[GenerationJob], GenerationJob]] = {
     "queued": lambda job: job,
     "running": lambda job: job.start(at(1)).advance(JobStage.GENERATING_CARDS, 0.62, at(44)),
+    "succeeded": lambda job: job.start(at(1)).succeed(FULL_RESULT, at(2)),
     "failed": lambda job: job.start(at(1)).fail(FailureCode.PROVIDER_UNAVAILABLE, at(2)),
     "cancelled": lambda job: job.cancel(at(3)),
 }
@@ -213,7 +229,7 @@ async def test_get_of_an_unknown_job_is_none(session_factory: async_sessionmaker
 
 
 ACTIVE_STATES = {name: STORED_STATES[name] for name in ("queued", "running")}
-TERMINAL_STATES = {name: STORED_STATES[name] for name in ("failed", "cancelled")}
+TERMINAL_STATES = {name: STORED_STATES[name] for name in ("succeeded", "failed", "cancelled")}
 
 
 @pytest.mark.parametrize("transition", ACTIVE_STATES.values(), ids=ACTIVE_STATES.keys())
@@ -232,7 +248,7 @@ async def test_update_persists_a_cancellation(
     assert await store.get(job.job_id) == cancelled
     [row] = await rows_for(session_factory, job)
     assert (row.status, row.stage, row.progress) == ("cancelled", job.stage, job.progress.value)
-    assert (row.failure_reason, row.updated_at, row.created_at) == (None, at(100), T0)
+    assert (row.failure_code, row.result, row.updated_at, row.created_at) == (None, None, at(100), T0)
 
 
 @pytest.mark.parametrize("transition", TERMINAL_STATES.values(), ids=TERMINAL_STATES.keys())
@@ -277,4 +293,164 @@ async def test_concurrent_cancels_of_one_job_succeed_exactly_once(
     winners = [outcome for outcome in outcomes if isinstance(outcome, GenerationJob)]
     losers = [outcome for outcome in outcomes if isinstance(outcome, JobAlreadyTerminalError)]
     assert (len(winners), len(losers)) == (1, CONCURRENT_CANCELS - 1)
+    assert await store.get(job.job_id) == winners[0]
+
+
+async def test_update_persists_a_success_with_its_result(
+    session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
+) -> None:
+    store = PostgresJobStore(session_factory)
+    job = new_job().start(at(1)).advance(JobStage.FINALIZING, 0.9, at(40))
+    await store.add(job, generation_request(), cleanup.scope())
+
+    succeeded = await store.update(job.job_id, lambda stored: stored.succeed(FULL_RESULT, at(41)))
+
+    assert succeeded == job.succeed(FULL_RESULT, at(41))
+    assert await store.get(job.job_id) == succeeded
+
+
+@pytest.mark.parametrize("front", UNSTORABLE_TEXT.values(), ids=UNSTORABLE_TEXT.keys())
+async def test_result_postgres_cannot_store_is_refused_and_the_job_left_as_it_was(
+    session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup, front: str
+) -> None:
+    store = PostgresJobStore(session_factory)
+    job = new_job().start(at(1))
+    await store.add(job, generation_request(), cleanup.scope())
+    result = result_with(replace(basic_note(1), fields=BasicFields(front=front, back="back")))
+
+    with pytest.raises(DBAPIError):
+        await store.update(job.job_id, lambda stored: stored.succeed(result, at(9)))
+
+    assert await store.get(job.job_id) == job
+
+
+async def test_get_stored_returns_the_job_with_its_original_request(
+    session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
+) -> None:
+    store = PostgresJobStore(session_factory)
+    job = new_job()
+    request = ROUND_TRIPPED_REQUESTS["every field set"]
+    await store.add(job, request, cleanup.scope())
+
+    assert await store.get_stored(job.job_id) == StoredJob(job=job, request=request)
+
+
+async def test_get_stored_of_an_unknown_job_is_none(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    assert await PostgresJobStore(session_factory).get_stored(uuid4()) is None
+
+
+def advance_to_retrieving(job: GenerationJob) -> GenerationJob:
+    return job.advance(JobStage.RETRIEVING_SOURCES, 0.2, at(50))
+
+
+class RowHolder:
+    def __init__(self, settings: Settings, job_id: UUID) -> None:
+        self._settings = settings
+        self._job_id = job_id
+        self._locked = threading.Event()
+        self._released = threading.Event()
+
+    async def update(self, transition: JobTransition) -> GenerationJob | None:
+        return await asyncio.to_thread(asyncio.run, self._update_in_its_own_connection(transition))
+
+    async def until_locked(self) -> None:
+        if not await asyncio.to_thread(self._locked.wait, LOCK_WAIT_TIMEOUT_SECONDS):
+            message = "the row lock was never taken"
+            raise TimeoutError(message)
+
+    def release(self) -> None:
+        self._released.set()
+
+    async def _update_in_its_own_connection(self, transition: JobTransition) -> GenerationJob | None:
+        engine = create_engine(
+            str(self._settings.database.url), pool_size=1, max_overflow=0, pool_timeout_seconds=10
+        )
+        try:
+            store = PostgresJobStore(create_session_factory(engine))
+            return await store.update(self._job_id, self._holding_the_row(transition))
+        finally:
+            await engine.dispose()
+
+    def _holding_the_row(self, transition: JobTransition) -> JobTransition:
+        def hold_then_apply(job: GenerationJob) -> GenerationJob:
+            self._locked.set()
+            if not self._released.wait(LOCK_WAIT_TIMEOUT_SECONDS):
+                message = "the row was never released"
+                raise TimeoutError(message)
+            return transition(job)
+
+        return hold_then_apply
+
+
+async def until_an_update_waits_on_the_row_lock(session_factory: async_sessionmaker[AsyncSession]) -> None:
+    async with asyncio.timeout(LOCK_WAIT_TIMEOUT_SECONDS):
+        while True:
+            async with session_factory() as session:
+                if await session.scalar(AN_UPDATE_IS_BLOCKED):
+                    return
+            await asyncio.sleep(LOCK_POLL_INTERVAL_SECONDS)
+
+
+async def test_cancel_arriving_while_the_worker_holds_the_row_waits_and_cancels_the_advanced_job(
+    settings: Settings, session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
+) -> None:
+    store = PostgresJobStore(session_factory)
+    job = new_job().start(at(1))
+    await store.add(job, generation_request(), cleanup.scope())
+    worker = RowHolder(settings, job.job_id)
+    advancing = asyncio.create_task(worker.update(advance_to_retrieving))
+    await worker.until_locked()
+
+    cancelling = asyncio.create_task(store.update(job.job_id, cancel_at(100)))
+    try:
+        await until_an_update_waits_on_the_row_lock(session_factory)
+    finally:
+        worker.release()
+        advanced, cancelled = await asyncio.gather(advancing, cancelling, return_exceptions=True)
+
+    assert advanced == advance_to_retrieving(job)
+    assert cancelled == advance_to_retrieving(job).cancel(at(100))
+    assert await store.get(job.job_id) == cancelled
+
+
+async def test_worker_update_arriving_while_a_cancel_holds_the_row_waits_and_then_stops(
+    settings: Settings, session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
+) -> None:
+    store = PostgresJobStore(session_factory)
+    job = new_job().start(at(1))
+    await store.add(job, generation_request(), cleanup.scope())
+    canceller = RowHolder(settings, job.job_id)
+    cancelling = asyncio.create_task(canceller.update(cancel_at(100)))
+    await canceller.until_locked()
+
+    advancing = asyncio.create_task(store.update(job.job_id, advance_to_retrieving))
+    try:
+        await until_an_update_waits_on_the_row_lock(session_factory)
+    finally:
+        canceller.release()
+        cancelled, advanced = await asyncio.gather(cancelling, advancing, return_exceptions=True)
+
+    assert cancelled == job.cancel(at(100))
+    assert isinstance(advanced, JobAlreadyTerminalError)
+    assert await store.get(job.job_id) == job.cancel(at(100))
+
+
+async def test_concurrent_claims_of_a_queued_job_start_it_exactly_once(
+    session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
+) -> None:
+    store = PostgresJobStore(session_factory)
+    job = new_job()
+    await store.add(job, generation_request(), cleanup.scope())
+
+    outcomes = await asyncio.gather(
+        *(store.update(job.job_id, lambda stored: stored.start(at(1))) for _ in range(CONCURRENT_CLAIMS)),
+        return_exceptions=True,
+    )
+
+    winners = [outcome for outcome in outcomes if isinstance(outcome, GenerationJob)]
+    losers = [outcome for outcome in outcomes if isinstance(outcome, InvalidJobTransitionError)]
+    assert (len(winners), len(losers)) == (1, CONCURRENT_CLAIMS - 1)
+    assert not any(isinstance(loser, JobAlreadyTerminalError) for loser in losers)
     assert await store.get(job.job_id) == winners[0]

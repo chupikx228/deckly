@@ -2,7 +2,7 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import DateTime, Double, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deckly.infrastructure.database import Base
@@ -27,7 +27,8 @@ class GenerationJobRow(Base):
     status: Mapped[str] = mapped_column(Text)
     stage: Mapped[str | None] = mapped_column(Text)
     progress: Mapped[float] = mapped_column(Double)
-    failure_reason: Mapped[str | None] = mapped_column(Text)
+    failure_code: Mapped[str | None] = mapped_column(Text)
+    result: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

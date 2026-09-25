@@ -13,7 +13,7 @@ src/deckly/
   application/       use cases and the ports they depend on; application errors
   domain/            pure business rules; domain errors
   infrastructure/    adapters: async SQLAlchemy + asyncpg, Arq/Redis, JSON logging
-  worker/            Arq worker entrypoint and WorkerSettings
+  worker/            Arq worker entrypoint, WorkerSettings and its composition root
 migrations/          Alembic (async)
 ```
 
@@ -47,8 +47,17 @@ make run            # uvicorn on :8000 with reload
 Every setting is required; the app refuses to start if one is missing, blank or invalid, and
 if Postgres or Redis are unreachable. The database URL must use `postgresql+asyncpg`.
 
-The worker (`make worker`) has no task functions yet, and Arq refuses to start a worker without
-one; it becomes runnable once the generation task lands.
+The worker (`make worker`) consumes the queue that `POST /v1/generations` fills and runs
+`application/pipeline.py` (`RunGeneration`): planning → retrieving sources → parsing →
+generating cards → fetching media (only when `includeImages` is set) → finalizing. Every stage
+change goes through `JobStore.update`, which row-locks the job, so a cancel that lands first
+makes the worker stop at its next stage instead of racing it. It runs separately from the API
+and shares nothing with it but Postgres and Redis.
+
+Until the real provider adapters exist, the worker is wired with the placeholders in
+`infrastructure/providers.py`, which raise `NotImplementedError`: every job it picks up ends
+`failed` with `GENERATION_FAILED` rather than staying `queued`. Replace them one by one in
+`worker/settings.py` (`startup`).
 
 ## Checks
 

@@ -1,12 +1,12 @@
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi import APIRouter, FastAPI
 
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
 from deckly.config import Settings, load_settings
+from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.database import create_engine, create_session_factory, verify_connection
 from deckly.infrastructure.job_store import PostgresJobStore
 from deckly.infrastructure.logging import configure_logging
@@ -20,10 +20,6 @@ SERVICE_TITLE = "Deckly generation service"
 ROUTERS: tuple[APIRouter, ...] = (generations.router,)
 
 Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def build_lifespan(settings: Settings) -> Lifespan:

@@ -1,8 +1,7 @@
 from collections.abc import Callable
-from datetime import timedelta, timezone
+from datetime import timedelta
 from http import HTTPStatus
 from itertools import accumulate
-from uuid import UUID
 
 import httpx2
 import pytest
@@ -11,27 +10,23 @@ from fastapi.testclient import TestClient
 
 from deckly.domain.deck import Deck, GenerationResult
 from deckly.domain.job import STAGE_ORDER, FailureCode, GenerationJob, JobStage, Progress, Running
-from deckly.domain.media import Media, MediaKind
-from deckly.domain.notes.basic import (
-    BasicFields,
-    BasicOptionalReversedFields,
-    BasicReversedFields,
-    BasicTypeInFields,
-)
-from deckly.domain.notes.cloze import ClozeFields
-from deckly.domain.notes.fields import NoteFields
-from deckly.domain.notes.image_occlusion import ImageOcclusionFields, OcclusionRegion
-from deckly.domain.notes.multiple_choice import MultipleChoiceFields
-from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE
-from deckly.domain.source import Source
 from deckly.main import API_PREFIX
 from deckly.transport import generations
 from deckly.transport.error_handlers import register_error_handlers
 from deckly.transport.generations import CLIENT_ID_HEADER, POLL_RETRY_AFTER_SECONDS
 from deckly.transport.problem import PROBLEM_JSON_MEDIA_TYPE
-from tests.domain.builders import JOB_ID, SOURCES, T0, at, client_id
+from tests.domain.builders import (
+    AUDIO,
+    FIELDS_BY_TYPE,
+    FULL_RESULT,
+    IMAGE_ID,
+    JOB_ID,
+    MOSCOW,
+    T0,
+    at,
+)
 from tests.fakes import Harness
 from tests.transport.openapi import spec_errors
 
@@ -39,42 +34,9 @@ PROBLEM_TYPE_BASE_URL = "https://api.example.com/problems"
 CLIENT_ID = "0b6f7c1e-4a3d-4f2e-9c8b-7a6d5e4f3a21"
 HEADERS = {CLIENT_ID_HEADER: CLIENT_ID}
 UNKNOWN_JOB_ID = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
-IMAGE_ID = UUID("3d2c1b0a-9f8e-4d7c-8b6a-5f4e3d2c1b0a")
-MOSCOW = timezone(timedelta(hours=3))
 JOB_FIELDS = {"jobId", "status", "stage", "progress", "createdAt", "updatedAt", "result", "error"}
 RETRY_AFTER = "retry-after"
 
-IMAGE = Media(
-    media_id=IMAGE_ID,
-    kind=MediaKind.IMAGE,
-    url="https://example.com/sign.png",
-    license="CC-BY-4.0",
-    alt="Warning sign",
-    width=640,
-    height=480,
-)
-AUDIO = Media(
-    media_id=UUID("6e5d4c3b-2a19-4f8e-9d7c-6b5a4f3e2d1c"),
-    kind=MediaKind.AUDIO,
-    url="https://example.com/sign.mp3",
-    license="CC0-1.0",
-)
-FIELDS_BY_TYPE: dict[NoteType, NoteFields] = {
-    NoteType.BASIC: BasicFields(front="Red triangle?", back="A warning sign"),
-    NoteType.BASIC_REVERSED: BasicReversedFields(front="Stop", back="Octagon"),
-    NoteType.BASIC_OPTIONAL_REVERSED: BasicOptionalReversedFields(
-        front="Yield", back="Triangle", add_reverse=True
-    ),
-    NoteType.BASIC_TYPE_IN: BasicTypeInFields(front="Speed limit in towns", back="60"),
-    NoteType.CLOZE: ClozeFields(text="A {{c1::red}} border means {{c2::prohibition}}", extra="Mostly"),
-    NoteType.MULTIPLE_CHOICE: MultipleChoiceFields(
-        question="Which shape is a stop sign?", answer="Octagon", distractors=("Circle", "Square")
-    ),
-    NoteType.IMAGE_OCCLUSION: ImageOcclusionFields(
-        image_id=str(IMAGE_ID),
-        regions=(OcclusionRegion(1, 0.1, 0.1, 0.2, 0.2), OcclusionRegion(3, 0.5, 0.5, 0.5, 0.5)),
-    ),
-}
 WIRE_FIELDS_BY_TYPE: dict[NoteType, set[str]] = {
     NoteType.BASIC: {"front", "back"},
     NoteType.BASIC_REVERSED: {"front", "back"},
@@ -86,26 +48,6 @@ WIRE_FIELDS_BY_TYPE: dict[NoteType, set[str]] = {
 }
 
 
-def note_of(number: int, note_type: NoteType) -> Note:
-    media = (IMAGE, AUDIO) if note_type is NoteType.IMAGE_OCCLUSION else ()
-    return Note(
-        client_id=client_id(number),
-        fields=FIELDS_BY_TYPE[note_type],
-        sources=(
-            Source(
-                title="Traffic code", url="https://example.com/code", retrieved_at=at(20).astimezone(MOSCOW)
-            ),
-            *SOURCES,
-        ),
-        media=media,
-        tags=("signs",),
-    )
-
-
-FULL_RESULT = GenerationResult(
-    deck=Deck(title="Road signs", description="Warning and prohibitory signs", tags=("driving", "signs")),
-    notes=tuple(note_of(number, note_type) for number, note_type in enumerate(FIELDS_BY_TYPE, start=1)),
-)
 BARE_RESULT = GenerationResult(deck=Deck(title="Road signs"), notes=())
 
 
