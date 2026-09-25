@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deckly.application.ports import IdempotencyScope, StoredJob
+from deckly.application.ports import IdempotencyScope, JobTransition, StoredJob
 from deckly.domain.exceptions import InvalidGenerationRequestError
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import (
@@ -144,3 +144,17 @@ class PostgresJobStore:
         async with self._session_factory() as session:
             row = await session.get(GenerationJobRow, job_id)
         return None if row is None else restore_job(row)
+
+    async def update(self, job_id: UUID, transition: JobTransition) -> GenerationJob | None:
+        async with self._session_factory.begin() as session:
+            row = await session.get(GenerationJobRow, job_id, with_for_update=True)
+            if row is None:
+                return None
+            job = transition(restore_job(row))
+            stored = store_state(job.state)
+            row.status = stored.status
+            row.stage = stored.stage
+            row.progress = stored.progress
+            row.failure_reason = stored.failure_reason
+            row.updated_at = job.updated_at
+        return job

@@ -7,8 +7,9 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deckly.application.ports import IdempotencyScope
+from deckly.application.ports import IdempotencyScope, JobTransition
 from deckly.config import Settings
+from deckly.domain.exceptions import JobAlreadyTerminalError
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import FailureCode, GenerationJob, JobStage, JobStatus
 from deckly.domain.notes.note_type import NoteType
@@ -22,6 +23,7 @@ from tests.integration.conftest import Cleanup
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 CONCURRENT_REPLAYS = 20
+CONCURRENT_CANCELS = 20
 
 
 def new_job() -> GenerationJob:
@@ -208,3 +210,71 @@ async def test_get_returns_the_job_exactly_as_it_was_stored(
 
 async def test_get_of_an_unknown_job_is_none(session_factory: async_sessionmaker[AsyncSession]) -> None:
     assert await PostgresJobStore(session_factory).get(uuid4()) is None
+
+
+ACTIVE_STATES = {name: STORED_STATES[name] for name in ("queued", "running")}
+TERMINAL_STATES = {name: STORED_STATES[name] for name in ("failed", "cancelled")}
+
+
+@pytest.mark.parametrize("transition", ACTIVE_STATES.values(), ids=ACTIVE_STATES.keys())
+async def test_update_persists_a_cancellation(
+    session_factory: async_sessionmaker[AsyncSession],
+    cleanup: Cleanup,
+    transition: Callable[[GenerationJob], GenerationJob],
+) -> None:
+    store = PostgresJobStore(session_factory)
+    job = transition(new_job())
+    await store.add(job, generation_request(), cleanup.scope())
+
+    cancelled = await store.update(job.job_id, lambda stored: stored.cancel(at(100)))
+
+    assert cancelled == job.cancel(at(100))
+    assert await store.get(job.job_id) == cancelled
+    [row] = await rows_for(session_factory, job)
+    assert (row.status, row.stage, row.progress) == ("cancelled", job.stage, job.progress.value)
+    assert (row.failure_reason, row.updated_at, row.created_at) == (None, at(100), T0)
+
+
+@pytest.mark.parametrize("transition", TERMINAL_STATES.values(), ids=TERMINAL_STATES.keys())
+async def test_update_that_raises_leaves_the_row_unchanged(
+    session_factory: async_sessionmaker[AsyncSession],
+    cleanup: Cleanup,
+    transition: Callable[[GenerationJob], GenerationJob],
+) -> None:
+    store = PostgresJobStore(session_factory)
+    job = transition(new_job())
+    await store.add(job, generation_request(), cleanup.scope())
+
+    with pytest.raises(JobAlreadyTerminalError):
+        await store.update(job.job_id, lambda stored: stored.cancel(at(100)))
+
+    assert await store.get(job.job_id) == job
+
+
+async def test_update_of_an_unknown_job_is_none(session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def unreachable(job: GenerationJob) -> GenerationJob:
+        raise AssertionError(job)
+
+    assert await PostgresJobStore(session_factory).update(uuid4(), unreachable) is None
+
+
+def cancel_at(second: int) -> JobTransition:
+    return lambda stored: stored.cancel(at(second))
+
+
+async def test_concurrent_cancels_of_one_job_succeed_exactly_once(
+    session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
+) -> None:
+    store = PostgresJobStore(session_factory)
+    job = new_job().start(at(1))
+    await store.add(job, generation_request(), cleanup.scope())
+
+    outcomes = await asyncio.gather(
+        *(store.update(job.job_id, cancel_at(second)) for second in range(100, 100 + CONCURRENT_CANCELS)),
+        return_exceptions=True,
+    )
+
+    winners = [outcome for outcome in outcomes if isinstance(outcome, GenerationJob)]
+    losers = [outcome for outcome in outcomes if isinstance(outcome, JobAlreadyTerminalError)]
+    assert (len(winners), len(losers)) == (1, CONCURRENT_CANCELS - 1)
+    assert await store.get(job.job_id) == winners[0]

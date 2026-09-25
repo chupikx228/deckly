@@ -1,6 +1,6 @@
 from fastapi import Request
 
-from deckly.application.generations import CreateGeneration, GetGeneration
+from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
 from deckly.transport.error_handlers import ProblemResponder
 
 
@@ -18,6 +18,10 @@ def create_generation_use_case(request: Request) -> CreateGeneration:
 
 def get_generation_use_case(request: Request) -> GetGeneration:
     return wired(request, "get_generation", GetGeneration)
+
+
+def cancel_generation_use_case(request: Request) -> CancelGeneration:
+    return wired(request, "cancel_generation", CancelGeneration)
 
 
 def problem_responder(request: Request) -> ProblemResponder:

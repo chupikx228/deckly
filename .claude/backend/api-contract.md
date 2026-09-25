@@ -223,6 +223,13 @@ such as most emoji, counts as 2: a title of 60 emoji is at the limit, and 61 is 
 
 Cancels a running job. Returns `204`. Cancelling an already-terminal job returns `409`.
 
+**Access.** `X-Client-Id` is required and validated here under the same rules as on
+`POST /generations`, but as with `GET /generations/{jobId}`, access to a job — including
+cancelling it — is not scoped by client: anyone who knows a `jobId` can cancel it. Cancel is
+more destructive than a read, and this is still accepted deliberately, not an oversight. The
+random v4 job id is itself the capability, because `X-Client-Id` is an anonymous, spoofable
+device id and not a security boundary.
+
 ### `POST /v1/notes/regenerate`
 
 Regenerates a single note the user rejected in the preview screen. This is a small, cheap,

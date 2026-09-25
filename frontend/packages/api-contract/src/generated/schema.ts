@@ -331,6 +331,7 @@ export interface operations {
                     "application/json": components["schemas"]["GenerationJob"];
                 };
             };
+            400: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
         };
     };
@@ -355,6 +356,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            400: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
             409: components["responses"]["Problem"];
         };
