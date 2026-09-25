@@ -78,6 +78,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenerationJob'
+        '400':
+          $ref: '#/components/responses/Problem'
         '404':
           $ref: '#/components/responses/Problem'
 
@@ -92,6 +94,8 @@ paths:
       responses:
         '204':
           description: Cancellation accepted
+        '400':
+          $ref: '#/components/responses/Problem'
         '404':
           $ref: '#/components/responses/Problem'
         '409':

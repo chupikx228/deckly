@@ -48,3 +48,17 @@ class GetGeneration:
             message = f"job {job_id} does not exist"
             raise JobNotFoundError(message)
         return job
+
+
+@dataclass(frozen=True, slots=True)
+class CancelGeneration:
+    store: JobStore
+    clock: Clock
+
+    async def __call__(self, job_id: UUID) -> GenerationJob:
+        now = self.clock()
+        job = await self.store.update(job_id, lambda stored: stored.cancel(now))
+        if job is None:
+            message = f"job {job_id} does not exist"
+            raise JobNotFoundError(message)
+        return job

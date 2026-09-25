@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -5,6 +6,8 @@ from uuid import UUID
 
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import GenerationJob
+
+type JobTransition = Callable[[GenerationJob], GenerationJob]
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +35,8 @@ class JobStore(Protocol):
     ) -> StoredJob: ...
 
     async def get(self, job_id: UUID) -> GenerationJob | None: ...
+
+    async def update(self, job_id: UUID, transition: JobTransition) -> GenerationJob | None: ...
 
 
 class JobQueue(Protocol):

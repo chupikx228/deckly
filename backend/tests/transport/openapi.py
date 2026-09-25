@@ -41,3 +41,18 @@ def schema_validator(name: str) -> Draft202012Validator:
 
 def spec_errors(name: str, instance: object) -> list[str]:
     return [error.message for error in schema_validator(name).iter_errors(instance)]
+
+
+@cache
+def spec_contents() -> object:
+    contents: object = yaml.safe_load(SPEC_PATH.read_text(encoding="utf-8"))
+    return contents
+
+
+def declared_responses(path: str, method: str) -> dict[str, object]:
+    node = spec_contents()
+    for key in ("paths", path, method, "responses"):
+        assert isinstance(node, dict)
+        node = node[key]
+    assert isinstance(node, dict)
+    return {str(status): response for status, response in node.items()}

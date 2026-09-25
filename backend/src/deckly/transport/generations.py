@@ -15,7 +15,7 @@ from pydantic import (
     field_validator,
 )
 
-from deckly.application.generations import CreateGeneration, GetGeneration, JobCreated
+from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration, JobCreated
 from deckly.application.ports import IdempotencyScope
 from deckly.domain.exceptions import JobNotFoundError
 from deckly.domain.generation import Difficulty, GenerationRequest
@@ -24,6 +24,7 @@ from deckly.domain.notes.note_type import NoteType
 from deckly.domain.text import is_uuid_v4, visible_length
 from deckly.transport.body import ResponseBody, UtcDateTime
 from deckly.transport.dependencies import (
+    cancel_generation_use_case,
     create_generation_use_case,
     get_generation_use_case,
     problem_responder,
@@ -244,3 +245,16 @@ async def get_generation(
     if not job.is_terminal:
         response.headers[RETRY_AFTER_HEADER] = str(POLL_RETRY_AFTER_SECONDS)
     return GenerationJobBody.from_job(job, problems)
+
+
+@router.post(
+    "/generations/{job_id}/cancel",
+    status_code=HTTPStatus.NO_CONTENT,
+    response_class=Response,
+    dependencies=[Depends(require_client_id)],
+)
+async def cancel_generation(
+    job_id: str,
+    cancel: Annotated[CancelGeneration, Depends(cancel_generation_use_case)],
+) -> None:
+    await cancel(parse_job_id(job_id))

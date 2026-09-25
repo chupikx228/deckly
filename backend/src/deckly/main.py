@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, FastAPI
 
-from deckly.application.generations import CreateGeneration, GetGeneration
+from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
 from deckly.config import Settings, load_settings
 from deckly.infrastructure.database import create_engine, create_session_factory, verify_connection
 from deckly.infrastructure.job_store import PostgresJobStore
@@ -58,6 +58,7 @@ def build_lifespan(settings: Settings) -> Lifespan:
                     new_job_id=uuid4,
                 )
                 app.state.get_generation = GetGeneration(store=store)
+                app.state.cancel_generation = CancelGeneration(store=store, clock=utc_now)
                 yield
             finally:
                 await queue.aclose()
