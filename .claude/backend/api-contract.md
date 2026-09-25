@@ -150,6 +150,11 @@ accepted. See "Quota" below.
 Polled by the client. Returns `200` in every non-terminal and terminal state; a job that
 does not exist returns `404`.
 
+**Access.** `X-Client-Id` is required and validated here under the same rules as on
+`POST /generations`, but access to a job is not scoped by client: anyone who knows a `jobId`
+can poll it. This is intentional. The random v4 job id is itself the capability, because
+`X-Client-Id` is an anonymous, spoofable device id and not a security boundary.
+
 ```json
 {
   "jobId": "…",

@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, FastAPI
 
-from deckly.application.generations import CreateGeneration
+from deckly.application.generations import CreateGeneration, GetGeneration
 from deckly.config import Settings, load_settings
 from deckly.infrastructure.database import create_engine, create_session_factory, verify_connection
 from deckly.infrastructure.job_store import PostgresJobStore
@@ -46,16 +46,18 @@ def build_lifespan(settings: Settings) -> Lifespan:
             )
             try:
                 session_factory = create_session_factory(engine)
+                store = PostgresJobStore(session_factory)
                 app.state.settings = settings
                 app.state.session_factory = session_factory
                 app.state.queue = queue
                 app.state.create_generation = CreateGeneration(
-                    store=PostgresJobStore(session_factory),
+                    store=store,
                     queue=ArqJobQueue(queue),
                     quota=UnmeteredQuota(settings.limits.generation_jobs_per_day),
                     clock=utc_now,
                     new_job_id=uuid4,
                 )
+                app.state.get_generation = GetGeneration(store=store)
                 yield
             finally:
                 await queue.aclose()

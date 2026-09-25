@@ -2,7 +2,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from uuid import UUID
 
-from deckly.application.generations import CreateGeneration
+from deckly.application.generations import CreateGeneration, GetGeneration
 from deckly.application.ports import IdempotencyScope, Quota, StoredJob
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import GenerationJob
@@ -55,6 +55,9 @@ class InMemoryJobStore:
         self.requests[job.job_id] = request
         return StoredJob(job=job, request=request)
 
+    async def get(self, job_id: UUID) -> GenerationJob | None:
+        return self.jobs.get(job_id)
+
     def replace(self, job: GenerationJob) -> None:
         self.jobs[job.job_id] = job
 
@@ -90,3 +93,4 @@ class Harness:
             clock=lambda: self.now,
             new_job_id=lambda: next(ids),
         )
+        self.get = GetGeneration(store=self.store)

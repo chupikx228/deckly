@@ -4,7 +4,7 @@ from http import HTTPStatus
 from typing import Annotated, Self
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Response
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -15,13 +15,22 @@ from pydantic import (
     field_validator,
 )
 
-from deckly.application.generations import CreateGeneration, JobCreated
+from deckly.application.generations import CreateGeneration, GetGeneration, JobCreated
 from deckly.application.ports import IdempotencyScope
+from deckly.domain.exceptions import JobNotFoundError
 from deckly.domain.generation import Difficulty, GenerationRequest
-from deckly.domain.job import JobStatus
+from deckly.domain.job import Failed, GenerationJob, JobStage, JobStatus, Succeeded
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.text import is_uuid_v4, visible_length
-from deckly.transport.dependencies import create_generation_use_case
+from deckly.transport.body import ResponseBody, UtcDateTime
+from deckly.transport.dependencies import (
+    create_generation_use_case,
+    get_generation_use_case,
+    problem_responder,
+)
+from deckly.transport.error_handlers import RETRY_AFTER_HEADER, ProblemResponder
+from deckly.transport.problem import Problem
+from deckly.transport.results import GenerationResultBody
 
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 CLIENT_ID_HEADER = "X-Client-Id"
@@ -32,8 +41,10 @@ MIN_CARD_COUNT = 5
 MAX_CARD_COUNT = 200
 MAX_INSTRUCTIONS_LENGTH = 500
 NUL = "\x00"
+POLL_RETRY_AFTER_SECONDS = 2
 
 CANONICAL_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+HYPHENATED_UUID = re.compile(CANONICAL_UUID.pattern, re.IGNORECASE)
 
 LANGUAGE_TAG = re.compile(
     r"(?:"
@@ -84,6 +95,17 @@ def require_uuid_v4(value: UUID) -> UUID:
 
 
 type CanonicalUuid = Annotated[UUID, BeforeValidator(require_canonical_uuid), AfterValidator(require_uuid_v4)]
+
+
+def parse_job_id(value: str) -> UUID:
+    if HYPHENATED_UUID.fullmatch(value) is None:
+        message = f"{value!r} is not a job id"
+        raise JobNotFoundError(message)
+    return UUID(value)
+
+
+def require_client_id(client_id: Annotated[CanonicalUuid, Header(alias=CLIENT_ID_HEADER)]) -> UUID:
+    return client_id
 
 
 class GenerationRequestBody(BaseModel):
@@ -146,10 +168,6 @@ class GenerationRequestBody(BaseModel):
         )
 
 
-class ResponseBody(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, validate_by_name=True, validate_by_alias=True)
-
-
 class QuotaBody(ResponseBody):
     limit: int
     remaining: int
@@ -176,6 +194,31 @@ class GenerationJobCreatedBody(ResponseBody):
         )
 
 
+class GenerationJobBody(ResponseBody):
+    job_id: UUID = Field(alias="jobId")
+    status: JobStatus
+    stage: JobStage | None
+    progress: float
+    created_at: UtcDateTime = Field(alias="createdAt")
+    updated_at: UtcDateTime = Field(alias="updatedAt")
+    result: GenerationResultBody | None
+    error: Problem | None
+
+    @classmethod
+    def from_job(cls, job: GenerationJob, problems: ProblemResponder) -> Self:
+        state = job.state
+        return cls(
+            job_id=job.job_id,
+            status=job.status,
+            stage=job.stage,
+            progress=job.progress.value,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+            result=GenerationResultBody.from_result(state.result) if isinstance(state, Succeeded) else None,
+            error=problems.describe_failure(state.code) if isinstance(state, Failed) else None,
+        )
+
+
 router = APIRouter()
 
 
@@ -188,3 +231,16 @@ async def create_generation(
 ) -> GenerationJobCreatedBody:
     scope = IdempotencyScope(client_id=client_id, idempotency_key=idempotency_key)
     return GenerationJobCreatedBody.from_created(await create(body.to_domain(), scope))
+
+
+@router.get("/generations/{job_id}", dependencies=[Depends(require_client_id)])
+async def get_generation(
+    job_id: str,
+    response: Response,
+    get: Annotated[GetGeneration, Depends(get_generation_use_case)],
+    problems: Annotated[ProblemResponder, Depends(problem_responder)],
+) -> GenerationJobBody:
+    job = await get(parse_job_id(job_id))
+    if not job.is_terminal:
+        response.headers[RETRY_AFTER_HEADER] = str(POLL_RETRY_AFTER_SECONDS)
+    return GenerationJobBody.from_job(job, problems)
