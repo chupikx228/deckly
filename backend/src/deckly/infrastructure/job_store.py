@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -138,3 +139,8 @@ class PostgresJobStore:
             message = f"idempotency conflict for {scope} but no stored job was found"
             raise CorruptStoredJobError(message)
         return StoredJob(job=restore_job(existing), request=restore_request(existing))
+
+    async def get(self, job_id: UUID) -> GenerationJob | None:
+        async with self._session_factory() as session:
+            row = await session.get(GenerationJobRow, job_id)
+        return None if row is None else restore_job(row)

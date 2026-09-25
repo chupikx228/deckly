@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from dataclasses import replace
 from uuid import uuid4
 
@@ -9,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deckly.application.ports import IdempotencyScope
 from deckly.config import Settings
 from deckly.domain.generation import Difficulty, GenerationRequest
-from deckly.domain.job import GenerationJob, JobStatus
+from deckly.domain.job import FailureCode, GenerationJob, JobStage, JobStatus
 from deckly.domain.notes.note_type import NoteType
 from deckly.infrastructure.database import create_engine, create_session_factory
 from deckly.infrastructure.job_store import PostgresJobStore, UnstorableJobStateError
@@ -182,3 +183,28 @@ async def test_replays_from_two_clients_sharing_a_key_each_get_their_own_job(
     other_replay = await store.add(new_job(), generation_request(), other_scope)
 
     assert (first_replay.job.job_id, other_replay.job.job_id) == (first.job.job_id, other.job.job_id)
+
+
+STORED_STATES: dict[str, Callable[[GenerationJob], GenerationJob]] = {
+    "queued": lambda job: job,
+    "running": lambda job: job.start(at(1)).advance(JobStage.GENERATING_CARDS, 0.62, at(44)),
+    "failed": lambda job: job.start(at(1)).fail(FailureCode.PROVIDER_UNAVAILABLE, at(2)),
+    "cancelled": lambda job: job.cancel(at(3)),
+}
+
+
+@pytest.mark.parametrize("transition", STORED_STATES.values(), ids=STORED_STATES.keys())
+async def test_get_returns_the_job_exactly_as_it_was_stored(
+    session_factory: async_sessionmaker[AsyncSession],
+    cleanup: Cleanup,
+    transition: Callable[[GenerationJob], GenerationJob],
+) -> None:
+    store = PostgresJobStore(session_factory)
+    job = transition(new_job())
+    await store.add(job, generation_request(), cleanup.scope())
+
+    assert await store.get(job.job_id) == job
+
+
+async def test_get_of_an_unknown_job_is_none(session_factory: async_sessionmaker[AsyncSession]) -> None:
+    assert await PostgresJobStore(session_factory).get(uuid4()) is None

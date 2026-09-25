@@ -22,6 +22,7 @@ from deckly.domain.exceptions import (
     JobNotFoundError,
     TopicRejectedError,
 )
+from deckly.domain.job import FailureCode
 from deckly.transport.problem import PROBLEM_JSON_MEDIA_TYPE, ErrorCode, Problem
 
 RETRY_AFTER_HEADER = "Retry-After"
@@ -67,6 +68,17 @@ PROBLEM_KINDS: Mapping[type[Exception], ProblemKind] = {
 }
 
 
+FAILURE_KINDS: Mapping[FailureCode, ProblemKind] = {
+    FailureCode.PROVIDER_UNAVAILABLE: ProblemKind(
+        HTTPStatus.OK, ErrorCode.PROVIDER_UNAVAILABLE, "Provider unavailable"
+    ),
+    FailureCode.NO_VALID_CONTENT: ProblemKind(HTTPStatus.OK, ErrorCode.NO_VALID_CONTENT, "No valid content"),
+    FailureCode.GENERATION_FAILED: ProblemKind(
+        HTTPStatus.OK, ErrorCode.GENERATION_FAILED, "Generation failed"
+    ),
+}
+
+
 def find_problem_kind(exc: Exception) -> ProblemKind | None:
     for cls in type(exc).__mro__:
         kind = PROBLEM_KINDS.get(cls)
@@ -94,6 +106,26 @@ class ProblemResponder:
     def __init__(self, problem_type_base_url: str) -> None:
         self._problem_type_base_url = problem_type_base_url.rstrip("/")
 
+    def describe(
+        self,
+        kind: ProblemKind,
+        *,
+        status: int | None = None,
+        detail: str | None = None,
+        retry_after_seconds: int | None = None,
+    ) -> Problem:
+        return Problem(
+            type=self._type_url(kind.code),
+            title=kind.title,
+            status=status or kind.status,
+            code=kind.code,
+            detail=detail,
+            retry_after_seconds=retry_after_seconds,
+        )
+
+    def describe_failure(self, code: FailureCode) -> Problem:
+        return self.describe(FAILURE_KINDS[code])
+
     def respond(
         self,
         kind: ProblemKind,
@@ -102,14 +134,7 @@ class ProblemResponder:
         detail: str | None = None,
         retry_after_seconds: int | None = None,
     ) -> JSONResponse:
-        problem = Problem(
-            type=self._type_url(kind.code),
-            title=kind.title,
-            status=status or kind.status,
-            code=kind.code,
-            detail=detail,
-            retry_after_seconds=retry_after_seconds,
-        )
+        problem = self.describe(kind, status=status, detail=detail, retry_after_seconds=retry_after_seconds)
         headers = {} if retry_after_seconds is None else {RETRY_AFTER_HEADER: str(retry_after_seconds)}
         return JSONResponse(
             content=problem.model_dump(mode="json", by_alias=True, exclude_none=True),
@@ -152,6 +177,7 @@ class ProblemResponder:
 
 def register_error_handlers(app: FastAPI, problem_type_base_url: str) -> None:
     responder = ProblemResponder(problem_type_base_url)
+    app.state.problem_responder = responder
     app.exception_handler(DomainError)(responder.handle_known_error)
     app.exception_handler(ApplicationError)(responder.handle_known_error)
     app.exception_handler(RequestValidationError)(responder.handle_validation_error)

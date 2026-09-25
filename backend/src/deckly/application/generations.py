@@ -5,6 +5,7 @@ from uuid import UUID
 
 from deckly.application.exceptions import IdempotencyKeyConflictError
 from deckly.application.ports import IdempotencyScope, JobQueue, JobStore, Quota, QuotaReader
+from deckly.domain.exceptions import JobNotFoundError
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import GenerationJob, JobStatus
 
@@ -35,3 +36,15 @@ class CreateGeneration:
         if stored.job.status is JobStatus.QUEUED:
             await self.queue.enqueue(stored.job.job_id)
         return JobCreated(job=stored.job, quota=await self.quota.current(scope.client_id, now))
+
+
+@dataclass(frozen=True, slots=True)
+class GetGeneration:
+    store: JobStore
+
+    async def __call__(self, job_id: UUID) -> GenerationJob:
+        job = await self.store.get(job_id)
+        if job is None:
+            message = f"job {job_id} does not exist"
+            raise JobNotFoundError(message)
+        return job

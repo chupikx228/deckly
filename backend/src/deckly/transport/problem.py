@@ -2,6 +2,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from deckly.transport.body import is_none
+
 PROBLEM_JSON_MEDIA_TYPE = "application/problem+json"
 
 
@@ -28,5 +30,7 @@ class Problem(BaseModel):
     title: str
     status: int
     code: ErrorCode
-    detail: str | None = None
-    retry_after_seconds: int | None = Field(default=None, serialization_alias="retryAfterSeconds")
+    detail: str | None = Field(default=None, exclude_if=is_none)
+    retry_after_seconds: int | None = Field(
+        default=None, serialization_alias="retryAfterSeconds", exclude_if=is_none
+    )
