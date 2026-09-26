@@ -1,5 +1,6 @@
 import unicodedata
 from datetime import datetime
+from typing import Final
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -30,6 +31,9 @@ DEFAULT_IGNORABLE_RANGES = (
 EMOJI_TAG_CHARACTERS = range(0xE0020, 0xE0080)
 UUID_VERSION = 4
 UTF16_CODE_UNIT_BYTES = 2
+COMPARISON_FORM: Final = "NFC"
+WIDTH_VARIANT_TAGS = frozenset({"<wide>", "<narrow>"})
+HEXADECIMAL = 16
 
 
 def is_invisible_character(character: str) -> bool:
@@ -76,11 +80,28 @@ def is_insignificant_character(character: str) -> bool:
     return is_invisible_character(character) and ord(character) not in EMOJI_TAG_CHARACTERS
 
 
+def fold_width(character: str) -> str:
+    tag, _, mapping = unicodedata.decomposition(character).partition(" ")
+    if tag not in WIDTH_VARIANT_TAGS:
+        return character
+    return "".join(chr(int(code, HEXADECIMAL)) for code in mapping.split())
+
+
+def fold_case_simply(character: str) -> str:
+    for folded in (character.casefold(), character.lower()):
+        if len(folded) == 1:
+            return folded
+    return character
+
+
 def normalise_for_comparison(value: str) -> str:
     visible = "".join(
-        character for character in value if character.isspace() or not is_insignificant_character(character)
+        fold_width(character)
+        for character in value
+        if character.isspace() or not is_insignificant_character(character)
     )
-    return " ".join(unicodedata.normalize("NFKC", visible).split()).casefold()
+    words = " ".join(unicodedata.normalize(COMPARISON_FORM, visible).split())
+    return unicodedata.normalize(COMPARISON_FORM, "".join(fold_case_simply(character) for character in words))
 
 
 def is_web_url(value: str) -> bool:

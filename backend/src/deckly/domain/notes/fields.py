@@ -1,3 +1,4 @@
+from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -13,6 +14,10 @@ class NoteFields:
     @property
     def referenced_image_ids(self) -> frozenset[str]:
         return frozenset()
+
+    @property
+    def duplicate_key(self) -> Hashable:
+        return self
 
 
 def require_text(value: str, field: str) -> None:

@@ -38,6 +38,8 @@ DIFFICULTY_GUIDANCE: Mapping[Difficulty, str] = {
 }
 SECTION_BREAK = "\n\n"
 LIST_SEPARATOR = ", "
+ESTIMATED_DECK_TOKENS = 100
+ESTIMATED_TOKENS_PER_NOTE = 100
 
 
 def system_prompt(handlers: Sequence[NoteTypeHandler]) -> str:
@@ -71,9 +73,15 @@ def user_prompt(
     return SECTION_BREAK.join(sections)
 
 
+def expected_output_tokens(request: GenerationRequest) -> int:
+    return ESTIMATED_DECK_TOKENS + request.card_count * ESTIMATED_TOKENS_PER_NOTE
+
+
 def build_prompt(
     request: GenerationRequest, material: Sequence[SourceMaterial], handlers: Sequence[NoteTypeHandler]
 ) -> LlmPrompt:
     return LlmPrompt(
-        system=system_prompt(handlers), user=strip_unstorable(user_prompt(request, material, handlers))
+        system=system_prompt(handlers),
+        user=strip_unstorable(user_prompt(request, material, handlers)),
+        expected_output_tokens=expected_output_tokens(request),
     )

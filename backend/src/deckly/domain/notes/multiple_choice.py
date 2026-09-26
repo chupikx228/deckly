@@ -36,3 +36,11 @@ class MultipleChoiceFields(NoteFields):
         if len(set(normalised)) != len(normalised):
             message = "distractors must be mutually exclusive"
             raise InvalidNoteError(message)
+
+    @property
+    def duplicate_key(self) -> tuple[str, str, frozenset[str]]:
+        return (
+            normalise_for_comparison(self.question),
+            normalise_for_comparison(self.answer),
+            frozenset(normalise_for_comparison(distractor) for distractor in self.distractors),
+        )

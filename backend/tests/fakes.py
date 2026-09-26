@@ -27,6 +27,7 @@ from tests.domain.builders import SOURCES, T0, basic_note, result_with
 
 QUOTA_LIMIT = 20
 IMAGE_NUMBER_OFFSET = 1000
+MODEL_THINKING_SECONDS = 5
 PAGES = (RetrievedPage(source=SOURCES[0], content="<p>A red triangle warns of danger ahead.</p>"),)
 MATERIAL = (SourceMaterial(source=SOURCES[0], text="A red triangle warns of danger ahead."),)
 GENERATED = result_with(basic_note(1), basic_note(2), basic_note(3))
@@ -62,6 +63,23 @@ class FakeLlmClient:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class SlowModel:
+    def __init__(self, answer: LlmReply) -> None:
+        self.answer = answer
+        self.reached = asyncio.Event()
+        self.endings: list[str] = []
+
+    async def think(self) -> LlmReply:
+        self.reached.set()
+        try:
+            await asyncio.sleep(MODEL_THINKING_SECONDS)
+        except asyncio.CancelledError:
+            self.endings.append("aborted")
+            raise
+        self.endings.append("answered")
+        return self.answer
 
 
 def job_id(number: int) -> UUID:
@@ -147,6 +165,8 @@ class InMemoryJobStore:
 class RecordingJobQueue:
     def __init__(self) -> None:
         self.enqueued: list[UUID] = []
+        self.aborted: list[UUID] = []
+        self.running: dict[UUID, asyncio.Task[None]] = {}
         self.unavailable = False
 
     async def enqueue(self, job_id: UUID) -> None:
@@ -154,6 +174,12 @@ class RecordingJobQueue:
             message = "queue unavailable"
             raise ConnectionError(message)
         self.enqueued.append(job_id)
+
+    async def abort(self, job_id: UUID) -> None:
+        self.aborted.append(job_id)
+        task = self.running.get(job_id)
+        if task is not None:
+            task.cancel()
 
 
 class FixedQuota:
@@ -208,9 +234,9 @@ class FakeProviders:
 
 
 class Harness:
-    def __init__(self, store: InMemoryJobStore | None = None) -> None:
+    def __init__(self, store: InMemoryJobStore | None = None, queue: RecordingJobQueue | None = None) -> None:
         self.store = InMemoryJobStore() if store is None else store
-        self.queue = RecordingJobQueue()
+        self.queue = RecordingJobQueue() if queue is None else queue
         self.providers = FakeProviders()
         self.now = T0
         ids = sequential_job_ids()
@@ -222,7 +248,7 @@ class Harness:
             new_job_id=lambda: next(ids),
         )
         self.get = GetGeneration(store=self.store)
-        self.cancel = CancelGeneration(store=self.store, clock=lambda: self.now)
+        self.cancel = CancelGeneration(store=self.store, queue=self.queue, clock=lambda: self.now)
         self.run = RunGeneration(
             store=self.store,
             retriever=self.providers,

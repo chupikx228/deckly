@@ -108,6 +108,7 @@ export interface components {
         ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "UPSTREAM_UNAVAILABLE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
         /** @enum {string} */
         RejectionReason: "too_easy" | "too_hard" | "incorrect" | "duplicate" | "off_topic" | "other";
+        /** @description A request whose noteTypes contains image_occlusion must also send includeImages: true, because an image-occlusion note is built on an image the server fetches. Leaving includeImages out counts as false. Such a request is rejected with VALIDATION_FAILED. */
         GenerationRequest: {
             /** @description Length is checked after trimming leading and trailing whitespace, so a blank or whitespace-only topic is rejected. The trimmed value is what the server uses. The server also requires at least 3 visible characters. Whitespace, control characters, format characters such as zero-width space or BOM, combining marks, and characters that render blank (Hangul fillers, the blank Braille pattern U+2800) do not count toward that minimum, so "a\u200Bb" and "a b" are rejected. Must not contain NUL (U+0000). */
             topic: string;
@@ -120,13 +121,16 @@ export interface components {
             cardCount: number;
             difficulty?: components["schemas"]["Difficulty"];
             /**
-             * @description A note type the server cannot generate yet is rejected with VALIDATION_FAILED, even though it is in the enum.
+             * @description A note type the server cannot generate yet is rejected with VALIDATION_FAILED, even though it is in the enum. image_occlusion is only accepted together with includeImages: true.
              * @default [
              *       "basic"
              *     ]
              */
             noteTypes: components["schemas"]["NoteType"][];
-            /** @default false */
+            /**
+             * @description Must be true when noteTypes contains image_occlusion.
+             * @default false
+             */
             includeImages: boolean;
             /** @description Must not contain NUL (U+0000). */
             instructions?: string;

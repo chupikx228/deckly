@@ -23,6 +23,7 @@ class LlmStop(StrEnum):
 class LlmPrompt:
     system: str
     user: str
+    expected_output_tokens: int
 
 
 @dataclass(frozen=True, slots=True)

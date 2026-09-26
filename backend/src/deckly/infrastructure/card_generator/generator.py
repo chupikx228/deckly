@@ -1,6 +1,6 @@
 import logging
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from uuid import UUID
@@ -128,14 +128,14 @@ class LlmCardGenerator:
         drops: Counter[DropReason],
     ) -> tuple[Note, ...]:
         valid: list[Note] = []
-        seen: set[tuple[NoteType, NoteFields]] = set()
+        seen: set[tuple[NoteType, Hashable]] = set()
         for raw in document.notes:
             try:
                 note = self._note(raw, request, material)
             except DroppedNoteError as error:
                 drops[error.reason] += 1
                 continue
-            content = (note.note_type, note.fields)
+            content = (note.note_type, note.fields.duplicate_key)
             if content in seen:
                 drops[DropReason.DUPLICATE] += 1
                 continue

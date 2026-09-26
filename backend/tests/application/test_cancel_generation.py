@@ -1,13 +1,25 @@
 from collections.abc import Callable
+from uuid import UUID
 
 import pytest
 
 from deckly.domain.exceptions import JobAlreadyTerminalError, JobNotFoundError
 from deckly.domain.job import FailureCode, GenerationJob, JobStage, JobStatus
 from tests.domain.builders import JOB_ID, T0, at, basic_note, result_with
-from tests.fakes import Harness, generation_request, job_id, scope
+from tests.fakes import Harness, InMemoryJobStore, RecordingJobQueue, generation_request, job_id, scope
 
 pytestmark = pytest.mark.anyio
+
+
+class StatusSeenOnAbort(RecordingJobQueue):
+    def __init__(self, store: InMemoryJobStore) -> None:
+        super().__init__()
+        self.store = store
+        self.statuses: list[JobStatus] = []
+
+    async def abort(self, job_id: UUID) -> None:
+        self.statuses.append(self.store.jobs[job_id].status)
+        await super().abort(job_id)
 
 
 def queued() -> GenerationJob:
@@ -47,6 +59,21 @@ async def test_active_job_is_cancelled_and_stored(make_job: Callable[[], Generat
     assert cancelled.updated_at == at(100)
 
 
+@pytest.mark.parametrize("make_job", ACTIVE_JOBS.values(), ids=ACTIVE_JOBS.keys())
+async def test_work_in_flight_is_aborted_only_once_the_job_is_stored_as_cancelled(
+    make_job: Callable[[], GenerationJob],
+) -> None:
+    store = InMemoryJobStore()
+    queue = StatusSeenOnAbort(store)
+    harness = Harness(store, queue)
+    store.replace(make_job())
+
+    await harness.cancel(JOB_ID)
+
+    assert queue.aborted == [JOB_ID]
+    assert queue.statuses == [JobStatus.CANCELLED]
+
+
 @pytest.mark.parametrize("make_job", TERMINAL_JOBS.values(), ids=TERMINAL_JOBS.keys())
 async def test_terminal_job_is_a_conflict_and_left_untouched(make_job: Callable[[], GenerationJob]) -> None:
     job = make_job()
@@ -56,6 +83,7 @@ async def test_terminal_job_is_a_conflict_and_left_untouched(make_job: Callable[
         await harness.cancel(JOB_ID)
 
     assert harness.store.jobs == {JOB_ID: job}
+    assert harness.queue.aborted == []
 
 
 async def test_unknown_job_is_not_found() -> None:
@@ -64,6 +92,8 @@ async def test_unknown_job_is_not_found() -> None:
 
     with pytest.raises(JobNotFoundError):
         await harness.cancel(job_id(999))
+
+    assert harness.queue.aborted == []
 
 
 async def test_job_created_through_the_use_case_can_be_cancelled_once() -> None:

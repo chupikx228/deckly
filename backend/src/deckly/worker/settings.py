@@ -71,7 +71,9 @@ def build_llm_client(providers: ProviderSettings) -> ResilientLlmClient:
     )
     runtime = RetryRuntime(clock=time.monotonic, sleep=asyncio.sleep, jitter=SystemRandom().random)
     client = LLM_CLIENTS[providers.model_provider](endpoint)
-    return ResilientLlmClient(client, ResilientCaller(policy, breaker, runtime))
+    return ResilientLlmClient(
+        client, ResilientCaller(policy, breaker, runtime), providers.model_max_output_tokens
+    )
 
 
 async def run_generation(ctx: WorkerContext, job_id: str) -> None:
@@ -118,3 +120,4 @@ class WorkerSettings:
     cron_jobs: Sequence[CronJob] | None = None
     on_startup: StartupShutdown | None = startup
     on_shutdown: StartupShutdown | None = shutdown
+    allow_abort_jobs = True

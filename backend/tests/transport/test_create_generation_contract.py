@@ -91,7 +91,12 @@ ACCEPTED_PAYLOADS: dict[str, dict[str, object]] = {
     },
     "difficulty beginner": with_(difficulty="beginner"),
     "difficulty intermediate": with_(difficulty="intermediate"),
-    "every registered note type": with_(noteTypes=REGISTERED_NOTE_TYPES),
+    "every registered note type with images": with_(noteTypes=REGISTERED_NOTE_TYPES, includeImages=True),
+    "every note type but image_occlusion without images": with_(
+        noteTypes=[note_type for note_type in REGISTERED_NOTE_TYPES if note_type != "image_occlusion"],
+        includeImages=False,
+    ),
+    "image_occlusion alone with images": with_(noteTypes=["image_occlusion"], includeImages=True),
     "includeImages false": with_(includeImages=False),
     "instructions empty": with_(instructions=""),
     "instructions at 500": with_(instructions="x" * 500),
@@ -132,6 +137,10 @@ SPEC_AND_SERVER_REJECT: dict[str, object] = {
     "noteTypes duplicated": with_(noteTypes=["basic", "cloze", "basic"]),
     "noteTypes as string": with_(noteTypes="basic"),
     "noteTypes null": with_(noteTypes=None),
+    "image_occlusion with includeImages omitted": with_(noteTypes=["image_occlusion"]),
+    "image_occlusion with includeImages false": with_(
+        noteTypes=["basic", "image_occlusion"], includeImages=False
+    ),
     "includeImages as string": with_(includeImages="true"),
     "includeImages as number": with_(includeImages=1),
     "includeImages null": with_(includeImages=None),
@@ -260,6 +269,16 @@ def test_rejected_request_creates_and_enqueues_nothing(monkeypatch: pytest.Monke
 
     post(build_client(harness), with_(noteTypes=["cloze"]))
 
+    assert harness.store.jobs == {}
+    assert harness.queue.enqueued == []
+
+
+def test_image_occlusion_without_images_creates_and_enqueues_nothing() -> None:
+    harness = Harness()
+
+    response = post(build_client(harness), with_(noteTypes=["image_occlusion"]))
+
+    assert_validation_failed(response)
     assert harness.store.jobs == {}
     assert harness.queue.enqueued == []
 

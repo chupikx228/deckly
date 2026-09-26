@@ -231,6 +231,52 @@ def test_multiple_choice_rejects_an_answer_matching_a_distractor_up_to_whitespac
         multiple_choice("New  York", "New York", "Boston")
 
 
+STILL_FOLDED: dict[str, tuple[str, str]] = {
+    "case even where it changes the meaning": ("Polish", "polish"),
+    "capital and small sharp s": (
+        "STRA\N{LATIN CAPITAL LETTER SHARP S}E",
+        "stra\N{LATIN SMALL LETTER SHARP S}e",
+    ),
+    "halfwidth katakana with a voiced sound mark": (
+        "\N{KATAKANA LETTER GA}",
+        "\N{HALFWIDTH KATAKANA LETTER KA}\N{HALFWIDTH KATAKANA VOICED SOUND MARK}",
+    ),
+    "ideographic space between words": ("New York", "New\N{IDEOGRAPHIC SPACE}York"),
+    "greek word ending in a final sigma": ("ΟΔΟΣ", "οδος"),
+    "iota subscript written apart from its capital": (
+        "\N{GREEK CAPITAL LETTER ALPHA}\N{COMBINING GREEK YPOGEGRAMMENI}",
+        "\N{GREEK SMALL LETTER ALPHA WITH YPOGEGRAMMENI}",
+    ),
+    "accent that only composes once the letter is folded": (
+        "J\N{COMBINING CARON}",
+        "\N{LATIN SMALL LETTER J WITH CARON}",
+    ),
+}
+
+
+@pytest.mark.parametrize(("answer", "distractor"), STILL_FOLDED.values(), ids=STILL_FOLDED.keys())
+def test_multiple_choice_still_folds_case_width_and_spacing(answer: str, distractor: str) -> None:
+    with pytest.raises(DistractorMatchesAnswerError):
+        multiple_choice(answer, "Boston", distractor)
+
+
+COMPATIBILITY_FORMS: dict[str, tuple[str, str]] = {
+    "superscript and subscript digit": ("x\N{SUPERSCRIPT TWO}", "x\N{SUBSCRIPT TWO}"),
+    "superscript and plain digit": ("x\N{SUPERSCRIPT TWO}", "x2"),
+    "sharp s and double s": ("Stra\N{LATIN SMALL LETTER SHARP S}e", "Strasse"),
+    "ligature and its letters": ("\N{LATIN SMALL LIGATURE FI}sh", "fish"),
+    "vulgar fraction and its digits": ("\N{VULGAR FRACTION ONE HALF}", "1\N{FRACTION SLASH}2"),
+    "roman numeral and its letters": ("\N{ROMAN NUMERAL FOUR}", "IV"),
+}
+
+
+@pytest.mark.parametrize(("first", "second"), COMPATIBILITY_FORMS.values(), ids=COMPATIBILITY_FORMS.keys())
+def test_multiple_choice_keeps_compatibility_forms_apart(first: str, second: str) -> None:
+    assert multiple_choice(first, "Boston", second).distractors == ("Boston", second)
+    assert multiple_choice(second, "Boston", first).distractors == ("Boston", first)
+    assert multiple_choice("Boston", first, second).distractors == (first, second)
+
+
 INVISIBLY_PADDED_ANSWERS = {
     "trailing zero-width space": "Paris\N{ZERO WIDTH SPACE}",
     "leading byte order mark": "\N{ZERO WIDTH NO-BREAK SPACE}Paris",

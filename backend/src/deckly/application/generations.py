@@ -53,6 +53,7 @@ class GetGeneration:
 @dataclass(frozen=True, slots=True)
 class CancelGeneration:
     store: JobStore
+    queue: JobQueue
     clock: Clock
 
     async def __call__(self, job_id: UUID) -> GenerationJob:
@@ -61,4 +62,5 @@ class CancelGeneration:
         if job is None:
             message = f"job {job_id} does not exist"
             raise JobNotFoundError(message)
+        await self.queue.abort(job_id)
         return job

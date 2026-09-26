@@ -29,6 +29,11 @@ class CircuitState(StrEnum):
     HALF_OPEN = "half_open"
 
 
+class CallSize(StrEnum):
+    TYPICAL = "typical"
+    OVERSIZED = "oversized"
+
+
 @dataclass(frozen=True, slots=True)
 class RetryPolicy:
     max_attempts: int
@@ -103,7 +108,7 @@ class ResilientCaller:
         self._breaker = breaker
         self._runtime = runtime
 
-    async def call[T](self, operation: Callable[[], Awaitable[T]]) -> T:
+    async def call[T](self, operation: Callable[[], Awaitable[T]], *, size: CallSize) -> T:
         deadline = self._runtime.clock() + self._policy.deadline_seconds
         attempt = 1
         while True:
@@ -111,13 +116,18 @@ class ResilientCaller:
             try:
                 result = await self._attempt(operation)
             except (TransientError, TimeoutError) as error:
-                self._breaker.record_failure()
+                self._record_failure(error, size)
                 delay = self._delay(attempt, error)
                 if not self._may_retry(attempt, delay, deadline):
                     raise UpstreamUnavailableError(retry_after_hint(delay)) from error
                 logger.warning(
                     "provider_call_retrying",
-                    extra={"attempt": attempt, "delay_seconds": delay, "error": type(error).__name__},
+                    extra={
+                        "attempt": attempt,
+                        "delay_seconds": delay,
+                        "error": type(error).__name__,
+                        "call_size": size,
+                    },
                 )
                 await self._runtime.sleep(delay)
                 attempt += 1
@@ -134,6 +144,12 @@ class ResilientCaller:
     async def _attempt[T](self, operation: Callable[[], Awaitable[T]]) -> T:
         async with asyncio.timeout(self._policy.attempt_timeout_seconds):
             return await operation()
+
+    def _record_failure(self, error: Exception, size: CallSize) -> None:
+        if size is CallSize.OVERSIZED and isinstance(error, TimeoutError):
+            self._breaker.release()
+            return
+        self._breaker.record_failure()
 
     def _delay(self, attempt: int, error: Exception) -> float:
         jittered = self._runtime.jitter() * self._policy.backoff_ceiling(attempt)

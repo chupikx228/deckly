@@ -7,22 +7,48 @@ from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE
 from tests.domain.builders import unregister
 
 
-def request_with(*note_types: NoteType, topic: str = "Road signs") -> GenerationRequest:
+def request_with(
+    *note_types: NoteType, topic: str = "Road signs", include_images: bool = False
+) -> GenerationRequest:
     return GenerationRequest(
         topic=topic,
         language="ru",
         card_count=40,
         difficulty=Difficulty.INTERMEDIATE,
         note_types=note_types,
-        include_images=False,
+        include_images=include_images,
         instructions=None,
     )
 
 
-def test_every_registered_note_type_can_be_requested_together() -> None:
+def test_every_registered_note_type_can_be_requested_together_with_images() -> None:
     note_types = tuple(NOTE_FIELDS_BY_TYPE)
 
-    assert request_with(*note_types).note_types == note_types
+    assert request_with(*note_types, include_images=True).note_types == note_types
+
+
+@pytest.mark.parametrize(
+    "note_types",
+    [(NoteType.IMAGE_OCCLUSION,), (NoteType.BASIC, NoteType.IMAGE_OCCLUSION)],
+    ids=["alone", "among other types"],
+)
+def test_image_occlusion_without_images_is_rejected(note_types: tuple[NoteType, ...]) -> None:
+    with pytest.raises(InvalidGenerationRequestError, match="includeImages"):
+        request_with(*note_types, include_images=False)
+
+
+def test_image_occlusion_with_images_is_accepted() -> None:
+    request = request_with(NoteType.IMAGE_OCCLUSION, include_images=True)
+
+    assert request.note_types == (NoteType.IMAGE_OCCLUSION,)
+
+
+def test_every_other_note_type_can_be_requested_without_images() -> None:
+    note_types = tuple(
+        note_type for note_type in NOTE_FIELDS_BY_TYPE if note_type is not NoteType.IMAGE_OCCLUSION
+    )
+
+    assert request_with(*note_types, include_images=False).note_types == note_types
 
 
 def test_no_note_types_is_rejected() -> None:

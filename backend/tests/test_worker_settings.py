@@ -1,11 +1,12 @@
 from typing import get_args
 
 import pytest
+from arq.worker import create_worker
 from pydantic import AnyHttpUrl, SecretStr
 
 from deckly.config import ModelProvider, ProviderSettings
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
-from deckly.worker.settings import LLM_CLIENTS, build_llm_client
+from deckly.worker.settings import LLM_CLIENTS, WorkerSettings, build_llm_client
 
 pytestmark = pytest.mark.anyio
 
@@ -41,3 +42,9 @@ async def test_llm_client_is_built_behind_the_resilience_layer_for_every_provide
 
     assert isinstance(client, ResilientLlmClient)
     await client.aclose()
+
+
+async def test_worker_cancels_the_task_of_a_job_aborted_through_the_queue() -> None:
+    worker = create_worker(WorkerSettings, handle_signals=False)
+
+    assert worker.allow_abort_jobs is True
