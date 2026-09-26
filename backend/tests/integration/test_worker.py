@@ -31,10 +31,13 @@ from deckly.infrastructure.resilience import (
     RetryPolicy,
     RetryRuntime,
 )
+from deckly.infrastructure.search.parser import CleaningSourceParser
+from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.worker.settings import (
     LLM_CLIENT_KEY,
     RUN_GENERATION_KEY,
     SETTINGS_KEY,
+    SOURCE_RETRIEVER_KEY,
     WorkerContext,
     WorkerSettings,
     from_context,
@@ -141,26 +144,19 @@ async def test_task_of_a_job_cancelled_while_it_waited_in_the_queue_calls_no_por
     assert providers.calls == []
 
 
-async def test_worker_started_with_the_stub_adapters_fails_jobs_instead_of_leaving_them_queued(
-    settings: Settings,
-    session_factory: async_sessionmaker[AsyncSession],
-    queue_pool: ArqRedis,
-    cleanup: Cleanup,
-) -> None:
-    store = PostgresJobStore(session_factory)
-    job = await enqueued_job(store, queue_pool, cleanup)
+async def test_worker_startup_wires_the_web_source_retriever_and_parser(settings: Settings) -> None:
     ctx: WorkerContext = {SETTINGS_KEY: settings}
 
     await startup(ctx)
     try:
-        await work_off(queue_pool, ctx, job.job_id)
+        run = from_context(ctx, RUN_GENERATION_KEY, RunGeneration)
+        retriever = from_context(ctx, SOURCE_RETRIEVER_KEY, WebSourceRetriever)
     finally:
         await shutdown(ctx)
 
-    stored = await store.get(job.job_id)
-    assert stored is not None
-    assert isinstance(stored.state, Failed)
-    assert (stored.state.code, stored.stage) == (FailureCode.GENERATION_FAILED, JobStage.RETRIEVING_SOURCES)
+    assert run.retriever is retriever
+    assert isinstance(run.parser, CleaningSourceParser)
+    assert run.parser.max_characters == settings.providers.search_max_source_characters
 
 
 async def test_worker_startup_wires_the_llm_card_generator_behind_the_resilience_layer(

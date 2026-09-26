@@ -4,7 +4,6 @@ from collections.abc import Mapping
 import httpx2
 
 from deckly.infrastructure.llm.client import (
-    RETRY_AFTER_HEADER,
     LlmEndpoint,
     LlmPrompt,
     LlmReply,
@@ -13,6 +12,7 @@ from deckly.infrastructure.llm.client import (
     LlmUnavailableError,
     status_error,
 )
+from deckly.infrastructure.resilience import RETRY_AFTER_HEADER
 
 PROVIDER = "DeepSeek"
 CHAT_COMPLETIONS_PATH = "/chat/completions"

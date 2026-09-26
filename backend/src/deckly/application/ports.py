@@ -67,12 +67,12 @@ class QuotaReader(Protocol):
 
 
 class SourceRetriever(Protocol):
-    async def retrieve(self, request: GenerationRequest) -> tuple[RetrievedPage, ...]: ...
+    async def retrieve(self, job_id: UUID, request: GenerationRequest) -> tuple[RetrievedPage, ...]: ...
 
 
 class SourceParser(Protocol):
     async def parse(
-        self, request: GenerationRequest, pages: tuple[RetrievedPage, ...]
+        self, job_id: UUID, request: GenerationRequest, pages: tuple[RetrievedPage, ...]
     ) -> tuple[SourceMaterial, ...]: ...
 
 

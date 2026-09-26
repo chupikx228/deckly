@@ -1,8 +1,9 @@
 from dataclasses import dataclass
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     AnyHttpUrl,
+    Field,
     NonNegativeInt,
     PositiveInt,
     PostgresDsn,
@@ -13,8 +14,11 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from deckly.infrastructure.search.parser import MIN_VISIBLE_CHARACTERS
+
 ASYNC_POSTGRES_SCHEME = "postgresql+asyncpg"
 ENV_FILE = ".env"
+MAX_SEARCH_RESULTS = 20
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 ModelProvider = Literal["anthropic", "deepseek"]
@@ -80,13 +84,29 @@ class ProviderSettings(BaseSettings):
     model_retry_max_delay_seconds: PositiveInt
     model_circuit_failure_threshold: PositiveInt
     model_circuit_reset_seconds: PositiveInt
+    search_base_url: AnyHttpUrl
     search_api_key: SecretStr
     search_timeout_seconds: PositiveInt
+    search_deadline_seconds: PositiveInt
+    search_max_attempts: PositiveInt
+    search_retry_base_delay_seconds: PositiveInt
+    search_retry_max_delay_seconds: PositiveInt
+    search_circuit_failure_threshold: PositiveInt
+    search_circuit_reset_seconds: PositiveInt
+    search_max_results: Annotated[int, Field(ge=1, le=MAX_SEARCH_RESULTS)]
+    search_max_source_characters: Annotated[int, Field(ge=MIN_VISIBLE_CHARACTERS)]
 
     @model_validator(mode="after")
     def require_deadline_to_fit_one_attempt(self) -> Self:
         if self.model_deadline_seconds < self.model_timeout_seconds:
             message = "model deadline must be at least the timeout of a single attempt"
+            raise ValueError(message)
+        return self
+
+    @model_validator(mode="after")
+    def require_search_deadline_to_fit_one_attempt(self) -> Self:
+        if self.search_deadline_seconds < self.search_timeout_seconds:
+            message = "search deadline must be at least the timeout of a single attempt"
             raise ValueError(message)
         return self
 
@@ -115,6 +135,14 @@ class Settings:
     providers: ProviderSettings
     limits: LimitSettings
     cache: CacheSettings
+
+    def __post_init__(self) -> None:
+        provider_deadlines = self.providers.search_deadline_seconds + self.providers.model_deadline_seconds
+        if provider_deadlines >= self.limits.generation_job_timeout_seconds:
+            message = (
+                "the search and model deadlines together must leave room within the generation job timeout"
+            )
+            raise ValueError(message)
 
 
 def load_settings() -> Settings:

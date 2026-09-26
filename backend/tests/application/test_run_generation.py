@@ -127,6 +127,15 @@ async def test_card_generator_is_told_which_job_it_generates_for() -> None:
     assert harness.providers.generated_for == [job_id]
 
 
+async def test_source_retriever_and_parser_are_told_which_job_they_work_for() -> None:
+    harness = Harness()
+    job_id = await create(harness, WITHOUT_IMAGES)
+
+    await harness.run(job_id)
+
+    assert (harness.providers.retrieved_for, harness.providers.parsed_for) == ([job_id], [job_id])
+
+
 @pytest.mark.parametrize("job_request", REQUESTS.values(), ids=REQUESTS.keys())
 async def test_progress_starts_at_zero_rises_with_every_update_and_ends_complete(
     job_request: GenerationRequest,

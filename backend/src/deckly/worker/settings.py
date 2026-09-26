@@ -20,17 +20,18 @@ from deckly.infrastructure.llm.anthropic_client import AnthropicLlmClient
 from deckly.infrastructure.llm.client import LlmClient, LlmEndpoint
 from deckly.infrastructure.llm.deepseek_client import DeepSeekLlmClient
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
-from deckly.infrastructure.providers import (
-    UnimplementedMediaFetcher,
-    UnimplementedSourceParser,
-    UnimplementedSourceRetriever,
-)
+from deckly.infrastructure.providers import UnimplementedMediaFetcher
 from deckly.infrastructure.queue import GENERATION_TASK
 from deckly.infrastructure.resilience import CircuitBreaker, ResilientCaller, RetryPolicy, RetryRuntime
+from deckly.infrastructure.search.client import SearchEndpoint
+from deckly.infrastructure.search.parser import CleaningSourceParser
+from deckly.infrastructure.search.retriever import WebSourceRetriever
+from deckly.infrastructure.search.tavily_client import TavilySearchClient
 
 SETTINGS_KEY = "settings"
 ENGINE_KEY = "engine"
 LLM_CLIENT_KEY = "llm_client"
+SOURCE_RETRIEVER_KEY = "source_retriever"
 RUN_GENERATION_KEY = "run_generation_use_case"
 
 LLM_CLIENTS: Mapping[ModelProvider, Callable[[LlmEndpoint], LlmClient]] = {
@@ -49,6 +50,14 @@ def from_context[T](ctx: WorkerContext, key: str, kind: type[T]) -> T:
     return value
 
 
+def resilient_caller(policy: RetryPolicy, *, failure_threshold: int, reset_seconds: int) -> ResilientCaller:
+    breaker = CircuitBreaker(
+        failure_threshold=failure_threshold, reset_seconds=reset_seconds, clock=time.monotonic
+    )
+    runtime = RetryRuntime(clock=time.monotonic, sleep=asyncio.sleep, jitter=SystemRandom().random)
+    return ResilientCaller(policy, breaker, runtime)
+
+
 def build_llm_client(providers: ProviderSettings) -> ResilientLlmClient:
     endpoint = LlmEndpoint(
         base_url=str(providers.model_base_url),
@@ -64,15 +73,38 @@ def build_llm_client(providers: ProviderSettings) -> ResilientLlmClient:
         base_delay_seconds=providers.model_retry_base_delay_seconds,
         max_delay_seconds=providers.model_retry_max_delay_seconds,
     )
-    breaker = CircuitBreaker(
+    caller = resilient_caller(
+        policy,
         failure_threshold=providers.model_circuit_failure_threshold,
         reset_seconds=providers.model_circuit_reset_seconds,
-        clock=time.monotonic,
     )
-    runtime = RetryRuntime(clock=time.monotonic, sleep=asyncio.sleep, jitter=SystemRandom().random)
     client = LLM_CLIENTS[providers.model_provider](endpoint)
-    return ResilientLlmClient(
-        client, ResilientCaller(policy, breaker, runtime), providers.model_max_output_tokens
+    return ResilientLlmClient(client, caller, providers.model_max_output_tokens)
+
+
+def build_source_retriever(providers: ProviderSettings) -> WebSourceRetriever:
+    endpoint = SearchEndpoint(
+        base_url=str(providers.search_base_url),
+        api_key=providers.search_api_key.get_secret_value(),
+        timeout_seconds=providers.search_timeout_seconds,
+    )
+    policy = RetryPolicy(
+        max_attempts=providers.search_max_attempts,
+        attempt_timeout_seconds=providers.search_timeout_seconds,
+        deadline_seconds=providers.search_deadline_seconds,
+        base_delay_seconds=providers.search_retry_base_delay_seconds,
+        max_delay_seconds=providers.search_retry_max_delay_seconds,
+    )
+    caller = resilient_caller(
+        policy,
+        failure_threshold=providers.search_circuit_failure_threshold,
+        reset_seconds=providers.search_circuit_reset_seconds,
+    )
+    return WebSourceRetriever(
+        client=TavilySearchClient(endpoint),
+        caller=caller,
+        clock=utc_now,
+        max_results=providers.search_max_results,
     )
 
 
@@ -92,10 +124,12 @@ async def startup(ctx: WorkerContext) -> None:
     await verify_connection(engine)
     llm = build_llm_client(settings.providers)
     ctx[LLM_CLIENT_KEY] = llm
+    retriever = build_source_retriever(settings.providers)
+    ctx[SOURCE_RETRIEVER_KEY] = retriever
     ctx[RUN_GENERATION_KEY] = RunGeneration(
         store=PostgresJobStore(create_session_factory(engine)),
-        retriever=UnimplementedSourceRetriever(),
-        parser=UnimplementedSourceParser(),
+        retriever=retriever,
+        parser=CleaningSourceParser(max_characters=settings.providers.search_max_source_characters),
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),
         media=UnimplementedMediaFetcher(),
         clock=utc_now,
@@ -104,13 +138,18 @@ async def startup(ctx: WorkerContext) -> None:
 
 async def shutdown(ctx: WorkerContext) -> None:
     llm = ctx.get(LLM_CLIENT_KEY)
+    retriever = ctx.get(SOURCE_RETRIEVER_KEY)
     engine = ctx.get(ENGINE_KEY)
     try:
         if isinstance(llm, ResilientLlmClient):
             await llm.aclose()
     finally:
-        if isinstance(engine, AsyncEngine):
-            await engine.dispose()
+        try:
+            if isinstance(retriever, WebSourceRetriever):
+                await retriever.aclose()
+        finally:
+            if isinstance(engine, AsyncEngine):
+                await engine.dispose()
 
 
 class WorkerSettings:

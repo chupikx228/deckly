@@ -5,6 +5,8 @@ from dataclasses import replace
 from datetime import datetime
 from uuid import UUID
 
+import httpx2
+
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
 from deckly.application.pipeline import RunGeneration
 from deckly.application.ports import (
@@ -23,17 +25,34 @@ from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
 from deckly.infrastructure.llm.client import LlmPrompt, LlmReply, LlmStop
 from deckly.infrastructure.quota import QUOTA_WINDOW
+from deckly.infrastructure.resilience import CircuitBreaker, ResilientCaller, RetryPolicy, RetryRuntime
+from deckly.infrastructure.search.client import SearchEndpoint, SearchHit, SearchQuery
+from deckly.infrastructure.search.parser import CleaningSourceParser
+from deckly.infrastructure.search.retriever import WebSourceRetriever
+from deckly.infrastructure.search.tavily_client import TavilySearchClient
 from tests.domain.builders import SOURCES, T0, basic_note, result_with
 
 QUOTA_LIMIT = 20
 IMAGE_NUMBER_OFFSET = 1000
 MODEL_THINKING_SECONDS = 5
+RESET_SECONDS = 30
+SEARCH_ENDPOINT = SearchEndpoint(base_url="https://api.tavily.test", api_key="tvly-test", timeout_seconds=5)
+SEARCH_POLICY = RetryPolicy(
+    max_attempts=2,
+    attempt_timeout_seconds=5,
+    deadline_seconds=20,
+    base_delay_seconds=1,
+    max_delay_seconds=2,
+)
+SEARCH_MAX_RESULTS = 6
+SOURCE_MAX_CHARACTERS = 2000
 PAGES = (RetrievedPage(source=SOURCES[0], content="<p>A red triangle warns of danger ahead.</p>"),)
 MATERIAL = (SourceMaterial(source=SOURCES[0], text="A red triangle warns of danger ahead."),)
 GENERATED = result_with(basic_note(1), basic_note(2), basic_note(3))
 
 type Hook = Callable[[], Awaitable[object]]
 type LlmOutcome = LlmReply | Exception | Callable[[], Awaitable[LlmReply]]
+type SearchOutcome = tuple[SearchHit, ...] | Exception | Callable[[], Awaitable[tuple[SearchHit, ...]]]
 
 
 def model_reply(document: object, stop: LlmStop = LlmStop.COMPLETE) -> LlmReply:
@@ -63,6 +82,66 @@ class FakeLlmClient:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class FakeSearchClient:
+    def __init__(self, *outcomes: SearchOutcome) -> None:
+        self.outcomes = list(outcomes)
+        self.queries: list[SearchQuery] = []
+        self.closed = False
+
+    async def search(self, query: SearchQuery) -> tuple[SearchHit, ...]:
+        self.queries.append(query)
+        outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
+        if isinstance(outcome, tuple):
+            return outcome
+        if isinstance(outcome, Exception):
+            raise outcome
+        return await outcome()
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class ManualTime:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+        self.fraction = 1.0
+
+    def clock(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def jitter(self) -> float:
+        return self.fraction
+
+    def breaker(self, failure_threshold: int = 5) -> CircuitBreaker:
+        return CircuitBreaker(
+            failure_threshold=failure_threshold, reset_seconds=RESET_SECONDS, clock=self.clock
+        )
+
+    def runtime(self) -> RetryRuntime:
+        return RetryRuntime(clock=self.clock, sleep=self.sleep, jitter=self.jitter)
+
+
+def tavily_result(title: str, url: str, raw_content: str | None) -> dict[str, object]:
+    return {"title": title, "url": url, "content": "", "raw_content": raw_content, "score": 0.5}
+
+
+def web_sources(
+    handler: Callable[[httpx2.Request], httpx2.Response], time: ManualTime, clock: Callable[[], datetime]
+) -> tuple[WebSourceRetriever, CleaningSourceParser]:
+    retriever = WebSourceRetriever(
+        client=TavilySearchClient(SEARCH_ENDPOINT, httpx2.MockTransport(handler)),
+        caller=ResilientCaller(SEARCH_POLICY, time.breaker(), time.runtime()),
+        clock=clock,
+        max_results=SEARCH_MAX_RESULTS,
+    )
+    return retriever, CleaningSourceParser(max_characters=SOURCE_MAX_CHARACTERS)
 
 
 class SlowModel:
@@ -194,18 +273,22 @@ class FakeProviders:
         self.enrich: Callable[[tuple[Note, ...]], tuple[Note, ...]] = with_images
         self.calls: list[JobStage] = []
         self.received: dict[JobStage, object] = {}
+        self.retrieved_for: list[UUID] = []
+        self.parsed_for: list[UUID] = []
         self.generated_for: list[UUID] = []
         self.failures: dict[JobStage, Exception] = {}
         self.during: dict[JobStage, Hook] = {}
 
-    async def retrieve(self, request: GenerationRequest) -> tuple[RetrievedPage, ...]:
+    async def retrieve(self, job_id: UUID, request: GenerationRequest) -> tuple[RetrievedPage, ...]:
+        self.retrieved_for.append(job_id)
         await self._reach(JobStage.RETRIEVING_SOURCES, request)
         return PAGES
 
     async def parse(
-        self, request: GenerationRequest, pages: tuple[RetrievedPage, ...]
+        self, job_id: UUID, request: GenerationRequest, pages: tuple[RetrievedPage, ...]
     ) -> tuple[SourceMaterial, ...]:
         del request
+        self.parsed_for.append(job_id)
         await self._reach(JobStage.PARSING_SOURCES, pages)
         return MATERIAL
 

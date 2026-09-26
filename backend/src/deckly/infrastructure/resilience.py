@@ -4,6 +4,7 @@ import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from http import HTTPStatus
 
 from deckly.application.exceptions import UpstreamUnavailableError
 
@@ -11,12 +12,20 @@ logger = logging.getLogger(__name__)
 
 MAX_BACKOFF_DOUBLINGS = 32
 MIN_RETRY_AFTER_SECONDS = 1
+TRANSIENT_STATUSES = frozenset(
+    {HTTPStatus.REQUEST_TIMEOUT, HTTPStatus.CONFLICT, HTTPStatus.TOO_MANY_REQUESTS}
+)
+RETRY_AFTER_HEADER = "retry-after"
 
 
 class TransientError(Exception):
     def __init__(self, message: str, *, retry_after_seconds: float | None = None) -> None:
         super().__init__(message)
         self.retry_after_seconds = retry_after_seconds
+
+
+class PersistentError(Exception):
+    pass
 
 
 class CircuitOpenError(UpstreamUnavailableError):
@@ -56,6 +65,20 @@ class RetryRuntime:
 
 def retry_after_hint(seconds: float) -> int:
     return max(MIN_RETRY_AFTER_SECONDS, math.ceil(seconds))
+
+
+def is_transient_status(status: int) -> bool:
+    return status in TRANSIENT_STATUSES or status >= HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
 class CircuitBreaker:
@@ -134,6 +157,9 @@ class ResilientCaller:
                 continue
             except asyncio.CancelledError:
                 self._breaker.release()
+                raise
+            except PersistentError:
+                self._breaker.record_failure()
                 raise
             except Exception:
                 self._breaker.record_success()

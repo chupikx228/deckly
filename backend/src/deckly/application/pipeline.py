@@ -102,9 +102,9 @@ class RunGeneration:
 
     async def _generate(self, job_id: UUID, request: GenerationRequest) -> None:
         await self._enter(job_id, JobStage.RETRIEVING_SOURCES)
-        pages = await self.retriever.retrieve(request)
+        pages = await self.retriever.retrieve(job_id, request)
         await self._enter(job_id, JobStage.PARSING_SOURCES)
-        material = await self.parser.parse(request, pages)
+        material = await self.parser.parse(job_id, request, pages)
         await self._enter(job_id, JobStage.GENERATING_CARDS)
         result = require_notes(await self.generator.generate(job_id, request, material))
         if request.include_images:
