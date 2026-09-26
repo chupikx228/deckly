@@ -76,7 +76,7 @@ class SourceParser(Protocol):
 
 class CardGenerator(Protocol):
     async def generate(
-        self, request: GenerationRequest, material: tuple[SourceMaterial, ...]
+        self, job_id: UUID, request: GenerationRequest, material: tuple[SourceMaterial, ...]
     ) -> GenerationResult: ...
 
 

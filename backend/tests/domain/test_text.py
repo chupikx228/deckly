@@ -1,6 +1,6 @@
 import pytest
 
-from deckly.domain.text import is_blank, visible_length
+from deckly.domain.text import is_blank, strip_unstorable, visible_length
 
 BLANK_LOOKING = {
     "hangul filler": "\N{HANGUL FILLER}",
@@ -54,3 +54,34 @@ def test_visible_neighbours_of_blank_looking_characters_are_not_blank(neighbour:
 @pytest.mark.parametrize(("value", "expected"), VISIBLE_LENGTHS.values(), ids=VISIBLE_LENGTHS.keys())
 def test_visible_length_counts_only_characters_that_render(value: str, expected: int) -> None:
     assert visible_length(value) == expected
+
+
+UNSTORABLE = {
+    "nul": "\N{NULL}",
+    "lone high surrogate": "\ud800",
+    "lone low surrogate": "\udfff",
+}
+
+STORABLE = {
+    "line breaks and tabs": "Red\ntriangle\r\n\twarns",
+    "other control characters": "\x01\x1f\x7f",
+    "zero-width joiner inside an emoji sequence": "\N{WOMAN}\N{ZERO WIDTH JOINER}\N{PERSONAL COMPUTER}",
+    "zero-width non-joiner in persian": "\u0645\u06cc\N{ZERO WIDTH NON-JOINER}\u062e\u0648\u0627\u0647\u0645",
+    "right-to-left mark": "\N{RIGHT-TO-LEFT MARK}\u05e9\u05dc\u05d5\u05dd",
+    "astral character": "\N{OCTAGONAL SIGN}",
+    "byte order mark": "\N{ZERO WIDTH NO-BREAK SPACE}text",
+}
+
+
+@pytest.mark.parametrize("character", UNSTORABLE.values(), ids=UNSTORABLE.keys())
+def test_unstorable_character_is_stripped_wherever_it_appears(character: str) -> None:
+    assert strip_unstorable(f"{character}Red{character} triangle{character}") == "Red triangle"
+
+
+@pytest.mark.parametrize("value", STORABLE.values(), ids=STORABLE.keys())
+def test_strip_unstorable_leaves_every_other_character_alone(value: str) -> None:
+    assert strip_unstorable(value) == value
+
+
+def test_text_made_only_of_unstorable_characters_strips_to_empty() -> None:
+    assert strip_unstorable("".join(UNSTORABLE.values()) * 3) == ""

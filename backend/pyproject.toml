@@ -5,9 +5,11 @@ description = "Deckly generation service"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.20.0",
+    "anthropic>=1.8.0",
     "arq>=0.28.0",
     "asyncpg>=0.31.0",
     "fastapi>=0.141.1",
+    "httpx2>=2.13.1",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
     "sqlalchemy[asyncio]>=2.0.54",
@@ -26,7 +28,6 @@ module-name = "deckly"
 
 [dependency-groups]
 dev = [
-    "httpx2>=2.13.1",
     "import-linter>=2.15",
     "jsonschema>=4.26.0",
     "mypy>=2.3.1",
@@ -117,6 +118,8 @@ forbidden_modules = [
     "redis",
     "arq",
     "pydantic_settings",
+    "anthropic",
+    "httpx2",
 ]
 
 [[tool.importlinter.contracts]]
@@ -127,6 +130,7 @@ forbidden_modules = [
     "pydantic",
     "pydantic_core",
     "httpx",
+    "httpx2",
     "anthropic",
     "openai",
     "asyncio",
@@ -153,11 +157,23 @@ forbidden_modules = [
 name = "Transport reaches infrastructure only through application ports"
 type = "forbidden"
 source_modules = ["deckly.transport"]
-forbidden_modules = ["sqlalchemy", "asyncpg", "alembic", "redis", "arq", "pydantic_settings"]
+forbidden_modules = [
+    "sqlalchemy",
+    "asyncpg",
+    "alembic",
+    "redis",
+    "arq",
+    "pydantic_settings",
+    "anthropic",
+    "httpx2",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["--strict-markers", "--strict-config", "-m", "not integration"]
-markers = ["integration: needs the local Postgres and Redis (make up && make migrate)"]
+addopts = ["--strict-markers", "--strict-config", "-m", "not integration and not live"]
+markers = [
+    "integration: needs the local Postgres and Redis (make up && make migrate)",
+    "live: calls the real model provider configured in .env and costs money (make test-live)",
+]
 xfail_strict = true
 filterwarnings = ["error"]

@@ -1,3 +1,5 @@
+import asyncio
+import json
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import replace
 from datetime import datetime
@@ -19,6 +21,7 @@ from deckly.domain.job import GenerationJob, JobStage
 from deckly.domain.media import Media, MediaKind
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
+from deckly.infrastructure.llm.client import LlmPrompt, LlmReply, LlmStop
 from deckly.infrastructure.quota import QUOTA_WINDOW
 from tests.domain.builders import SOURCES, T0, basic_note, result_with
 
@@ -29,6 +32,36 @@ MATERIAL = (SourceMaterial(source=SOURCES[0], text="A red triangle warns of dang
 GENERATED = result_with(basic_note(1), basic_note(2), basic_note(3))
 
 type Hook = Callable[[], Awaitable[object]]
+type LlmOutcome = LlmReply | Exception | Callable[[], Awaitable[LlmReply]]
+
+
+def model_reply(document: object, stop: LlmStop = LlmStop.COMPLETE) -> LlmReply:
+    return LlmReply(text=json.dumps(document), stop=stop)
+
+
+async def hang_forever() -> LlmReply:
+    await asyncio.Event().wait()
+    message = "a hanging model call never returns"
+    raise AssertionError(message)
+
+
+class FakeLlmClient:
+    def __init__(self, *outcomes: LlmOutcome) -> None:
+        self.outcomes = list(outcomes)
+        self.prompts: list[LlmPrompt] = []
+        self.closed = False
+
+    async def complete(self, prompt: LlmPrompt) -> LlmReply:
+        self.prompts.append(prompt)
+        outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
+        if isinstance(outcome, LlmReply):
+            return outcome
+        if isinstance(outcome, Exception):
+            raise outcome
+        return await outcome()
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 def job_id(number: int) -> UUID:
@@ -135,6 +168,7 @@ class FakeProviders:
         self.enrich: Callable[[tuple[Note, ...]], tuple[Note, ...]] = with_images
         self.calls: list[JobStage] = []
         self.received: dict[JobStage, object] = {}
+        self.generated_for: list[UUID] = []
         self.failures: dict[JobStage, Exception] = {}
         self.during: dict[JobStage, Hook] = {}
 
@@ -150,9 +184,10 @@ class FakeProviders:
         return MATERIAL
 
     async def generate(
-        self, request: GenerationRequest, material: tuple[SourceMaterial, ...]
+        self, job_id: UUID, request: GenerationRequest, material: tuple[SourceMaterial, ...]
     ) -> GenerationResult:
         del request
+        self.generated_for.append(job_id)
         await self._reach(JobStage.GENERATING_CARDS, material)
         return self.result
 

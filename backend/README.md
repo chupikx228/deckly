@@ -12,7 +12,8 @@ src/deckly/
   transport/         HTTP: routers, Problem (RFC 9457) model, the single error mapper
   application/       use cases and the ports they depend on; application errors
   domain/            pure business rules; domain errors
-  infrastructure/    adapters: async SQLAlchemy + asyncpg, Arq/Redis, JSON logging
+  infrastructure/    adapters: async SQLAlchemy + asyncpg, Arq/Redis, JSON logging, the LLM card
+                     generator (Anthropic or DeepSeek) and the retry/circuit-breaker layer
   worker/            Arq worker entrypoint, WorkerSettings and its composition root
 migrations/          Alembic (async)
 ```
@@ -54,10 +55,46 @@ change goes through `JobStore.update`, which row-locks the job, so a cancel that
 makes the worker stop at its next stage instead of racing it. It runs separately from the API
 and shares nothing with it but Postgres and Redis.
 
-Until the real provider adapters exist, the worker is wired with the placeholders in
-`infrastructure/providers.py`, which raise `NotImplementedError`: every job it picks up ends
-`failed` with `GENERATION_FAILED` rather than staying `queued`. Replace them one by one in
-`worker/settings.py` (`startup`).
+The card generator is real (see below). The source retriever, source parser and media fetcher
+are still the placeholders in `infrastructure/providers.py`, which raise
+`NotImplementedError`. The retriever runs first, so until it exists every job the worker picks
+up ends `failed` with `GENERATION_FAILED` at `retrieving_sources` rather than staying `queued`.
+Replace them one by one in `worker/settings.py` (`startup`).
+
+## Card generation
+
+`infrastructure/card_generator/` implements the `CardGenerator` port with one model call per
+job. `DECKLY_PROVIDER_MODEL_PROVIDER` picks the client: `anthropic` (official SDK) or `deepseek`
+(raw `httpx2` against its OpenAI-compatible `/chat/completions`, JSON output mode). The model
+never gets to invent a source: the prompt numbers each `SourceMaterial`, notes cite those
+numbers, and the adapter maps them back to the material's own `Source`. With no material the
+model is not called.
+
+The model's reply is untrusted. The adapter extracts JSON from prose, code fences or a reply cut
+off at the token limit. A reply split into several top-level objects, such as `{"deck": …}`
+followed by `{"notes": […]}`, is merged: the first deck wins and the notes are concatenated in
+order. It then validates every note through the domain: a note of an
+unrequested or unknown type, with fields that do not exactly match its type, an unrepairable
+cloze, invalid distractors or no citable source is dropped, and NUL characters and lone
+surrogates are stripped from every string first. Cloze numbering with gaps is renumbered from 1.
+A note whose type and fields exactly match an earlier valid note's is dropped as a duplicate,
+keeping the first, before the cap, so a repeated reply does not use up `cardCount` twice. Notes
+that only nearly match are kept. At most `cardCount` notes are returned, never padded. A reply that yields no note ends the
+job `NO_VALID_CONTENT`; a reply is never retried for its content. `image_occlusion` is not
+generated here, because a valid note needs a licensed image the media stage has to supply.
+
+Every call goes through `infrastructure/resilience.py`: a timeout per attempt
+(`MODEL_TIMEOUT_SECONDS`), retries with exponential backoff and full jitter for transient
+failures only (network errors, timeouts, 408/409/429/5xx, honouring `retry-after`), an overall
+`MODEL_DEADLINE_SECONDS` after which no new attempt starts, and a circuit breaker per worker
+process that opens after `MODEL_CIRCUIT_FAILURE_THRESHOLD` consecutive transient failures. An
+outage or an open circuit ends the job `PROVIDER_UNAVAILABLE`; a rejected request (bad key,
+unknown model) ends it `GENERATION_FAILED`. Keep the deadline below
+`DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS` minus the time the earlier stages need, or Arq
+kills the job first and it ends `GENERATION_FAILED` instead, and keep
+`MODEL_MAX_OUTPUT_TOKENS` small enough to be produced within one attempt's timeout, so a
+large deck is cut at the token limit and its complete notes are kept rather than lost to a
+timeout.
 
 ## Checks
 
@@ -66,6 +103,7 @@ make check          # ruff format --check, ruff check, mypy --strict, import-lin
 make fix            # ruff format + ruff check --fix
 make test           # pytest, no infrastructure needed
 make test-integration  # Postgres + Redis tests; needs make up && make migrate
+make test-live     # calls the model provider configured in .env; needs a real key, costs money
 ```
 
 CI runs `make install`, `make check`, `make test`, then `make migrate` and `make test-integration`
