@@ -20,7 +20,9 @@ from deckly.infrastructure.llm.anthropic_client import AnthropicLlmClient
 from deckly.infrastructure.llm.client import LlmClient, LlmEndpoint
 from deckly.infrastructure.llm.deepseek_client import DeepSeekLlmClient
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
-from deckly.infrastructure.providers import UnimplementedMediaFetcher
+from deckly.infrastructure.media.client import MediaEndpoint
+from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
+from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
 from deckly.infrastructure.queue import GENERATION_TASK
 from deckly.infrastructure.resilience import CircuitBreaker, ResilientCaller, RetryPolicy, RetryRuntime
 from deckly.infrastructure.search.client import SearchEndpoint
@@ -32,6 +34,7 @@ SETTINGS_KEY = "settings"
 ENGINE_KEY = "engine"
 LLM_CLIENT_KEY = "llm_client"
 SOURCE_RETRIEVER_KEY = "source_retriever"
+MEDIA_FETCHER_KEY = "media_fetcher"
 RUN_GENERATION_KEY = "run_generation_use_case"
 
 LLM_CLIENTS: Mapping[ModelProvider, Callable[[LlmEndpoint], LlmClient]] = {
@@ -108,6 +111,36 @@ def build_source_retriever(providers: ProviderSettings) -> WebSourceRetriever:
     )
 
 
+def build_media_fetcher(providers: ProviderSettings) -> CommonsMediaFetcher:
+    endpoint = MediaEndpoint(
+        base_url=str(providers.media_base_url),
+        user_agent=providers.media_user_agent,
+        timeout_seconds=providers.media_timeout_seconds,
+    )
+    policy = RetryPolicy(
+        max_attempts=providers.media_max_attempts,
+        attempt_timeout_seconds=providers.media_timeout_seconds,
+        deadline_seconds=providers.media_deadline_seconds,
+        base_delay_seconds=providers.media_retry_base_delay_seconds,
+        max_delay_seconds=providers.media_retry_max_delay_seconds,
+    )
+    caller = resilient_caller(
+        policy,
+        failure_threshold=providers.media_circuit_failure_threshold,
+        reset_seconds=providers.media_circuit_reset_seconds,
+    )
+    limits = MediaLimits(
+        max_images=providers.media_max_images,
+        candidates_per_query=providers.media_candidates_per_query,
+        thumbnail_width=providers.media_thumbnail_width,
+        max_concurrency=providers.media_max_concurrency,
+        deadline_seconds=providers.media_deadline_seconds,
+    )
+    return CommonsMediaFetcher(
+        client=CommonsImageSearchClient(endpoint), caller=caller, new_id=uuid4, limits=limits
+    )
+
+
 async def run_generation(ctx: WorkerContext, job_id: str) -> None:
     await from_context(ctx, RUN_GENERATION_KEY, RunGeneration)(UUID(job_id))
 
@@ -126,12 +159,14 @@ async def startup(ctx: WorkerContext) -> None:
     ctx[LLM_CLIENT_KEY] = llm
     retriever = build_source_retriever(settings.providers)
     ctx[SOURCE_RETRIEVER_KEY] = retriever
+    media = build_media_fetcher(settings.providers)
+    ctx[MEDIA_FETCHER_KEY] = media
     ctx[RUN_GENERATION_KEY] = RunGeneration(
         store=PostgresJobStore(create_session_factory(engine)),
         retriever=retriever,
         parser=CleaningSourceParser(max_characters=settings.providers.search_max_source_characters),
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),
-        media=UnimplementedMediaFetcher(),
+        media=media,
         clock=utc_now,
     )
 
@@ -139,6 +174,7 @@ async def startup(ctx: WorkerContext) -> None:
 async def shutdown(ctx: WorkerContext) -> None:
     llm = ctx.get(LLM_CLIENT_KEY)
     retriever = ctx.get(SOURCE_RETRIEVER_KEY)
+    media = ctx.get(MEDIA_FETCHER_KEY)
     engine = ctx.get(ENGINE_KEY)
     try:
         if isinstance(llm, ResilientLlmClient):
@@ -148,8 +184,12 @@ async def shutdown(ctx: WorkerContext) -> None:
             if isinstance(retriever, WebSourceRetriever):
                 await retriever.aclose()
         finally:
-            if isinstance(engine, AsyncEngine):
-                await engine.dispose()
+            try:
+                if isinstance(media, CommonsMediaFetcher):
+                    await media.aclose()
+            finally:
+                if isinstance(engine, AsyncEngine):
+                    await engine.dispose()
 
 
 class WorkerSettings:

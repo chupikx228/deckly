@@ -355,6 +355,9 @@ verify a card before saving it.
   falls back to when a download fails.
 - `license` is required. The user is shown it, and content with no known licence must not be
   returned at all.
+- Images are best effort. If no image with a known licence is found for a note, or the image
+  provider is unavailable, the note is returned without media and the job still succeeds; an
+  image outage never fails a job with `PROVIDER_UNAVAILABLE`.
 
 ## Errors
 

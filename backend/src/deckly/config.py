@@ -14,11 +14,15 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from deckly.infrastructure.media.licensing import MIN_IMAGE_SIDE
 from deckly.infrastructure.search.parser import MIN_VISIBLE_CHARACTERS
 
 ASYNC_POSTGRES_SCHEME = "postgresql+asyncpg"
 ENV_FILE = ".env"
 MAX_SEARCH_RESULTS = 20
+MAX_MEDIA_IMAGES = 50
+MAX_MEDIA_CANDIDATES = 50
+MAX_MEDIA_CONCURRENCY = 8
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 ModelProvider = Literal["anthropic", "deepseek"]
@@ -95,6 +99,19 @@ class ProviderSettings(BaseSettings):
     search_circuit_reset_seconds: PositiveInt
     search_max_results: Annotated[int, Field(ge=1, le=MAX_SEARCH_RESULTS)]
     search_max_source_characters: Annotated[int, Field(ge=MIN_VISIBLE_CHARACTERS)]
+    media_base_url: AnyHttpUrl
+    media_user_agent: str
+    media_timeout_seconds: PositiveInt
+    media_deadline_seconds: PositiveInt
+    media_max_attempts: PositiveInt
+    media_retry_base_delay_seconds: PositiveInt
+    media_retry_max_delay_seconds: PositiveInt
+    media_circuit_failure_threshold: PositiveInt
+    media_circuit_reset_seconds: PositiveInt
+    media_max_images: Annotated[int, Field(ge=1, le=MAX_MEDIA_IMAGES)]
+    media_candidates_per_query: Annotated[int, Field(ge=1, le=MAX_MEDIA_CANDIDATES)]
+    media_thumbnail_width: Annotated[int, Field(ge=MIN_IMAGE_SIDE)]
+    media_max_concurrency: Annotated[int, Field(ge=1, le=MAX_MEDIA_CONCURRENCY)]
 
     @model_validator(mode="after")
     def require_deadline_to_fit_one_attempt(self) -> Self:
@@ -107,6 +124,13 @@ class ProviderSettings(BaseSettings):
     def require_search_deadline_to_fit_one_attempt(self) -> Self:
         if self.search_deadline_seconds < self.search_timeout_seconds:
             message = "search deadline must be at least the timeout of a single attempt"
+            raise ValueError(message)
+        return self
+
+    @model_validator(mode="after")
+    def require_media_deadline_to_fit_one_attempt(self) -> Self:
+        if self.media_deadline_seconds < self.media_timeout_seconds:
+            message = "media deadline must be at least the timeout of a single attempt"
             raise ValueError(message)
         return self
 
@@ -137,10 +161,15 @@ class Settings:
     cache: CacheSettings
 
     def __post_init__(self) -> None:
-        provider_deadlines = self.providers.search_deadline_seconds + self.providers.model_deadline_seconds
+        provider_deadlines = (
+            self.providers.search_deadline_seconds
+            + self.providers.model_deadline_seconds
+            + self.providers.media_deadline_seconds
+        )
         if provider_deadlines >= self.limits.generation_job_timeout_seconds:
             message = (
-                "the search and model deadlines together must leave room within the generation job timeout"
+                "the search, model and media deadlines together must leave room within the generation "
+                "job timeout"
             )
             raise ValueError(message)
 

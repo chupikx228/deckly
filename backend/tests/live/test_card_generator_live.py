@@ -39,7 +39,7 @@ async def test_configured_provider_generates_valid_notes_that_cite_the_material(
     llm = build_llm_client(load_settings().providers)
     generator = LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS)
     try:
-        result = await generator.generate(uuid4(), REQUEST, MATERIAL)
+        result = (await generator.generate(uuid4(), REQUEST, MATERIAL)).result
     finally:
         await llm.aclose()
 

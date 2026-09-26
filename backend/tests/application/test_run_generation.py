@@ -8,7 +8,7 @@ from uuid import UUID
 import pytest
 
 from deckly.application.exceptions import UpstreamUnavailableError
-from deckly.application.ports import JobTransition
+from deckly.application.ports import ImageQuery, JobTransition, NoteMedia
 from deckly.domain.exceptions import InvalidJobTransitionError, JobAlreadyTerminalError
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import (
@@ -30,6 +30,9 @@ from tests.fakes import (
     Hook,
     InMemoryJobStore,
     generation_request,
+    image,
+    image_query,
+    queries_for_every_note,
     scope,
     with_images,
 )
@@ -42,6 +45,8 @@ PORT_STAGES = (
     JobStage.GENERATING_CARDS,
     JobStage.FETCHING_MEDIA,
 )
+JOB_FAILING_STAGES = PORT_STAGES[:-1]
+PIPELINE_LOGGER = "deckly.application.pipeline"
 WITH_IMAGES = replace(generation_request(), include_images=True)
 WITHOUT_IMAGES = replace(generation_request(), include_images=False)
 REQUESTS = {"with images": WITH_IMAGES, "without images": WITHOUT_IMAGES}
@@ -114,7 +119,7 @@ async def test_each_port_receives_what_the_previous_stage_produced() -> None:
         JobStage.RETRIEVING_SOURCES: WITH_IMAGES,
         JobStage.PARSING_SOURCES: PAGES,
         JobStage.GENERATING_CARDS: MATERIAL,
-        JobStage.FETCHING_MEDIA: GENERATED.notes,
+        JobStage.FETCHING_MEDIA: queries_for_every_note(GENERATED),
     }
 
 
@@ -174,7 +179,7 @@ FAILURES: dict[str, tuple[Callable[[], Exception], FailureCode]] = {
 }
 
 
-@pytest.mark.parametrize("stage", PORT_STAGES)
+@pytest.mark.parametrize("stage", JOB_FAILING_STAGES)
 @pytest.mark.parametrize(("make_error", "code"), FAILURES.values(), ids=FAILURES.keys())
 async def test_port_failure_fails_the_job_at_its_stage_without_raising_or_calling_later_ports(
     stage: JobStage, make_error: Callable[[], Exception], code: FailureCode
@@ -199,7 +204,7 @@ async def test_unexpected_port_error_is_logged_with_its_traceback_and_job_id(
     error = RuntimeError("model client crashed")
     harness.providers.failures[JobStage.GENERATING_CARDS] = error
 
-    with caplog.at_level(logging.INFO, logger="deckly.application.pipeline"):
+    with caplog.at_level(logging.INFO, logger=PIPELINE_LOGGER):
         await harness.run(job_id)
 
     [record] = [record for record in caplog.records if record.getMessage() == "generation_failed"]
@@ -238,24 +243,136 @@ async def test_a_single_valid_note_is_enough_to_succeed() -> None:
     assert job.state.result.notes == (basic_note(1),)
 
 
-async def test_media_stage_that_drops_every_note_fails_with_no_valid_content() -> None:
+@pytest.mark.parametrize("make_error", [make for make, _ in FAILURES.values()], ids=FAILURES.keys())
+async def test_media_failure_degrades_to_the_generated_notes_without_images_and_the_job_succeeds(
+    make_error: Callable[[], Exception],
+) -> None:
     harness = Harness()
     job_id = await create(harness, WITH_IMAGES)
-    harness.providers.enrich = lambda _: ()
+    harness.providers.failures[JobStage.FETCHING_MEDIA] = make_error()
 
     await harness.run(job_id)
 
     job = await harness.get(job_id)
-    assert isinstance(job.state, Failed)
-    assert (job.state.code, job.stage) == (FailureCode.NO_VALID_CONTENT, JobStage.FETCHING_MEDIA)
+    assert isinstance(job.state, Succeeded)
+    assert job.state.result == GENERATED
+    assert [entry.stage for entry in harness.store.history] == [*STAGE_ORDER, None]
+    assert harness.providers.calls == list(PORT_STAGES)
 
 
-async def test_media_stage_that_duplicates_a_note_fails_the_job_instead_of_raising() -> None:
+MEDIA_FAILURE_LEVELS: dict[str, tuple[Exception, int]] = {
+    "provider unavailable": (UpstreamUnavailableError(30), logging.WARNING),
+    "unexpected error": (RuntimeError("media adapter crashed"), logging.ERROR),
+}
+
+
+@pytest.mark.parametrize(("error", "level"), MEDIA_FAILURE_LEVELS.values(), ids=MEDIA_FAILURE_LEVELS.keys())
+async def test_skipped_media_is_logged_with_the_cause_at_a_level_matching_how_expected_it_was(
+    caplog: pytest.LogCaptureFixture, error: Exception, level: int
+) -> None:
     harness = Harness()
     job_id = await create(harness, WITH_IMAGES)
-    harness.providers.enrich = lambda notes: (*notes, notes[0])
+    harness.providers.failures[JobStage.FETCHING_MEDIA] = error
+
+    with caplog.at_level(logging.INFO, logger=PIPELINE_LOGGER):
+        await harness.run(job_id)
+
+    [record] = [record for record in caplog.records if record.getMessage() == "media_skipped"]
+    assert record.levelno == level
+    assert record.exc_info is not None
+    assert record.exc_info[1] is error
+    assert record.__dict__["job_id"] == str(job_id)
+    assert not [record for record in caplog.records if record.getMessage() == "generation_failed"]
+
+
+async def test_media_stage_that_attaches_nothing_returns_the_generated_notes_unchanged() -> None:
+    harness = Harness()
+    job_id = await create(harness, WITH_IMAGES)
+    harness.providers.attach = lambda _: ()
 
     await harness.run(job_id)
+
+    job = await harness.get(job_id)
+    assert isinstance(job.state, Succeeded)
+    assert job.state.result == GENERATED
+
+
+async def test_media_for_an_unknown_note_is_ignored_and_a_repeated_image_is_attached_once() -> None:
+    harness = Harness()
+    job_id = await create(harness, WITH_IMAGES)
+    first = GENERATED.notes[0]
+    stranger = UUID(int=4242, version=4)
+    harness.providers.attach = lambda _: (
+        NoteMedia(client_id=first.client_id, media=image(1)),
+        NoteMedia(client_id=first.client_id, media=image(1)),
+        NoteMedia(client_id=stranger, media=image(2)),
+    )
+
+    await harness.run(job_id)
+
+    job = await harness.get(job_id)
+    assert isinstance(job.state, Succeeded)
+    assert job.state.result.notes == (replace(first, media=(image(1),)), *GENERATED.notes[1:])
+
+
+async def test_image_a_note_already_carries_is_not_attached_to_it_a_second_time() -> None:
+    harness = Harness()
+    job_id = await create(harness, WITH_IMAGES)
+    illustrated = replace(basic_note(1), media=(image(1),))
+    harness.providers.result = result_with(illustrated)
+    harness.providers.attach = lambda _: (
+        NoteMedia(client_id=illustrated.client_id, media=image(1)),
+        NoteMedia(client_id=illustrated.client_id, media=image(2)),
+    )
+
+    await harness.run(job_id)
+
+    job = await harness.get(job_id)
+    assert isinstance(job.state, Succeeded)
+    assert job.state.result.notes == (replace(illustrated, media=(image(1), image(2))),)
+
+
+async def test_media_stage_only_searches_for_notes_that_are_in_the_result() -> None:
+    harness = Harness()
+    job_id = await create(harness, WITH_IMAGES)
+    kept = image_query(GENERATED.notes[1])
+    orphan = ImageQuery(client_id=UUID(int=4242, version=4), text="dropped note")
+    harness.providers.image_queries = (orphan, kept)
+
+    await harness.run(job_id)
+
+    assert harness.providers.received[JobStage.FETCHING_MEDIA] == (kept,)
+    assert harness.providers.fetched_for == [job_id]
+
+
+async def test_job_with_images_but_no_image_query_still_passes_through_fetching_media() -> None:
+    harness = Harness()
+    job_id = await create(harness, WITH_IMAGES)
+    harness.providers.image_queries = ()
+
+    await harness.run(job_id)
+
+    job = await harness.get(job_id)
+    assert isinstance(job.state, Succeeded)
+    assert job.state.result == GENERATED
+    assert harness.providers.received[JobStage.FETCHING_MEDIA] == ()
+
+
+async def test_worker_interruption_during_media_is_not_swallowed_by_the_media_bulkhead() -> None:
+    harness = Harness()
+    job_id = await create(harness, WITH_IMAGES)
+    reached = asyncio.Event()
+
+    async def hang() -> None:
+        reached.set()
+        await asyncio.Event().wait()
+
+    harness.providers.during[JobStage.FETCHING_MEDIA] = hang
+    running = asyncio.create_task(harness.run(job_id))
+    await reached.wait()
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
 
     job = await harness.get(job_id)
     assert isinstance(job.state, Failed)
@@ -466,7 +583,7 @@ async def test_interruption_of_a_cancelled_job_is_logged_as_stopped(caplog: pyte
     harness = Harness()
     job_id = await create(harness, WITH_IMAGES)
 
-    with caplog.at_level(logging.INFO, logger="deckly.application.pipeline"):
+    with caplog.at_level(logging.INFO, logger=PIPELINE_LOGGER):
         await interrupt_during_generation(harness, job_id, lambda: harness.cancel(job_id))
 
     [record] = [record for record in caplog.records if record.getMessage() == "generation_stopped"]

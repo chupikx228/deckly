@@ -7,7 +7,7 @@ from uuid import UUID
 from deckly.domain.deck import GenerationResult
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import GenerationJob
-from deckly.domain.notes.note import Note
+from deckly.domain.media import Media
 from deckly.domain.source import Source
 
 type JobTransition = Callable[[GenerationJob], GenerationJob]
@@ -42,6 +42,24 @@ class RetrievedPage:
 class SourceMaterial:
     source: Source
     text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImageQuery:
+    client_id: UUID
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class GeneratedCards:
+    result: GenerationResult
+    image_queries: tuple[ImageQuery, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class NoteMedia:
+    client_id: UUID
+    media: Media
 
 
 class JobStore(Protocol):
@@ -79,8 +97,8 @@ class SourceParser(Protocol):
 class CardGenerator(Protocol):
     async def generate(
         self, job_id: UUID, request: GenerationRequest, material: tuple[SourceMaterial, ...]
-    ) -> GenerationResult: ...
+    ) -> GeneratedCards: ...
 
 
 class MediaFetcher(Protocol):
-    async def fetch(self, request: GenerationRequest, notes: tuple[Note, ...]) -> tuple[Note, ...]: ...
+    async def fetch(self, job_id: UUID, queries: tuple[ImageQuery, ...]) -> tuple[NoteMedia, ...]: ...
