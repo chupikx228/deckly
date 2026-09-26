@@ -10,8 +10,11 @@ import httpx2
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
 from deckly.application.pipeline import RunGeneration
 from deckly.application.ports import (
+    GeneratedCards,
     IdempotencyScope,
+    ImageQuery,
     JobTransition,
+    NoteMedia,
     Quota,
     RetrievedPage,
     SourceMaterial,
@@ -24,6 +27,9 @@ from deckly.domain.media import Media, MediaKind
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
 from deckly.infrastructure.llm.client import LlmPrompt, LlmReply, LlmStop
+from deckly.infrastructure.media.client import ImageCandidate, ImageSearch, MediaEndpoint
+from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
+from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
 from deckly.infrastructure.quota import QUOTA_WINDOW
 from deckly.infrastructure.resilience import CircuitBreaker, ResilientCaller, RetryPolicy, RetryRuntime
 from deckly.infrastructure.search.client import SearchEndpoint, SearchHit, SearchQuery
@@ -45,6 +51,21 @@ SEARCH_POLICY = RetryPolicy(
     max_delay_seconds=2,
 )
 SEARCH_MAX_RESULTS = 6
+MEDIA_ENDPOINT = MediaEndpoint(
+    base_url="https://commons.wikimedia.test",
+    user_agent="DecklyTest/0.1 (tests@example.com)",
+    timeout_seconds=5,
+)
+MEDIA_POLICY = RetryPolicy(
+    max_attempts=2,
+    attempt_timeout_seconds=5,
+    deadline_seconds=20,
+    base_delay_seconds=1,
+    max_delay_seconds=2,
+)
+MEDIA_LIMITS = MediaLimits(
+    max_images=20, candidates_per_query=10, thumbnail_width=960, max_concurrency=4, deadline_seconds=20
+)
 SOURCE_MAX_CHARACTERS = 2000
 PAGES = (RetrievedPage(source=SOURCES[0], content="<p>A red triangle warns of danger ahead.</p>"),)
 MATERIAL = (SourceMaterial(source=SOURCES[0], text="A red triangle warns of danger ahead."),)
@@ -53,6 +74,9 @@ GENERATED = result_with(basic_note(1), basic_note(2), basic_note(3))
 type Hook = Callable[[], Awaitable[object]]
 type LlmOutcome = LlmReply | Exception | Callable[[], Awaitable[LlmReply]]
 type SearchOutcome = tuple[SearchHit, ...] | Exception | Callable[[], Awaitable[tuple[SearchHit, ...]]]
+type ImageOutcome = (
+    tuple[ImageCandidate, ...] | Exception | Callable[[], Awaitable[tuple[ImageCandidate, ...]]]
+)
 
 
 def model_reply(document: object, stop: LlmStop = LlmStop.COMPLETE) -> LlmReply:
@@ -103,6 +127,25 @@ class FakeSearchClient:
         self.closed = True
 
 
+class FakeImageSearchClient:
+    def __init__(self, *outcomes: ImageOutcome) -> None:
+        self.outcomes = list(outcomes)
+        self.searches: list[ImageSearch] = []
+        self.closed = False
+
+    async def search(self, search: ImageSearch) -> tuple[ImageCandidate, ...]:
+        self.searches.append(search)
+        outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
+        if isinstance(outcome, tuple):
+            return outcome
+        if isinstance(outcome, Exception):
+            raise outcome
+        return await outcome()
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 class ManualTime:
     def __init__(self) -> None:
         self.now = 0.0
@@ -142,6 +185,60 @@ def web_sources(
         max_results=SEARCH_MAX_RESULTS,
     )
     return retriever, CleaningSourceParser(max_characters=SOURCE_MAX_CHARACTERS)
+
+
+COMMONS_METADATA_KEYS = {
+    "license_code": "License",
+    "attribution_required": "AttributionRequired",
+    "restrictions": "Restrictions",
+    "description": "ImageDescription",
+}
+LICENSED_METADATA: dict[str, str | None] = {
+    "license_code": "cc0",
+    "attribution_required": "false",
+    "restrictions": "",
+    "description": "A red octagonal stop sign",
+}
+
+
+def commons_page(
+    index: int,
+    title: str = "File:Stop sign.svg",
+    *,
+    info: dict[str, object] | None = None,
+    **metadata: str | None,
+) -> dict[str, object]:
+    values = {COMMONS_METADATA_KEYS[key]: value for key, value in (LICENSED_METADATA | metadata).items()}
+    name = title.removeprefix("File:").replace(" ", "_")
+    image_info: dict[str, object] = {
+        "mime": "image/svg+xml",
+        "thumbwidth": 960,
+        "thumbheight": 960,
+        "thumburl": f"https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/{name}/960px-{name}.png",
+        "extmetadata": {key: {"value": value} for key, value in values.items() if value is not None},
+        **(info or {}),
+    }
+    return {"pageid": index, "ns": 6, "title": title, "index": index, "imageinfo": [image_info]}
+
+
+def commons_results(*pages: dict[str, object]) -> dict[str, object]:
+    if not pages:
+        return {"batchcomplete": True}
+    return {"batchcomplete": True, "query": {"pages": list(pages)}}
+
+
+def commons_fetcher(
+    handler: Callable[[httpx2.Request], httpx2.Response],
+    time: ManualTime,
+    limits: MediaLimits = MEDIA_LIMITS,
+    breaker: CircuitBreaker | None = None,
+) -> CommonsMediaFetcher:
+    return CommonsMediaFetcher(
+        client=CommonsImageSearchClient(MEDIA_ENDPOINT, httpx2.MockTransport(handler)),
+        caller=ResilientCaller(MEDIA_POLICY, breaker or time.breaker(), time.runtime()),
+        new_id=sequential_job_ids().__next__,
+        limits=limits,
+    )
 
 
 class SlowModel:
@@ -201,6 +298,21 @@ def image(number: int) -> Media:
 def with_images(notes: tuple[Note, ...]) -> tuple[Note, ...]:
     return tuple(
         replace(note, media=(*note.media, image(number))) for number, note in enumerate(notes, start=1)
+    )
+
+
+def image_query(note: Note) -> ImageQuery:
+    return ImageQuery(client_id=note.client_id, text=f"picture for note {note.client_id.int}")
+
+
+def queries_for_every_note(result: GenerationResult) -> tuple[ImageQuery, ...]:
+    return tuple(image_query(note) for note in result.notes)
+
+
+def images_for(queries: tuple[ImageQuery, ...]) -> tuple[NoteMedia, ...]:
+    return tuple(
+        NoteMedia(client_id=query.client_id, media=image(number))
+        for number, query in enumerate(queries, start=1)
     )
 
 
@@ -270,12 +382,14 @@ class FixedQuota:
 class FakeProviders:
     def __init__(self) -> None:
         self.result = GENERATED
-        self.enrich: Callable[[tuple[Note, ...]], tuple[Note, ...]] = with_images
+        self.image_queries: tuple[ImageQuery, ...] | None = None
+        self.attach: Callable[[tuple[ImageQuery, ...]], tuple[NoteMedia, ...]] = images_for
         self.calls: list[JobStage] = []
         self.received: dict[JobStage, object] = {}
         self.retrieved_for: list[UUID] = []
         self.parsed_for: list[UUID] = []
         self.generated_for: list[UUID] = []
+        self.fetched_for: list[UUID] = []
         self.failures: dict[JobStage, Exception] = {}
         self.during: dict[JobStage, Hook] = {}
 
@@ -294,16 +408,17 @@ class FakeProviders:
 
     async def generate(
         self, job_id: UUID, request: GenerationRequest, material: tuple[SourceMaterial, ...]
-    ) -> GenerationResult:
+    ) -> GeneratedCards:
         del request
         self.generated_for.append(job_id)
         await self._reach(JobStage.GENERATING_CARDS, material)
-        return self.result
+        queries = queries_for_every_note(self.result) if self.image_queries is None else self.image_queries
+        return GeneratedCards(result=self.result, image_queries=queries)
 
-    async def fetch(self, request: GenerationRequest, notes: tuple[Note, ...]) -> tuple[Note, ...]:
-        del request
-        await self._reach(JobStage.FETCHING_MEDIA, notes)
-        return self.enrich(notes)
+    async def fetch(self, job_id: UUID, queries: tuple[ImageQuery, ...]) -> tuple[NoteMedia, ...]:
+        self.fetched_for.append(job_id)
+        await self._reach(JobStage.FETCHING_MEDIA, queries)
+        return self.attach(queries)
 
     async def _reach(self, stage: JobStage, received: object) -> None:
         self.calls.append(stage)

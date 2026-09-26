@@ -5,6 +5,9 @@ import pytest
 from pydantic import ValidationError
 
 from deckly.config import (
+    MAX_MEDIA_CANDIDATES,
+    MAX_MEDIA_CONCURRENCY,
+    MAX_MEDIA_IMAGES,
     AppSettings,
     CacheSettings,
     DatabaseSettings,
@@ -14,6 +17,7 @@ from deckly.config import (
     Settings,
     load_settings,
 )
+from deckly.infrastructure.media.licensing import MIN_IMAGE_SIDE
 from deckly.infrastructure.search.parser import MIN_VISIBLE_CHARACTERS
 
 ASYNC_URL = "postgresql+asyncpg://deckly:deckly@localhost:5433/deckly"
@@ -102,6 +106,19 @@ PROVIDER_ENVIRONMENT = {
     "DECKLY_PROVIDER_SEARCH_CIRCUIT_RESET_SECONDS": "30",
     "DECKLY_PROVIDER_SEARCH_MAX_RESULTS": "6",
     "DECKLY_PROVIDER_SEARCH_MAX_SOURCE_CHARACTERS": "8000",
+    "DECKLY_PROVIDER_MEDIA_BASE_URL": "https://commons.wikimedia.org",
+    "DECKLY_PROVIDER_MEDIA_USER_AGENT": "Deckly/0.1 (https://example.com/contact)",
+    "DECKLY_PROVIDER_MEDIA_TIMEOUT_SECONDS": "8",
+    "DECKLY_PROVIDER_MEDIA_DEADLINE_SECONDS": "20",
+    "DECKLY_PROVIDER_MEDIA_MAX_ATTEMPTS": "2",
+    "DECKLY_PROVIDER_MEDIA_RETRY_BASE_DELAY_SECONDS": "1",
+    "DECKLY_PROVIDER_MEDIA_RETRY_MAX_DELAY_SECONDS": "3",
+    "DECKLY_PROVIDER_MEDIA_CIRCUIT_FAILURE_THRESHOLD": "5",
+    "DECKLY_PROVIDER_MEDIA_CIRCUIT_RESET_SECONDS": "30",
+    "DECKLY_PROVIDER_MEDIA_MAX_IMAGES": "20",
+    "DECKLY_PROVIDER_MEDIA_CANDIDATES_PER_QUERY": "10",
+    "DECKLY_PROVIDER_MEDIA_THUMBNAIL_WIDTH": "960",
+    "DECKLY_PROVIDER_MEDIA_MAX_CONCURRENCY": "4",
 }
 LIMIT_ENVIRONMENT = {
     "DECKLY_LIMIT_GENERATION_JOBS_PER_DAY": "20",
@@ -135,7 +152,10 @@ def test_every_provider_setting_is_required(clean_environment: pytest.MonkeyPatc
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
-@pytest.mark.parametrize("variable", ["DECKLY_PROVIDER_MODEL_API_KEY", "DECKLY_PROVIDER_MODEL_NAME"])
+@pytest.mark.parametrize(
+    "variable",
+    ["DECKLY_PROVIDER_MODEL_API_KEY", "DECKLY_PROVIDER_MODEL_NAME", "DECKLY_PROVIDER_MEDIA_USER_AGENT"],
+)
 def test_blank_required_values_are_rejected(
     clean_environment: pytest.MonkeyPatch, variable: str, blank: str
 ) -> None:
@@ -239,20 +259,28 @@ def settings_with_job_timeout(monkeypatch: pytest.MonkeyPatch, job_timeout_secon
     )
 
 
-@pytest.mark.parametrize("job_timeout_seconds", [280, 279, 1])
-def test_search_and_model_deadlines_that_fill_the_job_timeout_are_rejected(
+@pytest.mark.parametrize("job_timeout_seconds", [300, 299, 1])
+def test_search_model_and_media_deadlines_that_fill_the_job_timeout_are_rejected(
     clean_environment: pytest.MonkeyPatch, job_timeout_seconds: int
 ) -> None:
-    with pytest.raises(ValueError, match="deadlines"):
+    with pytest.raises(ValueError, match="media deadlines"):
         settings_with_job_timeout(clean_environment, job_timeout_seconds)
 
 
-def test_search_and_model_deadlines_that_leave_room_in_the_job_timeout_are_accepted(
+@pytest.mark.parametrize("job_timeout_seconds", [281, 290])
+def test_media_deadline_that_pushes_the_total_past_the_job_timeout_is_rejected(
+    clean_environment: pytest.MonkeyPatch, job_timeout_seconds: int
+) -> None:
+    with pytest.raises(ValueError, match="media deadlines"):
+        settings_with_job_timeout(clean_environment, job_timeout_seconds)
+
+
+def test_search_model_and_media_deadlines_that_leave_room_in_the_job_timeout_are_accepted(
     clean_environment: pytest.MonkeyPatch,
 ) -> None:
-    settings = settings_with_job_timeout(clean_environment, 281)
+    settings = settings_with_job_timeout(clean_environment, 301)
 
-    assert settings.limits.generation_job_timeout_seconds == 281
+    assert settings.limits.generation_job_timeout_seconds == 301
 
 
 def test_source_character_limit_too_small_to_keep_any_page_is_rejected(
@@ -272,3 +300,80 @@ def test_source_character_limit_equal_to_the_smallest_usable_page_is_accepted(
     clean_environment.setenv("DECKLY_PROVIDER_SEARCH_MAX_SOURCE_CHARACTERS", str(MIN_VISIBLE_CHARACTERS))
 
     assert ProviderSettings().search_max_source_characters == MIN_VISIBLE_CHARACTERS
+
+
+def test_media_deadline_shorter_than_one_attempt_is_rejected(clean_environment: pytest.MonkeyPatch) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MEDIA_DEADLINE_SECONDS", "7")
+
+    with pytest.raises(ValidationError, match="media deadline"):
+        ProviderSettings()
+
+
+def test_media_deadline_equal_to_one_attempt_is_accepted(clean_environment: pytest.MonkeyPatch) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MEDIA_DEADLINE_SECONDS", "8")
+
+    assert ProviderSettings().media_deadline_seconds == 8
+
+
+@pytest.mark.parametrize("url", ["ftp://commons.wikimedia.org", "commons.wikimedia.org"])
+def test_media_base_url_must_be_an_http_url(clean_environment: pytest.MonkeyPatch, url: str) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MEDIA_BASE_URL", url)
+
+    with pytest.raises(ValidationError, match="media_base_url"):
+        ProviderSettings()
+
+
+MEDIA_BOUNDS: dict[str, tuple[int, int]] = {
+    "DECKLY_PROVIDER_MEDIA_MAX_IMAGES": (1, MAX_MEDIA_IMAGES),
+    "DECKLY_PROVIDER_MEDIA_CANDIDATES_PER_QUERY": (1, MAX_MEDIA_CANDIDATES),
+    "DECKLY_PROVIDER_MEDIA_MAX_CONCURRENCY": (1, MAX_MEDIA_CONCURRENCY),
+}
+OUT_OF_BOUNDS = [
+    (variable, value) for variable, (low, high) in MEDIA_BOUNDS.items() for value in (low - 1, high + 1)
+]
+AT_BOUNDS = [(variable, value) for variable, bounds in MEDIA_BOUNDS.items() for value in bounds]
+
+
+@pytest.mark.parametrize(("variable", "value"), OUT_OF_BOUNDS)
+def test_media_limit_outside_its_bounds_is_rejected(
+    clean_environment: pytest.MonkeyPatch, variable: str, value: int
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv(variable, str(value))
+
+    with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_PROVIDER_").lower()):
+        ProviderSettings()
+
+
+@pytest.mark.parametrize(("variable", "value"), AT_BOUNDS)
+def test_media_limit_at_its_bounds_is_accepted(
+    clean_environment: pytest.MonkeyPatch, variable: str, value: int
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv(variable, str(value))
+
+    settings = ProviderSettings()
+
+    assert getattr(settings, variable.removeprefix("DECKLY_PROVIDER_").lower()) == value
+
+
+def test_thumbnail_narrower_than_the_smallest_accepted_image_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MEDIA_THUMBNAIL_WIDTH", str(MIN_IMAGE_SIDE - 1))
+
+    with pytest.raises(ValidationError, match="media_thumbnail_width"):
+        ProviderSettings()
+
+
+def test_thumbnail_as_wide_as_the_smallest_accepted_image_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MEDIA_THUMBNAIL_WIDTH", str(MIN_IMAGE_SIDE))
+
+    assert ProviderSettings().media_thumbnail_width == MIN_IMAGE_SIDE

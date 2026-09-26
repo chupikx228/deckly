@@ -83,10 +83,7 @@ answers `204`, and the worker stops at its next stage as before. Arq removes a m
 cancels or finishes the job; a marker written for a job that ended at that same moment stays in
 `arq:abort`, which is harmless because the stored job is already terminal.
 
-The source retriever, source parser and card generator are real (see below). The media fetcher
-is still the placeholder in `infrastructure/providers.py`, which raises `NotImplementedError`,
-so a job with `includeImages` ends `failed` with `GENERATION_FAILED` at `fetching_media`.
-Replace it in `worker/settings.py` (`startup`).
+All four provider ports are real (see below) and wired in `worker/settings.py` (`startup`).
 
 ## Sources
 
@@ -120,8 +117,8 @@ opens it and later jobs fail fast without calling Tavily until the reset probe s
 other rejection (`400`, `401`, `403`…) or a body that is not the expected JSON is
 not retried and fails the job `GENERATION_FAILED`. A search with no usable page is not an error
 here: the parser returns no material, the card generator skips the model call, and the job ends
-`NO_VALID_CONTENT`. Settings refuse to load unless the search and model deadlines together leave
-room within `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS`.
+`NO_VALID_CONTENT`. Settings refuse to load unless the search, model and media deadlines together
+leave room within `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS`.
 
 ## Card generation
 
@@ -186,6 +183,49 @@ not open the circuit and fail every other job. With 16 000 tokens, decks of abou
 more are oversized; the app's wizard asks for at most 50. The estimate only classifies: every
 request still asks for the whole `MODEL_MAX_OUTPUT_TOKENS`. A timeout while connecting cannot be
 told apart from a slow reply, so for an oversized request it is not counted either.
+
+## Media
+
+`infrastructure/media/` implements the `MediaFetcher` port against the Wikimedia Commons API (raw
+`httpx2`, `DECKLY_PROVIDER_MEDIA_*`, no API key). When `includeImages` is set, the card
+generator's prompt offers each note an optional `"image"` key: a short English phrase naming what
+a picture of the note would show. The adapter keeps it only as a search phrase for a note that
+survived validation, cleaned, at most 100 characters, and ignores it otherwise; a bad phrase never
+costs the note. Commons wants a User-Agent it can reach its owner through, so set
+`DECKLY_PROVIDER_MEDIA_USER_AGENT` to a real URL or email address; a `403` is treated as a block.
+
+The media stage searches once per illustrated note, for at most `MEDIA_MAX_IMAGES` notes, with at
+most `MEDIA_MAX_CONCURRENCY` searches at a time. The phrase is reduced to plain lowercase words
+first, so it cannot use CirrusSearch operators (`insource:`, `-`, `AND`/`OR`/`NOT`, wildcards,
+regexes), cut at a word to the 300 characters CirrusSearch accepts, and the search is limited to
+bitmap and drawing files. Each note gets the first
+candidate in search rank order that passes every check below, and a file already given to an
+earlier note is skipped:
+
+- **Licence.** The file's machine-readable `License` code must be `cc0` or `pd`, its
+  `AttributionRequired` flag must be exactly `false`, and its `Restrictions` (personality rights,
+  trademark, insignia) must be empty. The contract's `Media` has no field for an author or a
+  source link, so licences that require attribution (CC BY, CC BY-SA) are dropped, not guessed.
+  The licence is returned as `CC0-1.0` or `Public-Domain`.
+- **URL.** The Commons-scaled thumbnail (`MEDIA_THUMBNAIL_WIDTH`, which Commons rounds to one of
+  its standard widths; SVG comes back as PNG) must be `https` on `wikimedia.org` or one of its
+  subdomains, with no credentials or port. These URLs are unsigned, need no authentication and
+  stay valid until the file is deleted or renamed on Commons, which is how the 24-hour
+  requirement is met. Wikimedia gives no formal guarantee.
+- **Picture.** A displayable image type, with both thumbnail sides at least 200 pixels.
+- **Alt text.** The file's description with markup removed, cut at a word to 250 characters, or
+  the file name when the description is blank. A file with neither is dropped. The description is
+  usually English and may not match the card language.
+
+A note with no passing candidate simply has no image. The media stage is a bulkhead: every
+search goes through the resilience layer with its own breaker and policy, and a failed search
+(outage, timeout, `429`/`5xx`, an open circuit, a block, a malformed answer) only costs that note
+its image. The whole stage stops at `MEDIA_DEADLINE_SECONDS` and keeps what it found by then. The
+pipeline also catches anything that still escapes the adapter, logs `media_skipped` (warning for
+an outage, error with the traceback for anything else) and succeeds with the generated notes as
+they were. An image outage therefore never fails a job and never produces `PROVIDER_UNAVAILABLE`.
+The port returns attachments keyed by `clientId`, never notes, so a media adapter cannot drop or
+duplicate a note; attachments for unknown notes are ignored and a repeated `mediaId` is kept once.
 
 ## Checks
 

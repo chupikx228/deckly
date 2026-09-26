@@ -24,6 +24,7 @@ from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.job_store import PostgresJobStore
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
+from deckly.infrastructure.media.fetcher import CommonsMediaFetcher
 from deckly.infrastructure.resilience import (
     CircuitBreaker,
     CircuitState,
@@ -35,6 +36,7 @@ from deckly.infrastructure.search.parser import CleaningSourceParser
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.worker.settings import (
     LLM_CLIENT_KEY,
+    MEDIA_FETCHER_KEY,
     RUN_GENERATION_KEY,
     SETTINGS_KEY,
     SOURCE_RETRIEVER_KEY,
@@ -157,6 +159,23 @@ async def test_worker_startup_wires_the_web_source_retriever_and_parser(settings
     assert run.retriever is retriever
     assert isinstance(run.parser, CleaningSourceParser)
     assert run.parser.max_characters == settings.providers.search_max_source_characters
+
+
+async def test_worker_startup_wires_the_commons_media_fetcher_in_place_of_any_stub(
+    settings: Settings,
+) -> None:
+    ctx: WorkerContext = {SETTINGS_KEY: settings}
+
+    await startup(ctx)
+    try:
+        run = from_context(ctx, RUN_GENERATION_KEY, RunGeneration)
+        media = from_context(ctx, MEDIA_FETCHER_KEY, CommonsMediaFetcher)
+    finally:
+        await shutdown(ctx)
+
+    assert run.media is media
+    assert media.limits.max_images == settings.providers.media_max_images
+    assert media.limits.deadline_seconds == settings.providers.media_deadline_seconds
 
 
 async def test_worker_startup_wires_the_llm_card_generator_behind_the_resilience_layer(

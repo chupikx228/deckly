@@ -18,10 +18,15 @@ SYSTEM_INTRODUCTION = (
     '- "noteType": one of the note types below.\n'
     '- "fields": exactly the fields shown for that note type, with no other keys.\n'
     '- "sources": the numbers of the source material entries that support the note, such as [1, 3].\n'
-    '- "tags": an optional list of short keywords.\n'
-    "\n"
-    "Note types:"
+    '- "tags": an optional list of short keywords.'
 )
+IMAGE_KEY = (
+    '\n- "image": optional. A short English phrase to search a free image library with for one picture '
+    'that helps learn the note, such as "stop sign" or "mitochondrion diagram". Name what the picture '
+    "shows, not the question. Leave it out when a picture would not help."
+)
+NOTE_TYPES_HEADING = "Note types:"
+
 SYSTEM_RULES = (
     "Rules:\n"
     "- Use only facts stated in the numbered source material and cite every entry you rely on. Leave out "
@@ -42,9 +47,18 @@ ESTIMATED_DECK_TOKENS = 100
 ESTIMATED_TOKENS_PER_NOTE = 100
 
 
-def system_prompt(handlers: Sequence[NoteTypeHandler]) -> str:
+def note_keys(*, include_images: bool) -> str:
+    return SYSTEM_INTRODUCTION + IMAGE_KEY if include_images else SYSTEM_INTRODUCTION
+
+
+def system_prompt(handlers: Sequence[NoteTypeHandler], *, include_images: bool) -> str:
     return SECTION_BREAK.join(
-        [SYSTEM_INTRODUCTION, *(handler.instructions for handler in handlers), SYSTEM_RULES]
+        [
+            note_keys(include_images=include_images),
+            NOTE_TYPES_HEADING,
+            *(handler.instructions for handler in handlers),
+            SYSTEM_RULES,
+        ]
     )
 
 
@@ -81,7 +95,7 @@ def build_prompt(
     request: GenerationRequest, material: Sequence[SourceMaterial], handlers: Sequence[NoteTypeHandler]
 ) -> LlmPrompt:
     return LlmPrompt(
-        system=system_prompt(handlers),
+        system=system_prompt(handlers, include_images=request.include_images),
         user=strip_unstorable(user_prompt(request, material, handlers)),
         expected_output_tokens=expected_output_tokens(request),
     )

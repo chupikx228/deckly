@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from uuid import UUID
 
@@ -8,9 +8,11 @@ from deckly.application.exceptions import JobStoppedError, NoValidContentError, 
 from deckly.application.generations import Clock
 from deckly.application.ports import (
     CardGenerator,
+    ImageQuery,
     JobStore,
     JobTransition,
     MediaFetcher,
+    NoteMedia,
     SourceParser,
     SourceRetriever,
     StoredJob,
@@ -19,6 +21,8 @@ from deckly.domain.deck import GenerationResult
 from deckly.domain.exceptions import JobAlreadyTerminalError
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import STAGE_ORDER, Failed, FailureCode, GenerationJob, JobStage, JobStatus
+from deckly.domain.media import Media
+from deckly.domain.notes.note import Note
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,25 @@ def require_notes(result: GenerationResult) -> GenerationResult:
         message = "every generated note was dropped during validation"
         raise NoValidContentError(message)
     return result
+
+
+def queries_for(result: GenerationResult, queries: Iterable[ImageQuery]) -> tuple[ImageQuery, ...]:
+    client_ids = {note.client_id for note in result.notes}
+    return tuple(query for query in queries if query.client_id in client_ids)
+
+
+def with_media(note: Note, media: Iterable[Media]) -> Note:
+    known = {item.media_id for item in note.media}
+    added = tuple({item.media_id: item for item in media if item.media_id not in known}.values())
+    return replace(note, media=(*note.media, *added)) if added else note
+
+
+def attach_media(result: GenerationResult, attachments: Iterable[NoteMedia]) -> GenerationResult:
+    media_by_note: dict[UUID, list[Media]] = {}
+    for attachment in attachments:
+        media_by_note.setdefault(attachment.client_id, []).append(attachment.media)
+    notes = tuple(with_media(note, media_by_note.get(note.client_id, ())) for note in result.notes)
+    return replace(result, notes=notes)
 
 
 def log_context(job: GenerationJob) -> dict[str, object]:
@@ -106,14 +129,42 @@ class RunGeneration:
         await self._enter(job_id, JobStage.PARSING_SOURCES)
         material = await self.parser.parse(job_id, request, pages)
         await self._enter(job_id, JobStage.GENERATING_CARDS)
-        result = require_notes(await self.generator.generate(job_id, request, material))
+        cards = await self.generator.generate(job_id, request, material)
+        result = require_notes(cards.result)
         if request.include_images:
             await self._enter(job_id, JobStage.FETCHING_MEDIA)
-            result = require_notes(replace(result, notes=await self.media.fetch(request, result.notes)))
+            result = await self._illustrate(job_id, result, queries_for(result, cards.image_queries))
         await self._enter(job_id, JobStage.FINALIZING)
         now = self.clock()
         succeeded = await self._update(job_id, lambda job: job.succeed(result, now))
         logger.info("generation_succeeded", extra={**log_context(succeeded), "notes": len(result.notes)})
+
+    async def _illustrate(
+        self, job_id: UUID, result: GenerationResult, queries: tuple[ImageQuery, ...]
+    ) -> GenerationResult:
+        try:
+            illustrated = attach_media(result, await self.media.fetch(job_id, queries))
+        except Exception as error:
+            level = logging.WARNING if isinstance(error, UpstreamUnavailableError) else logging.ERROR
+            logger.log(
+                level,
+                "media_skipped",
+                exc_info=error,
+                extra={"job_id": str(job_id), "image_queries": len(queries)},
+            )
+            return result
+        illustrated_notes = sum(
+            1 for before, after in zip(result.notes, illustrated.notes, strict=True) if after is not before
+        )
+        logger.info(
+            "media_attached",
+            extra={
+                "job_id": str(job_id),
+                "image_queries": len(queries),
+                "illustrated_notes": illustrated_notes,
+            },
+        )
+        return illustrated
 
     async def _enter(self, job_id: UUID, stage: JobStage) -> None:
         now = self.clock()

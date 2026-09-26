@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from uuid import UUID
 
-from deckly.application.ports import SourceMaterial
+from deckly.application.ports import GeneratedCards, ImageQuery, SourceMaterial
 from deckly.domain.deck import GenerationResult
 from deckly.domain.exceptions import InvariantViolationError, MissingSourceError
 from deckly.domain.generation import GenerationRequest
@@ -13,7 +13,7 @@ from deckly.domain.notes.fields import NoteFields
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.source import Source
-from deckly.domain.text import strip_unstorable
+from deckly.domain.text import is_blank, strip_unstorable
 from deckly.infrastructure.card_generator.deck import repair_deck
 from deckly.infrastructure.card_generator.extraction import EMPTY_DOCUMENT, ModelDocument, extract_document
 from deckly.infrastructure.card_generator.note_types import NoteTypeHandler
@@ -22,6 +22,7 @@ from deckly.infrastructure.card_generator.untrusted import (
     JsonObject,
     UnusableOutputError,
     as_object,
+    clean_text,
     read_labels,
 )
 from deckly.infrastructure.llm.client import LlmClient, LlmReply, LlmStop
@@ -30,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 FIRST_SOURCE_NUMBER = 1
 MIN_CARD_COUNT = 1
+MAX_IMAGE_QUERY_CHARACTERS = 100
+WORD_SEPARATOR = " "
 
 
 class DropReason(StrEnum):
@@ -48,6 +51,29 @@ class DroppedNoteError(Exception):
     def __init__(self, reason: DropReason) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+@dataclass(frozen=True, slots=True)
+class DraftNote:
+    note: Note
+    image_query: str | None
+
+
+def image_query_of(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    query = WORD_SEPARATOR.join(clean_text(value).split())
+    if is_blank(query) or len(query) > MAX_IMAGE_QUERY_CHARACTERS:
+        return None
+    return query
+
+
+def image_queries(drafts: tuple[DraftNote, ...]) -> tuple[ImageQuery, ...]:
+    return tuple(
+        ImageQuery(client_id=draft.note.client_id, text=draft.image_query)
+        for draft in drafts
+        if draft.image_query is not None
+    )
 
 
 def note_type_of(value: object) -> NoteType | None:
@@ -89,7 +115,7 @@ class LlmCardGenerator:
 
     async def generate(
         self, job_id: UUID, request: GenerationRequest, material: tuple[SourceMaterial, ...]
-    ) -> GenerationResult:
+    ) -> GeneratedCards:
         handlers = tuple(self.handlers[kind] for kind in request.note_types if kind in self.handlers)
         if request.card_count < MIN_CARD_COUNT or not handlers or not material:
             logger.warning(
@@ -101,11 +127,12 @@ class LlmCardGenerator:
                     "material_entries": len(material),
                 },
             )
-            return GenerationResult(deck=repair_deck(None, request.topic), notes=())
+            return GeneratedCards(result=GenerationResult(deck=repair_deck(None, request.topic), notes=()))
         reply = await self.llm.complete(build_prompt(request, material, handlers))
         document = EMPTY_DOCUMENT if reply.stop is LlmStop.REFUSED else extract_document(reply.text)
         drops: Counter[DropReason] = Counter()
-        notes = self._valid_notes(document, request, material, drops)
+        drafts = self._valid_notes(document, request, material, drops)
+        queries = image_queries(drafts) if request.include_images else ()
         logger.log(
             outcome_level(reply, document),
             "card_generation_finished",
@@ -114,11 +141,15 @@ class LlmCardGenerator:
                 "reply_stop": reply.stop,
                 "document_complete": document.complete,
                 "returned_notes": len(document.notes),
-                "kept_notes": len(notes),
+                "kept_notes": len(drafts),
                 "dropped_notes": dict(drops),
+                "image_queries": len(queries),
             },
         )
-        return GenerationResult(deck=repair_deck(document.deck, request.topic), notes=notes)
+        result = GenerationResult(
+            deck=repair_deck(document.deck, request.topic), notes=tuple(draft.note for draft in drafts)
+        )
+        return GeneratedCards(result=result, image_queries=queries)
 
     def _valid_notes(
         self,
@@ -126,33 +157,35 @@ class LlmCardGenerator:
         request: GenerationRequest,
         material: tuple[SourceMaterial, ...],
         drops: Counter[DropReason],
-    ) -> tuple[Note, ...]:
-        valid: list[Note] = []
+    ) -> tuple[DraftNote, ...]:
+        valid: list[DraftNote] = []
         seen: set[tuple[NoteType, Hashable]] = set()
         for raw in document.notes:
             try:
-                note = self._note(raw, request, material)
+                draft = self._draft(raw, request, material)
             except DroppedNoteError as error:
                 drops[error.reason] += 1
                 continue
-            content = (note.note_type, note.fields.duplicate_key)
+            content = (draft.note.note_type, draft.note.fields.duplicate_key)
             if content in seen:
                 drops[DropReason.DUPLICATE] += 1
                 continue
             seen.add(content)
-            valid.append(note)
+            valid.append(draft)
         excess = len(valid) - request.card_count
         if excess > 0:
             drops[DropReason.OVER_CARD_COUNT] += excess
         return tuple(valid[: request.card_count])
 
-    def _note(self, raw: object, request: GenerationRequest, material: tuple[SourceMaterial, ...]) -> Note:
+    def _draft(
+        self, raw: object, request: GenerationRequest, material: tuple[SourceMaterial, ...]
+    ) -> DraftNote:
         note = as_object(raw)
         if note is None:
             raise DroppedNoteError(DropReason.NOT_AN_OBJECT)
         fields = self._fields(note, request)
         try:
-            return Note(
+            built = Note(
                 client_id=self.new_id(),
                 fields=fields,
                 sources=cited_sources(note.get("sources"), material),
@@ -162,6 +195,7 @@ class LlmCardGenerator:
             raise DroppedNoteError(DropReason.MISSING_SOURCE) from error
         except InvariantViolationError as error:
             raise DroppedNoteError(DropReason.INVALID_CONTENT) from error
+        return DraftNote(note=built, image_query=image_query_of(note.get("image")))
 
     def _fields(self, note: JsonObject, request: GenerationRequest) -> NoteFields:
         handler = self._handler(note.get("noteType"), request)

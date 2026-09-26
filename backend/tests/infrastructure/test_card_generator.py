@@ -5,12 +5,13 @@ import re
 import time
 import unicodedata
 from collections.abc import Callable
+from dataclasses import replace
 
 import pytest
 
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.pipeline import RunGeneration
-from deckly.application.ports import SourceMaterial
+from deckly.application.ports import GeneratedCards, ImageQuery, SourceMaterial
 from deckly.domain.deck import MAX_DESCRIPTION_LENGTH, MAX_TITLE_LENGTH, GenerationResult
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import Cancelled, Failed, FailureCode, GenerationJob, JobStage, Succeeded
@@ -21,7 +22,7 @@ from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE
 from deckly.domain.source import Source
 from deckly.domain.text import is_blank, utf16_length
-from deckly.infrastructure.card_generator.generator import LlmCardGenerator
+from deckly.infrastructure.card_generator.generator import MAX_IMAGE_QUERY_CHARACTERS, LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.llm.client import (
     LlmClient,
@@ -123,12 +124,18 @@ def document(*notes: object, deck: object = DECK) -> dict[str, object]:
     return {"deck": deck, "notes": list(notes)}
 
 
-async def generate(
+async def generate_cards(
     llm: LlmClient, job_request: GenerationRequest, material: tuple[SourceMaterial, ...] = MATERIAL
-) -> GenerationResult:
+) -> GeneratedCards:
     ids = sequential_job_ids()
     generator = LlmCardGenerator(llm=llm, new_id=lambda: next(ids), handlers=NOTE_TYPE_HANDLERS)
     return await generator.generate(JOB_ID, job_request, material)
+
+
+async def generate(
+    llm: LlmClient, job_request: GenerationRequest, material: tuple[SourceMaterial, ...] = MATERIAL
+) -> GenerationResult:
+    return (await generate_cards(llm, job_request, material)).result
 
 
 def assert_valid_for(result: GenerationResult, job_request: GenerationRequest) -> None:
@@ -771,8 +778,8 @@ async def test_duplicates_are_only_looked_for_within_one_generation(repeated: di
         handlers=NOTE_TYPE_HANDLERS,
     )
 
-    first = await generator.generate(job_id(1), request(NoteType.BASIC), MATERIAL)
-    second = await generator.generate(job_id(2), request(NoteType.BASIC), MATERIAL)
+    first = (await generator.generate(job_id(1), request(NoteType.BASIC), MATERIAL)).result
+    second = (await generator.generate(job_id(2), request(NoteType.BASIC), MATERIAL)).result
 
     assert (len(first.notes), len(second.notes)) == (1, 1)
 
@@ -1077,6 +1084,116 @@ async def test_prompt_carries_user_instructions_only_when_there_are_some() -> No
     with_instructions, without_instructions = llm.prompts
     assert "Focus on warning signs" in with_instructions.user
     assert "User instructions" not in without_instructions.user
+
+
+def illustrated_request(*note_types: NoteType, card_count: int = 10) -> GenerationRequest:
+    return replace(request(*note_types, card_count=card_count), include_images=True)
+
+
+def with_image(note: dict[str, object], query: object) -> dict[str, object]:
+    return {**note, "image": query}
+
+
+async def test_prompt_asks_for_an_image_query_only_when_images_are_requested() -> None:
+    llm = FakeLlmClient(model_reply(document(basic(1))))
+
+    await generate(llm, illustrated_request(NoteType.BASIC))
+    await generate(llm, request(NoteType.BASIC))
+
+    with_images, without_images = llm.prompts
+    assert '"image"' in with_images.system
+    assert '"image"' not in without_images.system
+
+
+async def test_image_query_of_each_kept_note_is_returned_against_that_notes_client_id() -> None:
+    llm = FakeLlmClient(
+        model_reply(document(with_image(basic(1), "stop sign"), basic(2), with_image(basic(3), "yield sign")))
+    )
+
+    cards = await generate_cards(llm, illustrated_request(NoteType.BASIC))
+
+    first, _, third = cards.result.notes
+    assert cards.image_queries == (
+        ImageQuery(client_id=first.client_id, text="stop sign"),
+        ImageQuery(client_id=third.client_id, text="yield sign"),
+    )
+
+
+async def test_image_query_is_ignored_when_images_were_not_requested() -> None:
+    llm = FakeLlmClient(model_reply(document(with_image(basic(1), "stop sign"))))
+
+    cards = await generate_cards(llm, request(NoteType.BASIC))
+
+    assert len(cards.result.notes) == 1
+    assert cards.image_queries == ()
+
+
+UNUSABLE_IMAGE_QUERIES: dict[str, object] = {
+    "null": None,
+    "number": 7,
+    "list": ["stop sign"],
+    "object": {"query": "stop sign"},
+    "empty": "",
+    "whitespace": "   ",
+    "invisible only": "\u200b\u2060",
+    "only unstorable characters": "\x00\ud800",
+    "longer than the limit": "a" * (MAX_IMAGE_QUERY_CHARACTERS + 1),
+}
+
+
+@pytest.mark.parametrize("query", UNUSABLE_IMAGE_QUERIES.values(), ids=UNUSABLE_IMAGE_QUERIES.keys())
+async def test_unusable_image_query_is_ignored_and_never_costs_the_note(query: object) -> None:
+    llm = FakeLlmClient(model_reply(document(with_image(basic(1), query))))
+
+    cards = await generate_cards(llm, illustrated_request(NoteType.BASIC))
+
+    assert fronts(cards.result) == ["front 1"]
+    assert cards.image_queries == ()
+
+
+async def test_image_query_is_cleaned_of_unstorable_characters_and_extra_whitespace() -> None:
+    llm = FakeLlmClient(model_reply(document(with_image(basic(1), "  stop\x00 \n\t sign  "))))
+
+    cards = await generate_cards(llm, illustrated_request(NoteType.BASIC))
+
+    assert [query.text for query in cards.image_queries] == ["stop sign"]
+
+
+async def test_image_query_at_the_length_limit_is_kept() -> None:
+    query = "a" * MAX_IMAGE_QUERY_CHARACTERS
+    llm = FakeLlmClient(model_reply(document(with_image(basic(1), query))))
+
+    cards = await generate_cards(llm, illustrated_request(NoteType.BASIC))
+
+    assert [entry.text for entry in cards.image_queries] == [query]
+
+
+async def test_dropped_duplicate_and_trimmed_notes_carry_no_image_query() -> None:
+    notes = [
+        with_image(basic(1), "first"),
+        with_image(basic(1), "duplicate"),
+        with_image(note_json(NoteType.BASIC, {"front": "no back"}), "invalid"),
+        with_image(basic(2), "second"),
+        with_image(basic(3), "over the card count"),
+    ]
+    llm = FakeLlmClient(model_reply(document(*notes)))
+
+    cards = await generate_cards(llm, illustrated_request(NoteType.BASIC, card_count=2))
+
+    kept = {note.client_id for note in cards.result.notes}
+    assert [query.text for query in cards.image_queries] == ["first", "second"]
+    assert {query.client_id for query in cards.image_queries} == kept
+
+
+async def test_image_query_count_is_logged_without_the_query_text(caplog: pytest.LogCaptureFixture) -> None:
+    llm = FakeLlmClient(model_reply(document(with_image(basic(1), "confidential picture"), basic(2))))
+
+    with caplog.at_level(logging.INFO, logger=GENERATOR_LOGGER):
+        await generate(llm, illustrated_request(NoteType.BASIC))
+
+    [record] = [record for record in caplog.records if record.getMessage() == "card_generation_finished"]
+    assert record.__dict__["image_queries"] == 1
+    assert "confidential picture" not in json.dumps(record.__dict__, default=str)
 
 
 async def test_outcome_is_logged_with_drop_counts_by_reason_and_no_note_content(
