@@ -7,9 +7,9 @@ from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE
 from tests.domain.builders import unregister
 
 
-def request_with(*note_types: NoteType) -> GenerationRequest:
+def request_with(*note_types: NoteType, topic: str = "Road signs") -> GenerationRequest:
     return GenerationRequest(
-        topic="Road signs",
+        topic=topic,
         language="ru",
         card_count=40,
         difficulty=Difficulty.INTERMEDIATE,
@@ -44,3 +44,24 @@ def test_note_type_without_a_field_shape_is_rejected(monkeypatch: pytest.MonkeyP
 
 def test_basic_optional_reversed_can_be_requested() -> None:
     assert request_with(NoteType.BASIC_OPTIONAL_REVERSED).note_types == (NoteType.BASIC_OPTIONAL_REVERSED,)
+
+
+BLANK_TOPICS = {
+    "empty": "",
+    "spaces": "   ",
+    "mixed whitespace": " \t\n\r\N{IDEOGRAPHIC SPACE}\N{NO-BREAK SPACE} ",
+    "invisible characters": "\N{ZERO WIDTH SPACE}\N{ZERO WIDTH NO-BREAK SPACE}\N{ZERO WIDTH JOINER}",
+    "characters that render blank": "\N{HANGUL FILLER} \N{BRAILLE PATTERN BLANK}",
+}
+
+
+@pytest.mark.parametrize("topic", BLANK_TOPICS.values(), ids=BLANK_TOPICS.keys())
+def test_blank_topic_is_rejected(topic: str) -> None:
+    with pytest.raises(InvalidGenerationRequestError, match="topic"):
+        request_with(NoteType.BASIC, topic=topic)
+
+
+def test_topic_with_one_visible_character_among_blanks_is_accepted() -> None:
+    topic = " \N{ZERO WIDTH SPACE}x\t"
+
+    assert request_with(NoteType.BASIC, topic=topic).topic == topic

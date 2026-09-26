@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import (
     AnyHttpUrl,
@@ -9,6 +9,7 @@ from pydantic import (
     RedisDsn,
     SecretStr,
     field_validator,
+    model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -16,6 +17,7 @@ ASYNC_POSTGRES_SCHEME = "postgresql+asyncpg"
 ENV_FILE = ".env"
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+ModelProvider = Literal["anthropic", "deepseek"]
 
 
 def _settings_config(env_prefix: str) -> SettingsConfigDict:
@@ -66,11 +68,27 @@ class RedisSettings(BaseSettings):
 class ProviderSettings(BaseSettings):
     model_config = _settings_config("DECKLY_PROVIDER_")
 
+    model_provider: ModelProvider
+    model_base_url: AnyHttpUrl
     model_api_key: SecretStr
     model_name: str
+    model_max_output_tokens: PositiveInt
     model_timeout_seconds: PositiveInt
+    model_deadline_seconds: PositiveInt
+    model_max_attempts: PositiveInt
+    model_retry_base_delay_seconds: PositiveInt
+    model_retry_max_delay_seconds: PositiveInt
+    model_circuit_failure_threshold: PositiveInt
+    model_circuit_reset_seconds: PositiveInt
     search_api_key: SecretStr
     search_timeout_seconds: PositiveInt
+
+    @model_validator(mode="after")
+    def require_deadline_to_fit_one_attempt(self) -> Self:
+        if self.model_deadline_seconds < self.model_timeout_seconds:
+            message = "model deadline must be at least the timeout of a single attempt"
+            raise ValueError(message)
+        return self
 
 
 class LimitSettings(BaseSettings):

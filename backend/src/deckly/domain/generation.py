@@ -4,6 +4,7 @@ from enum import StrEnum
 from deckly.domain.exceptions import InvalidGenerationRequestError, UnsupportedNoteTypeError
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import fields_type_for
+from deckly.domain.text import is_blank
 
 
 class Difficulty(StrEnum):
@@ -23,6 +24,9 @@ class GenerationRequest:
     instructions: str | None
 
     def __post_init__(self) -> None:
+        if is_blank(self.topic):
+            message = "topic must contain visible characters"
+            raise InvalidGenerationRequestError(message)
         if not self.note_types:
             message = "at least one note type is required"
             raise InvalidGenerationRequestError(message)

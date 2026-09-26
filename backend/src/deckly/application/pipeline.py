@@ -106,7 +106,7 @@ class RunGeneration:
         await self._enter(job_id, JobStage.PARSING_SOURCES)
         material = await self.parser.parse(request, pages)
         await self._enter(job_id, JobStage.GENERATING_CARDS)
-        result = require_notes(await self.generator.generate(request, material))
+        result = require_notes(await self.generator.generate(job_id, request, material))
         if request.include_images:
             await self._enter(job_id, JobStage.FETCHING_MEDIA)
             result = require_notes(replace(result, notes=await self.media.fetch(request, result.notes)))

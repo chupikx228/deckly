@@ -10,14 +10,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deckly.application.pipeline import RunGeneration
 from deckly.config import Settings
 from deckly.domain.job import Failed, FailureCode, GenerationJob, JobStage, JobStatus, Succeeded
+from deckly.infrastructure.card_generator.generator import LlmCardGenerator
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.job_store import PostgresJobStore
+from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.queue import ArqJobQueue
 from deckly.worker.settings import (
+    LLM_CLIENT_KEY,
     RUN_GENERATION_KEY,
     SETTINGS_KEY,
     WorkerContext,
     WorkerSettings,
+    from_context,
     shutdown,
     startup,
 )
@@ -124,6 +128,22 @@ async def test_worker_started_with_the_stub_adapters_fails_jobs_instead_of_leavi
     assert stored is not None
     assert isinstance(stored.state, Failed)
     assert (stored.state.code, stored.stage) == (FailureCode.GENERATION_FAILED, JobStage.RETRIEVING_SOURCES)
+
+
+async def test_worker_startup_wires_the_llm_card_generator_behind_the_resilience_layer(
+    settings: Settings,
+) -> None:
+    ctx: WorkerContext = {SETTINGS_KEY: settings}
+
+    await startup(ctx)
+    try:
+        run = from_context(ctx, RUN_GENERATION_KEY, RunGeneration)
+        llm = from_context(ctx, LLM_CLIENT_KEY, ResilientLlmClient)
+    finally:
+        await shutdown(ctx)
+
+    assert isinstance(run.generator, LlmCardGenerator)
+    assert run.generator.llm is llm
 
 
 async def test_job_that_outlives_the_arq_timeout_ends_failed_instead_of_running_forever(

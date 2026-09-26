@@ -4,6 +4,8 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 WEB_URL_SCHEMES = frozenset({"http", "https"})
+NUL = "\N{NULL}"
+SURROGATE_CATEGORY = "Cs"
 INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf"})
 MARK_CATEGORIES = frozenset({"Mn", "Mc", "Me"})
 BLANK_LOOKING_CHARACTERS = frozenset(
@@ -36,6 +38,14 @@ def is_invisible_character(character: str) -> bool:
         or character in BLANK_LOOKING_CHARACTERS
         or any(ord(character) in ignorable for ignorable in DEFAULT_IGNORABLE_RANGES)
     )
+
+
+def is_unstorable_character(character: str) -> bool:
+    return character == NUL or unicodedata.category(character) == SURROGATE_CATEGORY
+
+
+def strip_unstorable(value: str) -> str:
+    return "".join(character for character in value if not is_unstorable_character(character))
 
 
 def is_blank_character(character: str) -> bool:

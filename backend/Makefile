@@ -1,4 +1,4 @@
-.PHONY: install check fix test test-integration run worker migrate revision up down
+.PHONY: install check fix test test-integration test-live run worker migrate revision up down
 
 install:
 	uv sync --locked
@@ -18,6 +18,9 @@ test:
 
 test-integration:
 	uv run pytest -m integration
+
+test-live:
+	uv run pytest -m live
 
 run:
 	uv run uvicorn deckly.main:create_app --factory --reload
