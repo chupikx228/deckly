@@ -125,6 +125,7 @@ class RunGeneration:
         try:
             interrupted = await self._fail(job_id, FailureCode.GENERATION_FAILED)
         except JobStoppedError:
+            logger.info("generation_stopped", extra={"job_id": str(job_id)})
             return
         except Exception:
             logger.exception("generation_interruption_not_recorded", extra={"job_id": str(job_id)})

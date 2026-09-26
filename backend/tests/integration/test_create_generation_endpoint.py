@@ -11,9 +11,8 @@ from arq.jobs import Job
 from fastapi.testclient import TestClient
 
 from deckly.config import Settings
-from deckly.infrastructure.queue import create_queue_pool
 from deckly.main import API_PREFIX, create_app
-from tests.integration.conftest import Cleanup, redis_settings
+from tests.integration.conftest import Cleanup, open_queue_pool
 from tests.transport.openapi import spec_errors
 
 pytestmark = pytest.mark.integration
@@ -51,7 +50,7 @@ def post(client: TestClient, cleanup: Cleanup, client_id: UUID, key: UUID) -> di
 
 
 async def queued_job_exists(settings: Settings, job_id: str) -> bool:
-    pool = await create_queue_pool(redis_settings(settings))
+    pool = await open_queue_pool(settings)
     try:
         return await Job(job_id, pool).info() is not None
     finally:

@@ -8,11 +8,12 @@ from collections.abc import Callable
 
 import pytest
 
+from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.pipeline import RunGeneration
 from deckly.application.ports import SourceMaterial
 from deckly.domain.deck import MAX_DESCRIPTION_LENGTH, MAX_TITLE_LENGTH, GenerationResult
 from deckly.domain.generation import Difficulty, GenerationRequest
-from deckly.domain.job import Failed, FailureCode, GenerationJob, JobStage, Succeeded
+from deckly.domain.job import Cancelled, Failed, FailureCode, GenerationJob, JobStage, Succeeded
 from deckly.domain.notes.basic import BasicFields
 from deckly.domain.notes.cloze import ClozeFields, cloze_numbers
 from deckly.domain.notes.multiple_choice import MultipleChoiceFields
@@ -41,9 +42,11 @@ from deckly.infrastructure.resilience import (
 from deckly.transport.results import GenerationResultBody
 from tests.domain.builders import JOB_ID, T0
 from tests.fakes import (
+    MODEL_THINKING_SECONDS,
     FakeLlmClient,
     Harness,
     LlmOutcome,
+    SlowModel,
     generation_request,
     hang_forever,
     job_id,
@@ -95,7 +98,7 @@ def request(*note_types: NoteType, card_count: int = 10) -> GenerationRequest:
         card_count=card_count,
         difficulty=Difficulty.INTERMEDIATE,
         note_types=tuple(dict.fromkeys(note_types)),
-        include_images=False,
+        include_images=NoteType.IMAGE_OCCLUSION in note_types,
         instructions=None,
     )
 
@@ -106,6 +109,10 @@ def note_json(note_type: str, fields: object, *, sources: object = FIRST_SOURCE)
 
 def valid_note(note_type: NoteType) -> dict[str, object]:
     return note_json(note_type, VALID_FIELDS[note_type])
+
+
+def with_fields(note_type: NoteType, **changes: object) -> dict[str, object]:
+    return note_json(note_type, {**VALID_FIELDS[note_type], **changes})
 
 
 def basic(number: int) -> dict[str, object]:
@@ -751,10 +758,15 @@ async def test_first_of_two_duplicates_is_kept_with_its_own_sources() -> None:
     assert note.sources == (MATERIAL[0].source,)
 
 
-async def test_duplicates_are_only_looked_for_within_one_generation() -> None:
+@pytest.mark.parametrize(
+    "repeated",
+    [basic(1), note_json(NoteType.BASIC, {"front": "FRONT 1", "back": "BACK 1"})],
+    ids=["exact", "near"],
+)
+async def test_duplicates_are_only_looked_for_within_one_generation(repeated: dict[str, object]) -> None:
     ids = sequential_job_ids()
     generator = LlmCardGenerator(
-        llm=FakeLlmClient(model_reply(document(basic(1)))),
+        llm=FakeLlmClient(model_reply(document(basic(1))), model_reply(document(repeated))),
         new_id=lambda: next(ids),
         handlers=NOTE_TYPE_HANDLERS,
     )
@@ -762,7 +774,7 @@ async def test_duplicates_are_only_looked_for_within_one_generation() -> None:
     first = await generator.generate(job_id(1), request(NoteType.BASIC), MATERIAL)
     second = await generator.generate(job_id(2), request(NoteType.BASIC), MATERIAL)
 
-    assert (fronts(first), fronts(second)) == (["front 1"], ["front 1"])
+    assert (len(first.notes), len(second.notes)) == (1, 1)
 
 
 async def test_notes_that_match_once_validation_trims_them_are_duplicates() -> None:
@@ -774,31 +786,146 @@ async def test_notes_that_match_once_validation_trims_them_are_duplicates() -> N
     assert fronts(result) == ["front 1"]
 
 
-NOT_EXACT_DUPLICATES: dict[str, tuple[dict[str, object], dict[str, object]]] = {
-    "same fields under another note type": (
-        note_json(NoteType.BASIC, VALID_FIELDS[NoteType.BASIC_REVERSED]),
-        valid_note(NoteType.BASIC_REVERSED),
-    ),
+NEAR_DUPLICATES: dict[str, tuple[dict[str, object], dict[str, object]]] = {
     "text that differs only in case": (
         basic(1),
-        note_json(NoteType.BASIC, {"front": "Front 1", "back": "back 1"}),
+        note_json(NoteType.BASIC, {"front": "FRONT 1", "back": "Back 1"}),
     ),
     "text that differs only in unicode normalization": (
         note_json(NoteType.BASIC, {"front": "Caf\N{LATIN SMALL LETTER E WITH ACUTE}", "back": "back"}),
         note_json(NoteType.BASIC, {"front": "Cafe\N{COMBINING ACUTE ACCENT}", "back": "back"}),
     ),
-    "distractors in another order": (
-        valid_note(NoteType.MULTIPLE_CHOICE),
+    "text that differs only in width": (
+        basic(1),
+        note_json(NoteType.BASIC, {"front": "\N{FULLWIDTH LATIN SMALL LETTER F}ront 1", "back": "back 1"}),
+    ),
+    "text that differs only in inner whitespace": (
+        basic(1),
+        note_json(NoteType.BASIC, {"front": "front\t 1", "back": "back\n1"}),
+    ),
+    "text that differs only in invisible characters": (
+        basic(1),
         note_json(
+            NoteType.BASIC,
+            {"front": "fr\N{ZERO WIDTH SPACE}ont 1", "back": "back 1\N{RIGHT-TO-LEFT MARK}"},
+        ),
+    ),
+    "reversed sides that differ only in case": (
+        valid_note(NoteType.BASIC_REVERSED),
+        with_fields(NoteType.BASIC_REVERSED, front="STOP SIGN"),
+    ),
+    "type-in answer that differs only in case": (
+        valid_note(NoteType.BASIC_TYPE_IN),
+        with_fields(NoteType.BASIC_TYPE_IN, back="octagon"),
+    ),
+    "reverse card asked for by only one of them": (
+        valid_note(NoteType.BASIC_OPTIONAL_REVERSED),
+        with_fields(NoteType.BASIC_OPTIONAL_REVERSED, addReverse=False),
+    ),
+    "cloze text that differs only in case": (
+        valid_note(NoteType.CLOZE),
+        with_fields(NoteType.CLOZE, text="a {{c1::Red Triangle}} warns of a {{c2::Hazard}}"),
+    ),
+    "cloze with other extra context": (
+        valid_note(NoteType.CLOZE),
+        with_fields(NoteType.CLOZE, extra="Traffic code, section 5"),
+    ),
+    "multiple choice with distractors in another order": (
+        valid_note(NoteType.MULTIPLE_CHOICE),
+        with_fields(NoteType.MULTIPLE_CHOICE, distractors=["Triangle", "Circle"]),
+    ),
+    "multiple choice that differs only in case": (
+        valid_note(NoteType.MULTIPLE_CHOICE),
+        with_fields(
             NoteType.MULTIPLE_CHOICE,
-            {**VALID_FIELDS[NoteType.MULTIPLE_CHOICE], "distractors": ["Triangle", "Circle"]},
+            question="which shape is a STOP sign?",
+            answer="octagon",
+            distractors=["triangle", "CIRCLE"],
         ),
     ),
 }
 
 
-@pytest.mark.parametrize(("first", "second"), NOT_EXACT_DUPLICATES.values(), ids=NOT_EXACT_DUPLICATES.keys())
-async def test_notes_that_are_not_exact_duplicates_are_both_kept(
+@pytest.mark.parametrize(("first", "second"), NEAR_DUPLICATES.values(), ids=NEAR_DUPLICATES.keys())
+async def test_near_duplicate_is_dropped_and_the_first_note_is_kept(
+    first: dict[str, object], second: dict[str, object]
+) -> None:
+    job_request = request(*HANDLED_TYPES)
+    alone = await generate(FakeLlmClient(model_reply(document(first))), job_request)
+
+    result = await generate(FakeLlmClient(model_reply(document(first, second))), job_request)
+
+    [kept] = result.notes
+    [expected] = alone.notes
+    assert kept.fields == expected.fields
+
+
+async def test_near_duplicate_is_logged_as_a_duplicate_and_does_not_use_up_card_count(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    near = note_json(NoteType.BASIC, {"front": "FRONT 1", "back": "BACK 1"})
+    llm = FakeLlmClient(model_reply(document(basic(1), near, basic(2))))
+
+    with caplog.at_level(logging.INFO, logger=GENERATOR_LOGGER):
+        result = await generate(llm, request(NoteType.BASIC, card_count=2))
+
+    assert fronts(result) == ["front 1", "front 2"]
+    [record] = [record for record in caplog.records if record.getMessage() == "card_generation_finished"]
+    assert record.__dict__["dropped_notes"] == {"duplicate": 1}
+
+
+async def test_note_dropped_as_invalid_does_not_make_its_near_duplicate_a_duplicate() -> None:
+    unsourced = note_json(NoteType.BASIC, {"front": "front 1", "back": "back 1"}, sources=[])
+    near = note_json(NoteType.BASIC, {"front": "FRONT 1", "back": "BACK 1"})
+    llm = FakeLlmClient(model_reply(document(unsourced, near)))
+
+    result = await generate(llm, request(NoteType.BASIC))
+
+    assert fronts(result) == ["FRONT 1"]
+
+
+DISTINCT_NOTES: dict[str, tuple[dict[str, object], dict[str, object]]] = {
+    "same fields under another note type": (
+        note_json(NoteType.BASIC, VALID_FIELDS[NoteType.BASIC_REVERSED]),
+        valid_note(NoteType.BASIC_REVERSED),
+    ),
+    "same front with another back": (
+        basic(1),
+        note_json(NoteType.BASIC, {"front": "front 1", "back": "back 2"}),
+    ),
+    "reversed sides swapped": (
+        valid_note(NoteType.BASIC_REVERSED),
+        with_fields(NoteType.BASIC_REVERSED, front="Red octagon", back="Stop sign"),
+    ),
+    "superscript and subscript digits": (
+        note_json(NoteType.BASIC, {"front": "x\N{SUPERSCRIPT TWO}", "back": "back"}),
+        note_json(NoteType.BASIC, {"front": "x\N{SUBSCRIPT TWO}", "back": "back"}),
+    ),
+    "sharp s and double s": (
+        note_json(NoteType.BASIC, {"front": "Stra\N{LATIN SMALL LETTER SHARP S}e", "back": "back"}),
+        note_json(NoteType.BASIC, {"front": "Strasse", "back": "back"}),
+    ),
+    "cloze hiding another part": (
+        valid_note(NoteType.CLOZE),
+        with_fields(NoteType.CLOZE, text="A red triangle warns of a {{c1::hazard}}"),
+    ),
+    "multiple choice with another distractor": (
+        valid_note(NoteType.MULTIPLE_CHOICE),
+        with_fields(NoteType.MULTIPLE_CHOICE, distractors=["Circle", "Square"]),
+    ),
+    "multiple choice with one distractor more": (
+        with_fields(NoteType.MULTIPLE_CHOICE, distractors=["Circle", "Triangle", "Square"]),
+        valid_note(NoteType.MULTIPLE_CHOICE),
+    ),
+    "multiple choice with another answer": (
+        valid_note(NoteType.MULTIPLE_CHOICE),
+        with_fields(NoteType.MULTIPLE_CHOICE, answer="Hexagon"),
+    ),
+}
+
+
+@pytest.mark.parametrize(("first", "second"), DISTINCT_NOTES.values(), ids=DISTINCT_NOTES.keys())
+async def test_notes_that_ask_different_things_are_both_kept(
     first: dict[str, object], second: dict[str, object]
 ) -> None:
     llm = FakeLlmClient(model_reply(document(first, second)))
@@ -1003,16 +1130,40 @@ QUICK_POLICY = RetryPolicy(
 )
 
 
-def resilient(llm: LlmClient, breaker: CircuitBreaker | None = None) -> ResilientLlmClient:
+MODEL_MAX_OUTPUT_TOKENS = 16_000
+
+
+def resilient(
+    llm: LlmClient, breaker: CircuitBreaker | None = None, policy: RetryPolicy = QUICK_POLICY
+) -> ResilientLlmClient:
     circuit = breaker or CircuitBreaker(failure_threshold=5, reset_seconds=30, clock=lambda: 0.0)
     runtime = RetryRuntime(clock=lambda: 0.0, sleep=asyncio.sleep, jitter=lambda: 0.0)
-    return ResilientLlmClient(llm, ResilientCaller(QUICK_POLICY, circuit, runtime))
+    return ResilientLlmClient(llm, ResilientCaller(policy, circuit, runtime), MODEL_MAX_OUTPUT_TOKENS)
 
 
-async def run_job(llm: LlmClient) -> GenerationJob:
-    harness = Harness()
+DECK_SIZES: dict[str, tuple[int, CircuitState]] = {
+    "the smallest deck": (5, CircuitState.OPEN),
+    "a 50-card deck": (50, CircuitState.OPEN),
+    "the largest deck": (200, CircuitState.CLOSED),
+}
+
+
+@pytest.mark.parametrize(("card_count", "state"), DECK_SIZES.values(), ids=DECK_SIZES.keys())
+async def test_model_timeouts_count_against_the_provider_unless_the_deck_is_oversized(
+    card_count: int, state: CircuitState
+) -> None:
+    breaker = CircuitBreaker(failure_threshold=1, reset_seconds=30, clock=lambda: 0.0)
+    llm = resilient(FakeLlmClient(hang_forever), breaker)
+
+    with pytest.raises(UpstreamUnavailableError):
+        await generate(llm, request(NoteType.BASIC, card_count=card_count))
+
+    assert breaker.state is state
+
+
+def pipeline_for(harness: Harness, llm: LlmClient) -> RunGeneration:
     ids = sequential_job_ids()
-    run = RunGeneration(
+    return RunGeneration(
         store=harness.store,
         retriever=harness.providers,
         parser=harness.providers,
@@ -1020,9 +1171,44 @@ async def run_job(llm: LlmClient) -> GenerationJob:
         media=harness.providers,
         clock=lambda: harness.now,
     )
+
+
+async def run_job(llm: LlmClient) -> GenerationJob:
+    harness = Harness()
     job_id = (await harness.create(generation_request(), scope())).job.job_id
-    await run(job_id)
+    await pipeline_for(harness, llm)(job_id)
     return await harness.get(job_id)
+
+
+PATIENT_POLICY = RetryPolicy(
+    max_attempts=2,
+    attempt_timeout_seconds=MODEL_THINKING_SECONDS * 10,
+    deadline_seconds=MODEL_THINKING_SECONDS * 30,
+    base_delay_seconds=0,
+    max_delay_seconds=0,
+)
+
+
+async def test_cancel_during_the_model_call_aborts_the_call_and_leaves_the_job_cancelled() -> None:
+    harness = Harness()
+    model = SlowModel(model_reply(document(basic(1))))
+    llm = FakeLlmClient(model.think)
+    breaker = CircuitBreaker(failure_threshold=1, reset_seconds=30, clock=lambda: 0.0)
+    job_id = (await harness.create(generation_request(), scope())).job.job_id
+    running = asyncio.create_task(pipeline_for(harness, resilient(llm, breaker, PATIENT_POLICY))(job_id))
+    harness.queue.running[job_id] = running
+    await model.reached.wait()
+
+    await harness.cancel(job_id)
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    job = await harness.get(job_id)
+    assert isinstance(job.state, Cancelled)
+    assert job.stage is JobStage.GENERATING_CARDS
+    assert model.endings == ["aborted"]
+    assert len(llm.prompts) == 1
+    assert breaker.state is CircuitState.CLOSED
 
 
 PIPELINE_FAILURES: dict[str, tuple[Callable[[], LlmOutcome], FailureCode]] = {

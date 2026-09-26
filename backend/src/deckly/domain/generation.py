@@ -39,3 +39,6 @@ class GenerationRequest:
             except UnsupportedNoteTypeError as error:
                 message = f"note type {note_type} cannot be generated yet"
                 raise InvalidGenerationRequestError(message) from error
+        if NoteType.IMAGE_OCCLUSION in self.note_types and not self.include_images:
+            message = f"note type {NoteType.IMAGE_OCCLUSION} is only generated with includeImages"
+            raise InvalidGenerationRequestError(message)

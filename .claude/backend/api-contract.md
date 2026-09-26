@@ -77,6 +77,12 @@ Request:
 | `includeImages` | no       | Defaults to `false`. Images add significant latency and cost.           |
 | `instructions`  | no       | Free-form user steering, up to 500 characters.                          |
 
+**`image_occlusion` needs `includeImages: true`.** An image-occlusion note is built on an image
+the server fetches, so a request that asks for that type without images could never produce
+one. A request whose `noteTypes` contains `image_occlusion` while `includeImages` is `false` —
+or left out, since it defaults to `false` — is rejected up front with `400 VALIDATION_FAILED`.
+The schema expresses this rule with `if`/`then` on `GenerationRequest`.
+
 The server also enforces these rules, which the schema cannot express. Each one fails with
 `400 VALIDATION_FAILED`:
 

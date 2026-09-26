@@ -38,7 +38,8 @@ def build_lifespan(settings: Settings) -> Lifespan:
                     str(settings.redis.url),
                     connect_timeout_seconds=settings.redis.connect_timeout_seconds,
                     connect_retries=settings.redis.connect_retries,
-                )
+                ),
+                read_timeout_seconds=settings.redis.connect_timeout_seconds,
             )
             try:
                 session_factory = create_session_factory(engine)
@@ -46,15 +47,16 @@ def build_lifespan(settings: Settings) -> Lifespan:
                 app.state.settings = settings
                 app.state.session_factory = session_factory
                 app.state.queue = queue
+                jobs = ArqJobQueue(queue, command_timeout_seconds=settings.redis.connect_timeout_seconds)
                 app.state.create_generation = CreateGeneration(
                     store=store,
-                    queue=ArqJobQueue(queue),
+                    queue=jobs,
                     quota=UnmeteredQuota(settings.limits.generation_jobs_per_day),
                     clock=utc_now,
                     new_job_id=uuid4,
                 )
                 app.state.get_generation = GetGeneration(store=store)
-                app.state.cancel_generation = CancelGeneration(store=store, clock=utc_now)
+                app.state.cancel_generation = CancelGeneration(store=store, queue=jobs, clock=utc_now)
                 yield
             finally:
                 await queue.aclose()

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import Callable
 
@@ -25,7 +26,7 @@ ENDPOINT = LlmEndpoint(
     max_output_tokens=1234,
     timeout_seconds=5,
 )
-PROMPT = LlmPrompt(system="system instructions", user="user request")
+PROMPT = LlmPrompt(system="system instructions", user="user request", expected_output_tokens=100)
 
 type Handler = Callable[[httpx2.Request], httpx2.Response]
 
@@ -145,3 +146,35 @@ async def test_rejected_request_is_not_reported_as_transient(status: int) -> Non
 async def test_network_failure_is_reported_as_unavailable(error: Exception) -> None:
     with pytest.raises(LlmUnavailableError):
         await complete_with(raising(error))
+
+
+class SlowProvider:
+    def __init__(self) -> None:
+        self.reached = asyncio.Event()
+        self.endings: list[str] = []
+
+    async def handle(self, request: httpx2.Request) -> httpx2.Response:
+        del request
+        self.reached.set()
+        try:
+            await asyncio.sleep(ENDPOINT.timeout_seconds)
+        except asyncio.CancelledError:
+            self.endings.append("aborted")
+            raise
+        self.endings.append("answered")
+        return httpx2.Response(200, json=message())
+
+
+async def test_cancelling_the_caller_aborts_the_request_in_flight() -> None:
+    provider = SlowProvider()
+    client = AnthropicLlmClient(ENDPOINT, httpx2.AsyncClient(transport=httpx2.MockTransport(provider.handle)))
+    try:
+        call = asyncio.create_task(client.complete(PROMPT))
+        await provider.reached.wait()
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+    finally:
+        await client.aclose()
+
+    assert provider.endings == ["aborted"]

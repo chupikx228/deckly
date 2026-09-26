@@ -1,3 +1,4 @@
+import asyncio
 import json
 import traceback
 from collections.abc import Callable
@@ -29,7 +30,7 @@ ENDPOINT = LlmEndpoint(
     max_output_tokens=4321,
     timeout_seconds=5,
 )
-PROMPT = LlmPrompt(system="system instructions", user="user request")
+PROMPT = LlmPrompt(system="system instructions", user="user request", expected_output_tokens=100)
 
 type Handler = Callable[[httpx2.Request], httpx2.Response]
 
@@ -234,3 +235,35 @@ MALFORMED_BODIES: dict[str, Handler] = {
 async def test_malformed_response_envelope_is_a_response_error(handler: Handler) -> None:
     with pytest.raises(LlmResponseError):
         await complete_with(handler)
+
+
+class SlowProvider:
+    def __init__(self) -> None:
+        self.reached = asyncio.Event()
+        self.endings: list[str] = []
+
+    async def handle(self, request: httpx2.Request) -> httpx2.Response:
+        del request
+        self.reached.set()
+        try:
+            await asyncio.sleep(ENDPOINT.timeout_seconds)
+        except asyncio.CancelledError:
+            self.endings.append("aborted")
+            raise
+        self.endings.append("answered")
+        return httpx2.Response(200, json=completion())
+
+
+async def test_cancelling_the_caller_aborts_the_request_in_flight() -> None:
+    provider = SlowProvider()
+    client = DeepSeekLlmClient(ENDPOINT, httpx2.MockTransport(provider.handle))
+    try:
+        call = asyncio.create_task(client.complete(PROMPT))
+        await provider.reached.wait()
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+    finally:
+        await client.aclose()
+
+    assert provider.endings == ["aborted"]

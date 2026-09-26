@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from dataclasses import replace
 
 import pytest
@@ -14,6 +15,7 @@ from deckly.infrastructure.llm.client import (
 )
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.resilience import (
+    CallSize,
     CircuitBreaker,
     CircuitOpenError,
     CircuitState,
@@ -25,7 +27,8 @@ from tests.fakes import FakeLlmClient, hang_forever
 
 pytestmark = pytest.mark.anyio
 
-PROMPT = LlmPrompt(system="system", user="user")
+MAX_OUTPUT_TOKENS = 1000
+PROMPT = LlmPrompt(system="system", user="user", expected_output_tokens=100)
 REPLY = LlmReply(text="{}", stop=LlmStop.COMPLETE)
 POLICY = RetryPolicy(
     max_attempts=3,
@@ -66,7 +69,9 @@ def resilient(
     breaker: CircuitBreaker | None = None,
 ) -> ResilientLlmClient:
     runtime = RetryRuntime(clock=time.clock, sleep=time.sleep, jitter=time.jitter)
-    return ResilientLlmClient(inner, ResilientCaller(policy, breaker or time.breaker(), runtime))
+    return ResilientLlmClient(
+        inner, ResilientCaller(policy, breaker or time.breaker(), runtime), MAX_OUTPUT_TOKENS
+    )
 
 
 def unavailable(retry_after_seconds: float | None = None) -> LlmUnavailableError:
@@ -353,6 +358,163 @@ async def test_cancelling_the_caller_is_propagated_instead_of_being_retried() ->
 
     assert len(inner.prompts) == 1
     assert time.sleeps == []
+
+
+async def test_cancelled_call_is_not_counted_against_the_provider() -> None:
+    time = ManualTime()
+    breaker = time.breaker(failure_threshold=1)
+    reached = asyncio.Event()
+
+    async def hang_after_reaching() -> LlmReply:
+        reached.set()
+        return await hang_forever()
+
+    client = resilient(FakeLlmClient(hang_after_reaching, REPLY), time, breaker=breaker)
+    call = asyncio.create_task(client.complete(PROMPT))
+    await reached.wait()
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    assert breaker.state is CircuitState.CLOSED
+    assert await client.complete(PROMPT) == REPLY
+
+
+async def test_cancelling_during_the_backoff_starts_no_further_attempt() -> None:
+    time = ManualTime()
+    backing_off = asyncio.Event()
+
+    async def sleep_until_cancelled(seconds: float) -> None:
+        time.sleeps.append(seconds)
+        backing_off.set()
+        await asyncio.Event().wait()
+
+    inner = FakeLlmClient(unavailable(), REPLY)
+    runtime = RetryRuntime(clock=time.clock, sleep=sleep_until_cancelled, jitter=time.jitter)
+    client = ResilientLlmClient(inner, ResilientCaller(POLICY, time.breaker(), runtime), MAX_OUTPUT_TOKENS)
+    call = asyncio.create_task(client.complete(PROMPT))
+    await backing_off.wait()
+    call.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    assert len(inner.prompts) == 1
+
+
+TYPICAL_SIZES = {"small": 100, "just under half the budget": MAX_OUTPUT_TOKENS // 2 - 1}
+OVERSIZED_SIZES = {
+    "exactly half the budget": MAX_OUTPUT_TOKENS // 2,
+    "the whole budget": MAX_OUTPUT_TOKENS,
+    "beyond the budget": MAX_OUTPUT_TOKENS * 5,
+}
+IMPATIENT_POLICY = replace(POLICY, max_attempts=1, attempt_timeout_seconds=0.01)
+
+
+def expecting(tokens: int) -> LlmPrompt:
+    return replace(PROMPT, expected_output_tokens=tokens)
+
+
+@pytest.mark.parametrize("tokens", OVERSIZED_SIZES.values(), ids=OVERSIZED_SIZES.keys())
+async def test_timeouts_of_oversized_requests_never_open_the_circuit(tokens: int) -> None:
+    time = ManualTime()
+    breaker = time.breaker(failure_threshold=2)
+    inner = FakeLlmClient(hang_forever)
+    client = resilient(inner, time, IMPATIENT_POLICY, breaker)
+
+    for _ in range(5):
+        with pytest.raises(UpstreamUnavailableError):
+            await client.complete(expecting(tokens))
+
+    assert breaker.state is CircuitState.CLOSED
+    assert len(inner.prompts) == 5
+
+
+@pytest.mark.parametrize("tokens", TYPICAL_SIZES.values(), ids=TYPICAL_SIZES.keys())
+async def test_timeouts_of_typical_requests_still_open_the_circuit(tokens: int) -> None:
+    time = ManualTime()
+    breaker = time.breaker(failure_threshold=2)
+    inner = FakeLlmClient(hang_forever)
+    client = resilient(inner, time, IMPATIENT_POLICY, breaker)
+    for _ in range(2):
+        with pytest.raises(UpstreamUnavailableError):
+            await client.complete(expecting(tokens))
+
+    with pytest.raises(CircuitOpenError):
+        await client.complete(expecting(tokens))
+
+    assert breaker.state is CircuitState.OPEN
+    assert len(inner.prompts) == 2
+
+
+async def test_failures_other_than_timeouts_open_the_circuit_whatever_the_request_size() -> None:
+    time = ManualTime()
+    breaker = time.breaker(failure_threshold=2)
+    inner = FakeLlmClient(unavailable())
+    client = resilient(inner, time, replace(POLICY, max_attempts=1), breaker)
+    for _ in range(2):
+        with pytest.raises(UpstreamUnavailableError):
+            await client.complete(expecting(MAX_OUTPUT_TOKENS))
+
+    with pytest.raises(CircuitOpenError):
+        await client.complete(expecting(MAX_OUTPUT_TOKENS))
+
+    assert len(inner.prompts) == 2
+
+
+async def test_oversized_timeout_neither_counts_nor_resets_the_consecutive_failures() -> None:
+    time = ManualTime()
+    breaker = time.breaker(failure_threshold=2)
+    inner = FakeLlmClient(hang_forever)
+    client = resilient(inner, time, IMPATIENT_POLICY, breaker)
+
+    for tokens in (PROMPT.expected_output_tokens, MAX_OUTPUT_TOKENS, PROMPT.expected_output_tokens):
+        with pytest.raises(UpstreamUnavailableError):
+            await client.complete(expecting(tokens))
+
+    assert breaker.state is CircuitState.OPEN
+    assert len(inner.prompts) == 3
+
+
+async def test_oversized_trial_that_times_out_lets_the_next_call_try_again_at_once() -> None:
+    time = ManualTime()
+    breaker = time.breaker(failure_threshold=1)
+    await open_circuit(time, breaker)
+    time.now += RESET_SECONDS
+    client = resilient(FakeLlmClient(hang_forever, REPLY), time, IMPATIENT_POLICY, breaker)
+
+    with pytest.raises(UpstreamUnavailableError):
+        await client.complete(expecting(MAX_OUTPUT_TOKENS))
+    released = breaker.state
+    reply = await client.complete(PROMPT)
+
+    assert (released, reply, breaker.state) == (CircuitState.OPEN, REPLY, CircuitState.CLOSED)
+
+
+async def test_typical_trial_that_times_out_reopens_the_circuit_for_another_reset_period() -> None:
+    time = ManualTime()
+    breaker = time.breaker(failure_threshold=1)
+    await open_circuit(time, breaker)
+    time.now += RESET_SECONDS
+    inner = FakeLlmClient(hang_forever, REPLY)
+    client = resilient(inner, time, IMPATIENT_POLICY, breaker)
+
+    with pytest.raises(UpstreamUnavailableError):
+        await client.complete(PROMPT)
+    with pytest.raises(CircuitOpenError):
+        await client.complete(PROMPT)
+
+    assert len(inner.prompts) == 1
+
+
+async def test_retry_is_logged_with_the_size_of_the_call(caplog: pytest.LogCaptureFixture) -> None:
+    inner = FakeLlmClient(unavailable(), REPLY)
+
+    with caplog.at_level(logging.WARNING, logger="deckly.infrastructure.resilience"):
+        await resilient(inner, ManualTime()).complete(expecting(MAX_OUTPUT_TOKENS))
+
+    [record] = [record for record in caplog.records if record.getMessage() == "provider_call_retrying"]
+    assert record.__dict__["call_size"] == CallSize.OVERSIZED
 
 
 async def test_closing_the_resilient_client_closes_the_provider_client() -> None:

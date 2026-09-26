@@ -3,6 +3,7 @@ from typing import ClassVar
 
 from deckly.domain.notes.fields import NoteFields, require_bool, require_text
 from deckly.domain.notes.note_type import NoteType
+from deckly.domain.text import normalise_for_comparison
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,6 +14,10 @@ class FrontBackFields(NoteFields):
     def __post_init__(self) -> None:
         require_text(self.front, "front")
         require_text(self.back, "back")
+
+    @property
+    def duplicate_key(self) -> tuple[str, str]:
+        return normalise_for_comparison(self.front), normalise_for_comparison(self.back)
 
 
 @dataclass(frozen=True, slots=True)

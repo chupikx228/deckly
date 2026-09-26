@@ -6,6 +6,7 @@ from http import HTTPStatus
 from uuid import UUID, uuid4
 
 import pytest
+from arq.constants import abort_jobs_ss
 from fastapi.testclient import TestClient
 from sqlalchemy import update
 
@@ -17,7 +18,7 @@ from deckly.infrastructure.tables import GenerationJobRow
 from deckly.main import API_PREFIX, create_app
 from tests.domain.builders import FULL_RESULT, T0, at
 from tests.fakes import generation_request
-from tests.integration.conftest import Cleanup
+from tests.integration.conftest import Cleanup, open_queue_pool
 from tests.transport.openapi import spec_errors
 
 pytestmark = pytest.mark.integration
@@ -115,6 +116,38 @@ def test_terminal_job_is_409_and_unchanged(
     assert body is not None
     assert body["code"] == "JOB_ALREADY_TERMINAL"
     assert poll(client, job.job_id) == before
+
+
+async def abort_signalled(settings: Settings, job_id: UUID) -> bool:
+    pool = await open_queue_pool(settings)
+    try:
+        return await pool.zscore(abort_jobs_ss, str(job_id)) is not None
+    finally:
+        await pool.aclose()
+
+
+@pytest.mark.parametrize("make_job", ACTIVE_JOBS.values(), ids=ACTIVE_JOBS.keys())
+def test_cancelling_an_active_job_tells_the_workers_to_abort_it(
+    client: TestClient, cleanup: Cleanup, settings: Settings, make_job: Callable[[], GenerationJob]
+) -> None:
+    job = make_job()
+    asyncio.run(write(settings, cleanup, job))
+
+    cancel(client, job.job_id)
+
+    assert asyncio.run(abort_signalled(settings, job.job_id))
+
+
+@pytest.mark.parametrize("make_job", TERMINAL_JOBS.values(), ids=TERMINAL_JOBS.keys())
+def test_cancelling_a_finished_job_aborts_nothing(
+    client: TestClient, cleanup: Cleanup, settings: Settings, make_job: Callable[[], GenerationJob]
+) -> None:
+    job = make_job()
+    asyncio.run(write(settings, cleanup, job))
+
+    cancel(client, job.job_id)
+
+    assert not asyncio.run(abort_signalled(settings, job.job_id))
 
 
 def test_job_created_through_the_api_can_be_cancelled_once(client: TestClient, cleanup: Cleanup) -> None:

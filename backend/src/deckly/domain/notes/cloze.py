@@ -5,7 +5,7 @@ from typing import ClassVar
 from deckly.domain.exceptions import InvalidClozeError
 from deckly.domain.notes.fields import NoteFields, require_text
 from deckly.domain.notes.note_type import NoteType
-from deckly.domain.text import is_blank
+from deckly.domain.text import is_blank, normalise_for_comparison
 
 CLOZE_OPENING = re.compile(r"\{\{c([0-9]+)::")
 CLOZE_CLOSING = "}}"
@@ -26,6 +26,10 @@ class ClozeFields(NoteFields):
         if numbers != set(range(1, len(numbers) + 1)):
             message = f"cloze markers must be numbered from 1 without gaps, got {sorted(numbers)}"
             raise InvalidClozeError(message)
+
+    @property
+    def duplicate_key(self) -> str:
+        return normalise_for_comparison(self.text)
 
 
 def cloze_numbers(text: str) -> set[int]:

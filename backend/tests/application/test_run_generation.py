@@ -453,6 +453,17 @@ async def test_worker_interruption_of_a_job_the_user_already_cancelled_keeps_it_
     assert job.stage is JobStage.GENERATING_CARDS
 
 
+async def test_interruption_of_a_cancelled_job_is_logged_as_stopped(caplog: pytest.LogCaptureFixture) -> None:
+    harness = Harness()
+    job_id = await create(harness, WITH_IMAGES)
+
+    with caplog.at_level(logging.INFO, logger="deckly.application.pipeline"):
+        await interrupt_during_generation(harness, job_id, lambda: harness.cancel(job_id))
+
+    [record] = [record for record in caplog.records if record.getMessage() == "generation_stopped"]
+    assert record.__dict__["job_id"] == str(job_id)
+
+
 async def test_worker_interruption_still_propagates_when_the_failure_cannot_be_recorded() -> None:
     store = UnreachableJobStore()
     harness = Harness(store)
