@@ -23,7 +23,7 @@ from deckly.infrastructure.resilience import (
     RetryPolicy,
     RetryRuntime,
 )
-from tests.fakes import FakeLlmClient, hang_forever
+from tests.fakes import RESET_SECONDS, FakeLlmClient, ManualTime, hang_forever
 
 pytestmark = pytest.mark.anyio
 
@@ -37,29 +37,6 @@ POLICY = RetryPolicy(
     base_delay_seconds=1,
     max_delay_seconds=8,
 )
-RESET_SECONDS = 30
-
-
-class ManualTime:
-    def __init__(self) -> None:
-        self.now = 0.0
-        self.sleeps: list[float] = []
-        self.fraction = 1.0
-
-    def clock(self) -> float:
-        return self.now
-
-    async def sleep(self, seconds: float) -> None:
-        self.sleeps.append(seconds)
-        self.now += seconds
-
-    def jitter(self) -> float:
-        return self.fraction
-
-    def breaker(self, failure_threshold: int = 5) -> CircuitBreaker:
-        return CircuitBreaker(
-            failure_threshold=failure_threshold, reset_seconds=RESET_SECONDS, clock=self.clock
-        )
 
 
 def resilient(

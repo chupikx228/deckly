@@ -5,7 +5,6 @@ from anthropic import APIConnectionError, APIResponseValidationError, APIStatusE
 from anthropic.types import Message, TextBlock
 
 from deckly.infrastructure.llm.client import (
-    RETRY_AFTER_HEADER,
     LlmEndpoint,
     LlmPrompt,
     LlmReply,
@@ -14,6 +13,7 @@ from deckly.infrastructure.llm.client import (
     LlmUnavailableError,
     status_error,
 )
+from deckly.infrastructure.resilience import RETRY_AFTER_HEADER
 
 PROVIDER = "Anthropic"
 NO_SDK_RETRIES = 0

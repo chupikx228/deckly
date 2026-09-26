@@ -12,8 +12,9 @@ src/deckly/
   transport/         HTTP: routers, Problem (RFC 9457) model, the single error mapper
   application/       use cases and the ports they depend on; application errors
   domain/            pure business rules; domain errors
-  infrastructure/    adapters: async SQLAlchemy + asyncpg, Arq/Redis, JSON logging, the LLM card
-                     generator (Anthropic or DeepSeek) and the retry/circuit-breaker layer
+  infrastructure/    adapters: async SQLAlchemy + asyncpg, Arq/Redis, JSON logging, web search and
+                     source parsing (Tavily), the LLM card generator (Anthropic or DeepSeek) and
+                     the retry/circuit-breaker layer
   worker/            Arq worker entrypoint, WorkerSettings and its composition root
 migrations/          Alembic (async)
 ```
@@ -82,11 +83,45 @@ answers `204`, and the worker stops at its next stage as before. Arq removes a m
 cancels or finishes the job; a marker written for a job that ended at that same moment stays in
 `arq:abort`, which is harmless because the stored job is already terminal.
 
-The card generator is real (see below). The source retriever, source parser and media fetcher
-are still the placeholders in `infrastructure/providers.py`, which raise
-`NotImplementedError`. The retriever runs first, so until it exists every job the worker picks
-up ends `failed` with `GENERATION_FAILED` at `retrieving_sources` rather than staying `queued`.
-Replace them one by one in `worker/settings.py` (`startup`).
+The source retriever, source parser and card generator are real (see below). The media fetcher
+is still the placeholder in `infrastructure/providers.py`, which raises `NotImplementedError`,
+so a job with `includeImages` ends `failed` with `GENERATION_FAILED` at `fetching_media`.
+Replace it in `worker/settings.py` (`startup`).
+
+## Sources
+
+`infrastructure/search/` implements the `SourceRetriever` and `SourceParser` ports. The retriever
+makes one Tavily `POST /search` per job (raw `httpx2`, `DECKLY_PROVIDER_SEARCH_*`) for the topic,
+asking for the page text Tavily has already extracted (`include_raw_content: "text"`), so the
+worker never fetches arbitrary URLs itself. The request language is passed as a ranking hint only
+when its primary subtag is a two-letter ISO 639-1 code. Each result becomes a page whose `Source`
+is that result's own title and URL, stamped with the time the answer arrived; a result whose URL
+is not `http(s)` or whose title is blank once cleaned is dropped, a repeated URL is kept once, and
+at most `DECKLY_PROVIDER_SEARCH_MAX_RESULTS` pages are kept even if the provider returns more.
+When Tavily has no page text, its snippet of that same page stands in.
+
+The parser cleans every page before the card generator numbers it. NUL, lone surrogates, control
+and format characters (bidi overrides, zero-width spaces) are removed from the text and the title,
+except the zero-width joiner and non-joiner that some scripts and emoji need; whitespace is
+collapsed, titles become one line of at most 200 characters, and anything shaped like the
+prompt's `<source>` / `</source>` markers is defused so page text cannot open or close a source
+block. Text is cut at a word boundary at `DECKLY_PROVIDER_SEARCH_MAX_SOURCE_CHARACTERS`. A page is
+dropped, never failing the job, when more than a tenth of it is replacement, control,
+private-use or unassigned characters (binary content), when fewer than 50 visible characters are
+left, or when it repeats an earlier page's text. The work runs in a thread so a large page does
+not stall the worker's event loop.
+
+The search call goes through the same retry/circuit-breaker layer as the model, with its own
+breaker and policy. Timeouts, network errors, `408`/`409`/`429` and `5xx` are retried with jittered
+backoff within `DECKLY_PROVIDER_SEARCH_DEADLINE_SECONDS`, then fail the job
+`PROVIDER_UNAVAILABLE`, as does an exhausted Tavily plan or spending limit (`432`/`433`). Those
+are not retried but do count toward the search circuit breaker, so a quota that stays exhausted
+opens it and later jobs fail fast without calling Tavily until the reset probe succeeds. Any
+other rejection (`400`, `401`, `403`…) or a body that is not the expected JSON is
+not retried and fails the job `GENERATION_FAILED`. A search with no usable page is not an error
+here: the parser returns no material, the card generator skips the model call, and the job ends
+`NO_VALID_CONTENT`. Settings refuse to load unless the search and model deadlines together leave
+room within `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS`.
 
 ## Card generation
 

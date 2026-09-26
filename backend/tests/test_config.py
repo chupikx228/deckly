@@ -4,7 +4,17 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from deckly.config import DatabaseSettings, ProviderSettings, load_settings
+from deckly.config import (
+    AppSettings,
+    CacheSettings,
+    DatabaseSettings,
+    LimitSettings,
+    ProviderSettings,
+    RedisSettings,
+    Settings,
+    load_settings,
+)
+from deckly.infrastructure.search.parser import MIN_VISIBLE_CHARACTERS
 
 ASYNC_URL = "postgresql+asyncpg://deckly:deckly@localhost:5433/deckly"
 
@@ -81,8 +91,22 @@ PROVIDER_ENVIRONMENT = {
     "DECKLY_PROVIDER_MODEL_RETRY_MAX_DELAY_SECONDS": "20",
     "DECKLY_PROVIDER_MODEL_CIRCUIT_FAILURE_THRESHOLD": "5",
     "DECKLY_PROVIDER_MODEL_CIRCUIT_RESET_SECONDS": "30",
+    "DECKLY_PROVIDER_SEARCH_BASE_URL": "https://api.tavily.com",
     "DECKLY_PROVIDER_SEARCH_API_KEY": "key",
     "DECKLY_PROVIDER_SEARCH_TIMEOUT_SECONDS": "15",
+    "DECKLY_PROVIDER_SEARCH_DEADLINE_SECONDS": "40",
+    "DECKLY_PROVIDER_SEARCH_MAX_ATTEMPTS": "2",
+    "DECKLY_PROVIDER_SEARCH_RETRY_BASE_DELAY_SECONDS": "1",
+    "DECKLY_PROVIDER_SEARCH_RETRY_MAX_DELAY_SECONDS": "5",
+    "DECKLY_PROVIDER_SEARCH_CIRCUIT_FAILURE_THRESHOLD": "5",
+    "DECKLY_PROVIDER_SEARCH_CIRCUIT_RESET_SECONDS": "30",
+    "DECKLY_PROVIDER_SEARCH_MAX_RESULTS": "6",
+    "DECKLY_PROVIDER_SEARCH_MAX_SOURCE_CHARACTERS": "8000",
+}
+LIMIT_ENVIRONMENT = {
+    "DECKLY_LIMIT_GENERATION_JOBS_PER_DAY": "20",
+    "DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS": "300",
+    "DECKLY_LIMIT_REGENERATE_NOTE_TIMEOUT_SECONDS": "10",
 }
 
 
@@ -153,3 +177,98 @@ def test_model_base_url_must_be_an_http_url(clean_environment: pytest.MonkeyPatc
 
     with pytest.raises(ValidationError, match="model_base_url"):
         ProviderSettings()
+
+
+def test_search_deadline_shorter_than_one_attempt_is_rejected(clean_environment: pytest.MonkeyPatch) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_SEARCH_DEADLINE_SECONDS", "14")
+
+    with pytest.raises(ValidationError, match="search deadline"):
+        ProviderSettings()
+
+
+def test_search_deadline_equal_to_one_attempt_is_accepted(clean_environment: pytest.MonkeyPatch) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_SEARCH_DEADLINE_SECONDS", "15")
+
+    assert ProviderSettings().search_deadline_seconds == 15
+
+
+@pytest.mark.parametrize("value", ["0", "21", "-1"])
+def test_search_result_cap_outside_what_the_provider_serves_is_rejected(
+    clean_environment: pytest.MonkeyPatch, value: str
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_SEARCH_MAX_RESULTS", value)
+
+    with pytest.raises(ValidationError, match="search_max_results"):
+        ProviderSettings()
+
+
+@pytest.mark.parametrize("value", ["1", "20"])
+def test_search_result_cap_at_the_provider_bounds_is_accepted(
+    clean_environment: pytest.MonkeyPatch, value: str
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_SEARCH_MAX_RESULTS", value)
+
+    assert ProviderSettings().search_max_results == int(value)
+
+
+@pytest.mark.parametrize("url", ["ftp://api.tavily.com", "api.tavily.com"])
+def test_search_base_url_must_be_an_http_url(clean_environment: pytest.MonkeyPatch, url: str) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_SEARCH_BASE_URL", url)
+
+    with pytest.raises(ValidationError, match="search_base_url"):
+        ProviderSettings()
+
+
+def settings_with_job_timeout(monkeypatch: pytest.MonkeyPatch, job_timeout_seconds: int) -> Settings:
+    set_provider_environment(monkeypatch)
+    for name, value in LIMIT_ENVIRONMENT.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS", str(job_timeout_seconds))
+    return Settings(
+        app=AppSettings.model_construct(),
+        database=DatabaseSettings.model_construct(),
+        redis=RedisSettings.model_construct(),
+        providers=ProviderSettings(),
+        limits=LimitSettings(),
+        cache=CacheSettings.model_construct(),
+    )
+
+
+@pytest.mark.parametrize("job_timeout_seconds", [280, 279, 1])
+def test_search_and_model_deadlines_that_fill_the_job_timeout_are_rejected(
+    clean_environment: pytest.MonkeyPatch, job_timeout_seconds: int
+) -> None:
+    with pytest.raises(ValueError, match="deadlines"):
+        settings_with_job_timeout(clean_environment, job_timeout_seconds)
+
+
+def test_search_and_model_deadlines_that_leave_room_in_the_job_timeout_are_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_with_job_timeout(clean_environment, 281)
+
+    assert settings.limits.generation_job_timeout_seconds == 281
+
+
+def test_source_character_limit_too_small_to_keep_any_page_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_SEARCH_MAX_SOURCE_CHARACTERS", str(MIN_VISIBLE_CHARACTERS - 1))
+
+    with pytest.raises(ValidationError, match="search_max_source_characters"):
+        ProviderSettings()
+
+
+def test_source_character_limit_equal_to_the_smallest_usable_page_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_SEARCH_MAX_SOURCE_CHARACTERS", str(MIN_VISIBLE_CHARACTERS))
+
+    assert ProviderSettings().search_max_source_characters == MIN_VISIBLE_CHARACTERS
