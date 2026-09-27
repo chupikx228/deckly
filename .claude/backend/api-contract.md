@@ -149,7 +149,8 @@ Response `202`:
 ```
 
 `quota` is optional; when present it reports this client's generation budget after the job was
-accepted. See "Quota" below.
+accepted. See "Quota" below. A replay of an earlier request with the same `Idempotency-Key`
+returns the original job and the current budget without using up another job.
 
 ### `GET /v1/generations/{jobId}`
 
@@ -291,7 +292,9 @@ matters instead: as `PROVIDER_UNAVAILABLE` on the job, or `503 UPSTREAM_UNAVAILA
 `X-Client-Id` is optional here. When the client sends it, the response also carries that
 client's `quota`, so the app can show the remaining budget up front. When it is sent, it is
 validated under the same rules as on `POST /generations`, and a malformed value, including an
-empty one, is rejected with `400 VALIDATION_FAILED` rather than ignored:
+empty one, is rejected with `400 VALIDATION_FAILED` rather than ignored. The quota is kept in
+Redis; when it cannot be read in time, `quota` is left out and `status` is `degraded`, still with
+`200`:
 
 ```json
 {
@@ -303,7 +306,7 @@ empty one, is rejected with `400 VALIDATION_FAILED` rather than ignored:
 
 ## Quota
 
-A per-client generation budget, counted in **jobs** (not cards) over a rolling day and keyed by
+A per-client generation budget, counted in **jobs** (not cards) per fixed UTC day and keyed by
 `X-Client-Id`.
 
 ```json
@@ -314,11 +317,26 @@ A per-client generation budget, counted in **jobs** (not cards) over a rolling d
 | ----------- | ----------------------------------------------------------------------- |
 | `limit`     | Jobs allowed in the current window. Server-side config, not fixed here. |
 | `remaining` | Jobs left. `0` means the next `POST /generations` returns `429`.        |
-| `resetsAt`  | When the window resets and `remaining` returns to `limit`.              |
+| `resetsAt`  | When the window resets and `remaining` returns to `limit`: next 00:00Z. |
 
 It appears on `GenerationJobCreated` (after each accepted job) and on `Health` (when the request
 carried `X-Client-Id`). Exhausting the budget does not change these shapes — the next generation
-request is rejected with `429 RATE_LIMITED` and a `retryAfterSeconds`.
+request is rejected with `429 RATE_LIMITED` and a `retryAfterSeconds` counting down to
+`resetsAt`.
+
+The window is a calendar day in UTC, not a rolling 24 hours: every client's budget resets at
+00:00Z, and `resetsAt` is the same for every read on the same day, including before the first
+job. A client can therefore start up to twice the limit across midnight. Only a new job uses up
+the budget. A replay of an earlier request, a request refused with `409` or `429`, and a request
+that fails before its job is stored do not.
+
+`X-Client-Id` is chosen by the client, so a client that rotates it gets a fresh budget each time.
+As a backstop, jobs are also counted per network address per UTC day, with a coarser limit
+(`DECKLY_LIMIT_GENERATION_JOBS_PER_ADDRESS_PER_DAY`, at least the per-client limit). Every IPv6
+address in one /64 counts as the same address. Going over it is the same `429 RATE_LIMITED`, even
+when `quota.remaining` is above `0`; this budget is not reported in `quota`. When the budget cannot
+be checked because Redis does not answer in time, `POST /generations` is refused with
+`503 UPSTREAM_UNAVAILABLE` rather than accepted unmetered.
 
 `POST /notes/regenerate` has its own, separate budget and does not use up the job quota. It is
 counted per `X-Client-Id` in fixed windows: by default 30 regenerations per hour
@@ -419,7 +437,7 @@ localised and is for logs.
 | -------------------------- | ------------------- | ------------------------------------------------- |
 | `VALIDATION_FAILED`        | 400                 | Request body failed validation                    |
 | `TOPIC_REJECTED`           | 422                 | Topic violates the content policy                 |
-| `RATE_LIMITED`             | 429                 | Too many jobs or regenerations for this client    |
+| `RATE_LIMITED`             | 429                 | A job or regeneration budget is used up; "Quota"  |
 | `JOB_NOT_FOUND`            | 404                 | Unknown job id                                    |
 | `JOB_ALREADY_TERMINAL`     | 409                 | Cancel on a finished job                          |
 | `IDEMPOTENCY_KEY_CONFLICT` | 409                 | `Idempotency-Key` reused with a different request |
@@ -427,7 +445,7 @@ localised and is for logs.
 | `NO_VALID_CONTENT`         | 200 in the job body | Every note was dropped; nothing safe to return    |
 | `NO_VALID_CONTENT`         | 503 on regenerate   | No valid replacement note could be produced       |
 | `GENERATION_FAILED`        | 200 in the job body | The job failed for any other reason               |
-| `UPSTREAM_UNAVAILABLE`     | 503                 | Model or search provider is down                  |
+| `UPSTREAM_UNAVAILABLE`     | 503                 | Model, search provider or quota store is down     |
 | `ROUTE_NOT_FOUND`          | 404                 | No endpoint exists at this path                   |
 | `METHOD_NOT_ALLOWED`       | 405                 | Endpoint exists but not for this HTTP method      |
 | `INTERNAL_ERROR`           | 500                 | Anything else                                     |
@@ -482,7 +500,7 @@ carry an `Allow` header listing the methods the path does accept.
    returned at all — the note degrades to no image rather than shipping unlicensed media. How the
    licence is derived is the backend's choice, but it must be derivable, or the image is dropped.
 3. **Per-client quota — yes, N generations per day per client (specced).** The quota counts
-   generation **jobs** (not cards) over a rolling day, keyed by `X-Client-Id`. It is now in
+   generation **jobs** (not cards) per fixed UTC day, keyed by `X-Client-Id`. It is now in
    `openapi.yaml` as a `Quota` object `{ limit, remaining, resetsAt }`:
    - returned on `GenerationJobCreated`, so the client learns the remaining budget after each
      accepted job;

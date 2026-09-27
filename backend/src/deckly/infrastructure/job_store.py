@@ -4,7 +4,7 @@ from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -110,6 +110,17 @@ def restore_request(row: GenerationJobRow) -> GenerationRequest:
         raise CorruptStoredJobError(str(error)) from error
 
 
+def scoped_row(scope: IdempotencyScope) -> Select[tuple[GenerationJobRow]]:
+    return select(GenerationJobRow).where(
+        GenerationJobRow.client_id == scope.client_id,
+        GenerationJobRow.idempotency_key == scope.idempotency_key,
+    )
+
+
+def restore_stored(row: GenerationJobRow) -> StoredJob:
+    return StoredJob(job=restore_job(row), request=restore_request(row))
+
+
 class PostgresJobStore:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -145,16 +156,16 @@ class PostgresJobStore:
         async with self._session_factory.begin() as session:
             if await session.scalar(statement) is not None:
                 return StoredJob(job=job, request=request)
-            existing = await session.scalar(
-                select(GenerationJobRow).where(
-                    GenerationJobRow.client_id == scope.client_id,
-                    GenerationJobRow.idempotency_key == scope.idempotency_key,
-                )
-            )
+            existing = await session.scalar(scoped_row(scope))
         if existing is None:
             message = f"idempotency conflict for {scope} but no stored job was found"
             raise CorruptStoredJobError(message)
-        return StoredJob(job=restore_job(existing), request=restore_request(existing))
+        return restore_stored(existing)
+
+    async def find(self, scope: IdempotencyScope) -> StoredJob | None:
+        async with self._session_factory() as session:
+            row = await session.scalar(scoped_row(scope))
+        return None if row is None else restore_stored(row)
 
     async def get(self, job_id: UUID) -> GenerationJob | None:
         async with self._session_factory() as session:
@@ -164,7 +175,7 @@ class PostgresJobStore:
     async def get_stored(self, job_id: UUID) -> StoredJob | None:
         async with self._session_factory() as session:
             row = await session.get(GenerationJobRow, job_id)
-        return None if row is None else StoredJob(job=restore_job(row), request=restore_request(row))
+        return None if row is None else restore_stored(row)
 
     async def update(self, job_id: UUID, transition: JobTransition) -> GenerationJob | None:
         async with self._session_factory.begin() as session:
@@ -190,6 +201,9 @@ class BoundedJobStore:
 
     async def add(self, job: GenerationJob, request: GenerationRequest, scope: IdempotencyScope) -> StoredJob:
         return await self._bounded(self._store.add(job, request, scope))
+
+    async def find(self, scope: IdempotencyScope) -> StoredJob | None:
+        return await self._bounded(self._store.find(scope))
 
     async def get(self, job_id: UUID) -> GenerationJob | None:
         return await self._bounded(self._store.get(job_id))

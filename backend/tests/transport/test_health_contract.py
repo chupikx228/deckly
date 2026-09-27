@@ -6,13 +6,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.health import CheckHealth
 from deckly.main import API_PREFIX
 from deckly.transport import health
 from deckly.transport.error_handlers import register_error_handlers
 from deckly.transport.problem import PROBLEM_JSON_MEDIA_TYPE
 from tests.domain.builders import T0
-from tests.fakes import QUOTA_LIMIT, FixedQuota
+from tests.fakes import QUOTA_LIMIT, InMemoryQuota
 from tests.transport.openapi import declared_responses, spec_contents, spec_errors
 
 ENDPOINT = f"{API_PREFIX}/health"
@@ -32,11 +33,13 @@ class StubProbe:
         return self.healthy
 
 
-def build_client(*probes: StubProbe) -> TestClient:
+def build_client(*probes: StubProbe, quota: InMemoryQuota | None = None) -> TestClient:
     app = FastAPI()
     register_error_handlers(app, "https://api.example.com/problems")
     app.include_router(health.router, prefix=API_PREFIX)
-    app.state.check_health = CheckHealth(probes=probes, quota=FixedQuota(), clock=lambda: T0, version=VERSION)
+    app.state.check_health = CheckHealth(
+        probes=probes, quota=InMemoryQuota() if quota is None else quota, clock=lambda: T0, version=VERSION
+    )
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -88,6 +91,15 @@ def test_any_unhealthy_dependency_makes_the_service_degraded(unhealthy: int) -> 
     assert body["status"] == "degraded"
     assert "quota" in body
     assert [probe.calls for probe in probes] == [1, 1]
+
+
+def test_unreadable_quota_degrades_the_service_and_is_left_out_instead_of_a_500() -> None:
+    quota = InMemoryQuota()
+    quota.failure = UpstreamUnavailableError(1)
+
+    body = assert_health(get(build_client(StubProbe(healthy=True), quota=quota), {"X-Client-Id": CLIENT_ID}))
+
+    assert body == {"status": "degraded", "version": VERSION}
 
 
 def test_client_id_header_name_is_case_insensitive() -> None:

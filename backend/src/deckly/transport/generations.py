@@ -4,7 +4,7 @@ from http import HTTPStatus
 from typing import Annotated, Self
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Response
+from fastapi import APIRouter, Depends, Header, Request, Response
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -35,6 +35,7 @@ from deckly.transport.results import GenerationResultBody
 
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 CLIENT_ID_HEADER = "X-Client-Id"
+UNKNOWN_ADDRESS = "unknown"
 
 MIN_TOPIC_LENGTH = 3
 MAX_TOPIC_LENGTH = 200
@@ -103,6 +104,17 @@ def parse_job_id(value: str) -> UUID:
         message = f"{value!r} is not a job id"
         raise JobNotFoundError(message)
     return UUID(value)
+
+
+def address_of(request: Request) -> str:
+    return UNKNOWN_ADDRESS if request.client is None else request.client.host
+
+
+def idempotency_scope(
+    idempotency_key: Annotated[CanonicalUuid, Header(alias=IDEMPOTENCY_KEY_HEADER)],
+    client_id: Annotated[CanonicalUuid, Header(alias=CLIENT_ID_HEADER)],
+) -> IdempotencyScope:
+    return IdempotencyScope(client_id=client_id, idempotency_key=idempotency_key)
 
 
 def require_client_id(client_id: Annotated[CanonicalUuid, Header(alias=CLIENT_ID_HEADER)]) -> UUID:
@@ -234,12 +246,11 @@ router = APIRouter()
 @router.post("/generations", status_code=HTTPStatus.ACCEPTED)
 async def create_generation(
     body: GenerationRequestBody,
-    idempotency_key: Annotated[CanonicalUuid, Header(alias=IDEMPOTENCY_KEY_HEADER)],
-    client_id: Annotated[CanonicalUuid, Header(alias=CLIENT_ID_HEADER)],
+    scope: Annotated[IdempotencyScope, Depends(idempotency_scope)],
+    address: Annotated[str, Depends(address_of)],
     create: Annotated[CreateGeneration, Depends(create_generation_use_case)],
 ) -> GenerationJobCreatedBody:
-    scope = IdempotencyScope(client_id=client_id, idempotency_key=idempotency_key)
-    return GenerationJobCreatedBody.from_created(await create(body.to_domain(), scope))
+    return GenerationJobCreatedBody.from_created(await create(body.to_domain(), scope, address))
 
 
 @router.get("/generations/{job_id}", dependencies=[Depends(require_client_id)])

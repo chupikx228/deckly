@@ -335,6 +335,29 @@ async def test_get_stored_returns_the_job_with_its_original_request(
     assert await store.get_stored(job.job_id) == StoredJob(job=job, request=request)
 
 
+async def test_find_returns_the_job_and_request_stored_under_a_scope(
+    session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
+) -> None:
+    store = PostgresJobStore(session_factory)
+    scope = cleanup.scope()
+    job = new_job()
+    request = ROUND_TRIPPED_REQUESTS["every field set"]
+    await store.add(job, request, scope)
+
+    assert await store.find(scope) == StoredJob(job=job, request=request)
+
+
+async def test_find_does_not_cross_clients_or_keys(
+    session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
+) -> None:
+    store = PostgresJobStore(session_factory)
+    scope = cleanup.scope()
+    await store.add(new_job(), generation_request(), scope)
+
+    assert await store.find(replace(cleanup.scope(), idempotency_key=scope.idempotency_key)) is None
+    assert await store.find(replace(scope, idempotency_key=uuid4())) is None
+
+
 async def test_get_stored_of_an_unknown_job_is_none(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

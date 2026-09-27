@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator
+from dataclasses import replace
 from uuid import UUID, uuid4
 
 import pytest
@@ -13,9 +14,11 @@ from deckly.application.ports import IdempotencyScope
 from deckly.config import Settings, load_settings
 from deckly.infrastructure.database import create_engine, create_session_factory
 from deckly.infrastructure.queue import ArqJobQueue, create_queue_pool, create_redis_settings
+from deckly.infrastructure.quota import ADDRESS_KEY_PREFIX, CLIENT_KEY_PREFIX, address_bucket
 from deckly.infrastructure.tables import GenerationJobRow
 
 COMMAND_TIMEOUT_SECONDS = 2
+TEST_PEER_ADDRESSES = ("testclient", "127.0.0.1")
 
 
 def redis_settings(settings: Settings) -> RedisSettings:
@@ -36,11 +39,30 @@ async def open_queue_pool(settings: Settings) -> ArqRedis:
     )
 
 
+def with_generation_limits(settings: Settings, *, per_client: int, per_address: int) -> Settings:
+    return replace(
+        settings,
+        limits=settings.limits.model_copy(
+            update={"generation_jobs_per_day": per_client, "generation_jobs_per_address_per_day": per_address}
+        ),
+    )
+
+
+async def purge_quota(pool: ArqRedis, client_ids: Iterable[UUID], addresses: Iterable[str]) -> None:
+    patterns = [f"{CLIENT_KEY_PREFIX}:{client_id}:*" for client_id in client_ids] + [
+        f"{ADDRESS_KEY_PREFIX}:{address_bucket(address)}:*" for address in addresses
+    ]
+    for pattern in patterns:
+        async for key in pool.scan_iter(match=pattern):
+            await pool.delete(key)
+
+
 class Cleanup:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self.client_ids: set[UUID] = set()
         self.job_ids: set[UUID] = set()
+        self.addresses: set[str] = set(TEST_PEER_ADDRESSES)
 
     def scope(self) -> IdempotencyScope:
         client_id = uuid4()
@@ -64,6 +86,7 @@ class Cleanup:
                 await pool.delete(f"{job_key_prefix}{job_id}")
                 await pool.zrem(default_queue_name, str(job_id))
                 await pool.zrem(abort_jobs_ss, str(job_id))
+            await purge_quota(pool, self.client_ids, self.addresses)
         finally:
             await pool.aclose()
 

@@ -1,5 +1,6 @@
 import asyncio
 import json
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import replace
 from datetime import datetime
@@ -8,6 +9,7 @@ from uuid import UUID
 
 import httpx2
 
+from deckly.application.exceptions import RateLimitedError
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
 from deckly.application.pipeline import RunGeneration
 from deckly.application.ports import (
@@ -17,6 +19,7 @@ from deckly.application.ports import (
     JobTransition,
     NoteMedia,
     Quota,
+    Requester,
     RetrievedPage,
     SourceMaterial,
     StoredJob,
@@ -42,6 +45,9 @@ from deckly.infrastructure.search.tavily_client import TavilySearchClient
 from tests.domain.builders import SOURCES, T0, basic_note, result_with
 
 QUOTA_LIMIT = 20
+ADDRESS_QUOTA_LIMIT = 100
+QUOTA_RETRY_AFTER_SECONDS = 3600
+ADDRESS = "203.0.113.7"
 IMAGE_NUMBER_OFFSET = 1000
 MODEL_THINKING_SECONDS = 5
 RESET_SECONDS = 30
@@ -336,6 +342,12 @@ class InMemoryJobStore:
         self.requests[job.job_id] = request
         return StoredJob(job=job, request=request)
 
+    async def find(self, scope: IdempotencyScope) -> StoredJob | None:
+        existing = self.job_ids_by_scope.get(scope)
+        return (
+            None if existing is None else StoredJob(job=self.jobs[existing], request=self.requests[existing])
+        )
+
     async def get(self, job_id: UUID) -> GenerationJob | None:
         return self.jobs.get(job_id)
 
@@ -376,10 +388,43 @@ class RecordingJobQueue:
             task.cancel()
 
 
-class FixedQuota:
+class InMemoryQuota:
+    def __init__(self, per_client: int = QUOTA_LIMIT, per_address: int = ADDRESS_QUOTA_LIMIT) -> None:
+        self.per_client = per_client
+        self.per_address = per_address
+        self.used_by_client: Counter[UUID] = Counter()
+        self.used_by_address: Counter[str] = Counter()
+        self.released: list[Requester] = []
+        self.failure: Exception | None = None
+
     async def current(self, client_id: UUID, now: datetime) -> Quota:
-        del client_id
-        return Quota(limit=QUOTA_LIMIT, remaining=QUOTA_LIMIT, resets_at=now + QUOTA_WINDOW)
+        self._fail_if_unavailable()
+        return self._quota(client_id, now)
+
+    async def reserve(self, requester: Requester, now: datetime) -> Quota:
+        self._fail_if_unavailable()
+        if (
+            self.used_by_client[requester.client_id] >= self.per_client
+            or self.used_by_address[requester.address] >= self.per_address
+        ):
+            raise RateLimitedError(QUOTA_RETRY_AFTER_SECONDS)
+        self.used_by_client[requester.client_id] += 1
+        self.used_by_address[requester.address] += 1
+        return self._quota(requester.client_id, now)
+
+    async def release(self, requester: Requester, now: datetime) -> None:
+        del now
+        self.released.append(requester)
+        self.used_by_client[requester.client_id] = max(0, self.used_by_client[requester.client_id] - 1)
+        self.used_by_address[requester.address] = max(0, self.used_by_address[requester.address] - 1)
+
+    def _quota(self, client_id: UUID, now: datetime) -> Quota:
+        remaining = max(0, self.per_client - self.used_by_client[client_id])
+        return Quota(limit=self.per_client, remaining=remaining, resets_at=now + QUOTA_WINDOW)
+
+    def _fail_if_unavailable(self) -> None:
+        if self.failure is not None:
+            raise self.failure
 
 
 class FakeProviders:
@@ -439,12 +484,13 @@ class Harness:
         self.store = InMemoryJobStore() if store is None else store
         self.queue = RecordingJobQueue() if queue is None else queue
         self.providers = FakeProviders()
+        self.quota = InMemoryQuota()
         self.now = T0
         ids = sequential_job_ids()
         self.create = CreateGeneration(
             store=self.store,
             queue=self.queue,
-            quota=FixedQuota(),
+            quota=self.quota,
             clock=lambda: self.now,
             new_job_id=lambda: next(ids),
         )

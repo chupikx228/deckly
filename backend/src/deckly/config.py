@@ -143,10 +143,18 @@ class LimitSettings(BaseSettings):
     model_config = _settings_config("DECKLY_LIMIT_")
 
     generation_jobs_per_day: PositiveInt
+    generation_jobs_per_address_per_day: PositiveInt
     generation_job_timeout_seconds: PositiveInt
     regenerate_note_timeout_seconds: PositiveInt
     note_regenerations_per_window: PositiveInt
     note_regeneration_window_seconds: PositiveInt
+
+    @model_validator(mode="after")
+    def require_address_limit_to_be_coarser(self) -> Self:
+        if self.generation_jobs_per_address_per_day < self.generation_jobs_per_day:
+            message = "the per-address generation limit must be at least the per-client limit"
+            raise ValueError(message)
+        return self
 
 
 class RegenerateSettings(BaseSettings):

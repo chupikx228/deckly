@@ -4,18 +4,19 @@ from uuid import UUID
 
 import httpx2
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
+from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE
 from deckly.main import API_PREFIX
 from deckly.transport import generations
-from deckly.transport.error_handlers import register_error_handlers
-from deckly.transport.generations import CLIENT_ID_HEADER, IDEMPOTENCY_KEY_HEADER
+from deckly.transport.error_handlers import RETRY_AFTER_HEADER, register_error_handlers
+from deckly.transport.generations import CLIENT_ID_HEADER, IDEMPOTENCY_KEY_HEADER, UNKNOWN_ADDRESS, address_of
 from deckly.transport.problem import PROBLEM_JSON_MEDIA_TYPE
 from tests.domain.builders import unregister
-from tests.fakes import Harness
+from tests.fakes import QUOTA_LIMIT, QUOTA_RETRY_AFTER_SECONDS, Harness
 from tests.transport.openapi import spec_errors
 
 ENDPOINT = f"{API_PREFIX}/generations"
@@ -24,6 +25,7 @@ OTHER_CLIENT_ID = "8d1c2b3a-4f5e-4d6c-8b7a-9e0f1a2b3c4d"
 IDEMPOTENCY_KEY = "2c9e8f7a-6b5d-4c3e-8f1a-0b9c8d7e6f5a"
 VALID_HEADERS = {"Idempotency-Key": IDEMPOTENCY_KEY, "X-Client-Id": CLIENT_ID}
 MINIMAL = {"topic": "Road signs", "language": "ru", "cardCount": 40}
+TEST_CLIENT_ADDRESS = "testclient"
 REGISTERED_NOTE_TYPES = [str(note_type) for note_type in NOTE_FIELDS_BY_TYPE]
 
 
@@ -311,6 +313,59 @@ def test_created_job_is_queued_with_an_offset_timestamp_and_a_quota() -> None:
     assert body["status"] == "queued"
     assert body["createdAt"].endswith("Z")
     assert set(body["quota"]) == {"limit", "remaining", "resetsAt"}
+
+
+def test_created_job_reports_the_quota_left_after_it() -> None:
+    harness = Harness()
+
+    body = post(build_client(harness), MINIMAL).json()
+
+    assert body["quota"]["limit"] == QUOTA_LIMIT
+    assert body["quota"]["remaining"] == QUOTA_LIMIT - 1
+
+
+def test_exhausted_quota_is_a_429_with_when_to_retry() -> None:
+    harness = Harness()
+    harness.quota.per_client = 0
+
+    response = post(build_client(harness), MINIMAL)
+
+    assert_problem(response, HTTPStatus.TOO_MANY_REQUESTS, "RATE_LIMITED")
+    assert response.json()["retryAfterSeconds"] == QUOTA_RETRY_AFTER_SECONDS
+    assert response.headers[RETRY_AFTER_HEADER] == str(QUOTA_RETRY_AFTER_SECONDS)
+    assert harness.store.jobs == {}
+
+
+def test_unreadable_quota_is_a_503_and_stores_nothing() -> None:
+    harness = Harness()
+    harness.quota.failure = UpstreamUnavailableError(1)
+
+    response = post(build_client(harness), MINIMAL)
+
+    assert_problem(response, HTTPStatus.SERVICE_UNAVAILABLE, "UPSTREAM_UNAVAILABLE")
+    assert response.headers[RETRY_AFTER_HEADER] == "1"
+    assert harness.store.jobs == {}
+
+
+def test_backstop_counts_the_connection_address_not_a_forwarded_header() -> None:
+    harness = Harness()
+    client = build_client(harness)
+
+    for key, forwarded in enumerate(("198.51.100.1", "198.51.100.2"), start=1):
+        headers = {
+            **VALID_HEADERS,
+            "Idempotency-Key": str(UUID(int=key, version=4)),
+            "X-Forwarded-For": forwarded,
+        }
+        assert_created(post(client, MINIMAL, headers))
+
+    assert dict(harness.quota.used_by_address) == {TEST_CLIENT_ADDRESS: 2}
+
+
+def test_connection_without_a_peer_address_shares_the_unknown_bucket() -> None:
+    connection = Request({"type": "http", "method": "POST", "path": ENDPOINT, "headers": [], "client": None})
+
+    assert address_of(connection) == UNKNOWN_ADDRESS
 
 
 @pytest.mark.parametrize(

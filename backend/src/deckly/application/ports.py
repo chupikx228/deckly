@@ -22,6 +22,12 @@ class IdempotencyScope:
 
 
 @dataclass(frozen=True, slots=True)
+class Requester:
+    client_id: UUID
+    address: str
+
+
+@dataclass(frozen=True, slots=True)
 class StoredJob:
     job: GenerationJob
     request: GenerationRequest
@@ -69,6 +75,8 @@ class JobStore(Protocol):
         self, job: GenerationJob, request: GenerationRequest, scope: IdempotencyScope
     ) -> StoredJob: ...
 
+    async def find(self, scope: IdempotencyScope) -> StoredJob | None: ...
+
     async def get(self, job_id: UUID) -> GenerationJob | None: ...
 
     async def get_stored(self, job_id: UUID) -> StoredJob | None: ...
@@ -84,6 +92,12 @@ class JobQueue(Protocol):
 
 class QuotaReader(Protocol):
     async def current(self, client_id: UUID, now: datetime) -> Quota: ...
+
+
+class GenerationQuota(QuotaReader, Protocol):
+    async def reserve(self, requester: Requester, now: datetime) -> Quota: ...
+
+    async def release(self, requester: Requester, now: datetime) -> None: ...
 
 
 class DependencyProbe(Protocol):

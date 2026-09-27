@@ -82,7 +82,10 @@ is cancelled once and left to clean up in the background, and until it has, furt
 checks answer `degraded` at once instead of starting another. Cancelling it a second time would
 make SQLAlchemy lose track of the connection and shrink the pool for good. Concurrent health
 requests share one check, so an unauthenticated flood of them holds at most one pooled
-connection. The model, search and image providers are not checked (see the contract).
+connection. The model, search and image providers are not checked (see the contract). When the
+request carries `X-Client-Id`, the client's quota is read at the same time, under the same Redis
+bound; if that read fails, the quota is left out and the status is `degraded` (see "Generation
+quota" below).
 
 Every job store call, in the API and in the worker, goes through the same kind of bound
 (`BoundedJobStore` in `infrastructure/job_store.py`), with `DECKLY_DATABASE_JOB_STORE_TIMEOUT_SECONDS`
@@ -116,6 +119,61 @@ cancels or finishes the job; a marker written for a job that ended at that same 
 `arq:abort`, which is harmless because the stored job is already terminal.
 
 All four provider ports are real (see below) and wired in `worker/settings.py` (`startup`).
+
+## Generation quota
+
+`POST /v1/generations` spends one unit of a per-client daily budget
+(`DECKLY_LIMIT_GENERATION_JOBS_PER_DAY`, keyed by `X-Client-Id`) and one unit of a coarser
+per-address budget (`DECKLY_LIMIT_GENERATION_JOBS_PER_ADDRESS_PER_DAY`, which settings refuse to
+load below the per-client limit). Both are counters in Redis (`infrastructure/quota.py`).
+
+**Window.** Both counters use fixed windows aligned to the UTC day, the same kind of window as
+the regenerate limiter (`infrastructure/rate_limit.py`, whose key and window helpers the quota
+shares). The contract once said "rolling day", but a sliding 24 hours has no single moment the
+budget comes back, and the response has one `resetsAt`. A window that starts at a client's first
+job would have one, but before that job `GET /v1/health` would have to report a `resetsAt` that
+moves on every read. With UTC days, `resetsAt` is always the next 00:00Z, a 429's
+`retryAfterSeconds` counts down to it, and every read agrees. The cost, already accepted for
+regenerate, is that a client can start up to twice the limit across midnight.
+
+**Reserving.** A Lua script checks both counters and increments both only if neither is at its
+limit, so concurrent requests cannot overshoot and a refused request uses nothing. Each counter
+expires a day after its last increment, by which time its window is over. `CreateGeneration`
+first looks the `Idempotency-Key` up (`JobStore.find`). A replay returns its job and the current
+quota without reserving, so the retry that follows a lost `202` gets its job back even when that
+job used the last unit. Only a request with an unused key reserves, before the job is stored.
+A refused reservation looks the key up once more before answering `429`: a double tap sends two
+requests with one key a few milliseconds apart, and when the first took the last unit, the second
+gets the first's job rather than a `429` until midnight.
+If storing it fails, or a concurrent request with the same key stored its job first, the unit is
+given back by a second script that decrements each counter only while it is above zero, so it
+can never leave behind a negative counter or a key with no expiry. A job that was stored but
+failed to enqueue keeps its unit; its replay enqueues it without reserving again.
+
+Three edge cases make the count drift by one, and are accepted rather than fixed. If Redis stops
+answering between the reservation and the give-back, the give-back is logged
+(`generation_quota_not_released`) and dropped rather than hiding the error that caused it, so a
+unit stays spent on no job until midnight. A reservation held up in a stalled network can reach
+Redis after the request has already answered `503`, with the same effect. The other way round, if
+a job store call times out but its commit still lands (see the job store bound above), the unit
+was already given back, so that one job is free.
+
+**Address.** The address is the connection's peer, `request.client.host`. The app does not read
+`X-Forwarded-For` itself: uvicorn rewrites the peer from that header only for connections from
+`--forwarded-allow-ips`, which defaults to `127.0.0.1`. There is no reverse proxy in this
+deployment yet. If one is added, pass its address in `--forwarded-allow-ips`; otherwise every
+request is counted against the proxy's address. IPv6 peers are counted per /64, since one host
+usually holds the whole prefix and could otherwise use a new address for every request.
+IPv4-mapped IPv6 addresses count as the IPv4 address. A connection with no peer address, which
+uvicorn never produces over TCP, is counted under one shared `unknown` address rather than not
+at all.
+
+**Redis down.** Every quota command runs under `DECKLY_REDIS_CONNECT_TIMEOUT_SECONDS`, the bound
+every other queue command gets. When the reservation cannot finish in that time, the request is
+refused with `503 UPSTREAM_UNAVAILABLE` before anything is stored, rather than let through
+unmetered. The quota lives in the same Redis as the job queue, so a request let through would
+fail at the enqueue a moment later anyway, with its job already stored. This matches the
+regenerate limiter. `GET /v1/health` instead reports `degraded` and leaves the quota out.
 
 ## Sources
 
