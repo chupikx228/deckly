@@ -1,3 +1,6 @@
+import asyncio
+import logging
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -5,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deckly.application.ports import IdempotencyScope, JobTransition, StoredJob
+from deckly.application.ports import IdempotencyScope, JobStore, JobTransition, StoredJob
 from deckly.domain.deck import GenerationResult
 from deckly.domain.exceptions import InvalidGenerationRequestError
 from deckly.domain.generation import Difficulty, GenerationRequest
@@ -26,8 +29,14 @@ from deckly.domain.notes.note_type import NoteType
 from deckly.infrastructure.stored_result import dump_result, load_result
 from deckly.infrastructure.tables import GenerationJobRow
 
+logger = logging.getLogger(__name__)
+
 
 class CorruptStoredJobError(Exception):
+    pass
+
+
+class JobStoreTimeoutError(TimeoutError):
     pass
 
 
@@ -171,3 +180,46 @@ class PostgresJobStore:
             row.result = stored.result
             row.updated_at = job.updated_at
         return job
+
+
+class BoundedJobStore:
+    def __init__(self, store: JobStore, *, timeout_seconds: float) -> None:
+        self._store = store
+        self._timeout_seconds = timeout_seconds
+        self._abandoned: set[asyncio.Task[object]] = set()
+
+    async def add(self, job: GenerationJob, request: GenerationRequest, scope: IdempotencyScope) -> StoredJob:
+        return await self._bounded(self._store.add(job, request, scope))
+
+    async def get(self, job_id: UUID) -> GenerationJob | None:
+        return await self._bounded(self._store.get(job_id))
+
+    async def get_stored(self, job_id: UUID) -> StoredJob | None:
+        return await self._bounded(self._store.get_stored(job_id))
+
+    async def update(self, job_id: UUID, transition: JobTransition) -> GenerationJob | None:
+        return await self._bounded(self._store.update(job_id, transition))
+
+    async def _bounded[T](self, call: Coroutine[object, object, T]) -> T:
+        task = asyncio.create_task(call)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=self._timeout_seconds)
+        except asyncio.CancelledError:
+            self._abandon(task)
+            raise
+        if not done:
+            self._abandon(task)
+            logger.warning("job_store_unresponsive", extra={"timeout_seconds": self._timeout_seconds})
+            message = f"the job store did not answer within {self._timeout_seconds} seconds"
+            raise JobStoreTimeoutError(message)
+        return task.result()
+
+    def _abandon(self, task: asyncio.Task[object]) -> None:
+        task.cancel()
+        self._abandoned.add(task)
+        task.add_done_callback(self._settle)
+
+    def _settle(self, task: asyncio.Task[object]) -> None:
+        self._abandoned.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.warning("abandoned_job_store_call_failed", extra={"error": type(error).__name__})

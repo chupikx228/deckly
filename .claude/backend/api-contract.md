@@ -281,8 +281,17 @@ stored or queued: no job is created.
 Returns `200` with `{ "status": "ok", "version": "…" }`. Used by the client to show an
 offline banner before the user spends time filling in the wizard.
 
+`status` is `degraded`, still with `200`, when Postgres or Redis cannot be reached or does not
+answer in time. The model, search and image providers are not checked: calling them on every
+health request would add their latency and use up their rate limits, and a cheap request that
+succeeds says little about whether generation will. A provider outage shows up where it
+matters instead: as `PROVIDER_UNAVAILABLE` on the job, or `503 UPSTREAM_UNAVAILABLE` from
+`POST /notes/regenerate`. `version` is the server's `DECKLY_VERSION`.
+
 `X-Client-Id` is optional here. When the client sends it, the response also carries that
-client's `quota`, so the app can show the remaining budget up front:
+client's `quota`, so the app can show the remaining budget up front. When it is sent, it is
+validated under the same rules as on `POST /generations`, and a malformed value, including an
+empty one, is rejected with `400 VALIDATION_FAILED` rather than ignored:
 
 ```json
 {

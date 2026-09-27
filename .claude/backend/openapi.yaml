@@ -146,18 +146,23 @@ paths:
           description: >
             Optional here. When supplied, the response includes this client's current
             generation quota, so the app can show the remaining budget before the wizard.
-            Same format as the required X-Client-Id header.
+            Same format as the required X-Client-Id header; a malformed value is rejected
+            with 400 VALIDATION_FAILED rather than ignored.
           schema:
             type: string
             format: uuid
             pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
       responses:
         '200':
-          description: Service is available
+          description: >
+            The service answered. status is "degraded" when Postgres or Redis did not answer
+            in time; the client should treat that like being offline.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Health'
+        '400':
+          $ref: '#/components/responses/Problem'
 
 components:
   parameters:

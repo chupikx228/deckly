@@ -400,7 +400,7 @@ export interface operations {
         parameters: {
             query?: never;
             header?: {
-                /** @description Optional here. When supplied, the response includes this client's current generation quota, so the app can show the remaining budget before the wizard. Same format as the required X-Client-Id header. */
+                /** @description Optional here. When supplied, the response includes this client's current generation quota, so the app can show the remaining budget before the wizard. Same format as the required X-Client-Id header; a malformed value is rejected with 400 VALIDATION_FAILED rather than ignored. */
                 "X-Client-Id"?: string;
             };
             path?: never;
@@ -408,7 +408,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Service is available */
+            /** @description The service answered. status is "degraded" when Postgres or Redis did not answer in time; the client should treat that like being offline. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -417,6 +417,7 @@ export interface operations {
                     "application/json": components["schemas"]["Health"];
                 };
             };
+            400: components["responses"]["Problem"];
         };
     };
 }
