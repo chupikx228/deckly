@@ -23,9 +23,11 @@ MAX_SEARCH_RESULTS = 20
 MAX_MEDIA_IMAGES = 50
 MAX_MEDIA_CANDIDATES = 50
 MAX_MEDIA_CONCURRENCY = 8
+REGENERATE_OVERHEAD_SECONDS = 1.5
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 ModelProvider = Literal["anthropic", "deepseek"]
+PositiveSeconds = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 
 
 def _settings_config(env_prefix: str) -> SettingsConfigDict:
@@ -141,6 +143,28 @@ class LimitSettings(BaseSettings):
     generation_jobs_per_day: PositiveInt
     generation_job_timeout_seconds: PositiveInt
     regenerate_note_timeout_seconds: PositiveInt
+    note_regenerations_per_window: PositiveInt
+    note_regeneration_window_seconds: PositiveInt
+
+
+class RegenerateSettings(BaseSettings):
+    model_config = _settings_config("DECKLY_REGENERATE_")
+
+    model_timeout_seconds: PositiveSeconds
+    model_max_output_tokens: PositiveInt
+    search_timeout_seconds: PositiveSeconds
+    search_max_results: Annotated[int, Field(ge=1, le=MAX_SEARCH_RESULTS)]
+    search_max_source_characters: Annotated[int, Field(ge=MIN_VISIBLE_CHARACTERS)]
+    rate_limit_timeout_seconds: PositiveSeconds
+
+    @property
+    def budgeted_seconds(self) -> float:
+        return (
+            self.rate_limit_timeout_seconds
+            + self.search_timeout_seconds
+            + self.model_timeout_seconds
+            + REGENERATE_OVERHEAD_SECONDS
+        )
 
 
 class CacheSettings(BaseSettings):
@@ -159,6 +183,7 @@ class Settings:
     providers: ProviderSettings
     limits: LimitSettings
     cache: CacheSettings
+    regenerate: RegenerateSettings
 
     def __post_init__(self) -> None:
         provider_deadlines = (
@@ -172,6 +197,12 @@ class Settings:
                 "job timeout"
             )
             raise ValueError(message)
+        if self.regenerate.budgeted_seconds > self.limits.regenerate_note_timeout_seconds:
+            message = (
+                "the regenerate rate limit, search and model timeouts plus "
+                f"{REGENERATE_OVERHEAD_SECONDS}s of overhead must fit within the regenerate note timeout"
+            )
+            raise ValueError(message)
 
 
 def load_settings() -> Settings:
@@ -182,4 +213,5 @@ def load_settings() -> Settings:
         providers=ProviderSettings(),
         limits=LimitSettings(),
         cache=CacheSettings(),
+        regenerate=RegenerateSettings(),
     )

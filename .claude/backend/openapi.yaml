@@ -106,7 +106,12 @@ paths:
       tags: [notes]
       operationId: regenerateNote
       summary: Regenerate a single rejected note
-      description: Synchronous and cheap. Must respond within 10 seconds.
+      description: >
+        Synchronous and cheap. Must respond within 10 seconds. Runs its own small source search, so the
+        replacement note is sourced like any generated note. Rate limited per X-Client-Id separately
+        from the generation job quota (429 RATE_LIMITED). A 503 is UPSTREAM_UNAVAILABLE when a
+        provider is down, slow, rejects the request or answers with malformed data, or
+        NO_VALID_CONTENT when no note that passes validation could be produced.
       parameters:
         - $ref: '#/components/parameters/ClientId'
       requestBody:
@@ -484,8 +489,11 @@ components:
 
     RegenerateNoteRequest:
       type: object
-      required: [topic, language, noteType, rejectedNote]
+      required: [topic, language, noteType, rejectedNote, reason]
       additionalProperties: false
+      description: >
+        noteType image_occlusion is rejected with VALIDATION_FAILED, because the note is built on an
+        image the request does not carry.
       properties:
         topic:
           type: string

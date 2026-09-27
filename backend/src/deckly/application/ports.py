@@ -8,6 +8,8 @@ from deckly.domain.deck import GenerationResult
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import GenerationJob
 from deckly.domain.media import Media
+from deckly.domain.notes.note import Note
+from deckly.domain.regeneration import RegenerationRequest
 from deckly.domain.source import Source
 
 type JobTransition = Callable[[GenerationJob], GenerationJob]
@@ -102,3 +104,13 @@ class CardGenerator(Protocol):
 
 class MediaFetcher(Protocol):
     async def fetch(self, job_id: UUID, queries: tuple[ImageQuery, ...]) -> tuple[NoteMedia, ...]: ...
+
+
+class NoteRegenerator(Protocol):
+    async def regenerate(
+        self, request_id: UUID, request: RegenerationRequest, material: tuple[SourceMaterial, ...]
+    ) -> Note: ...
+
+
+class RegenerationLimiter(Protocol):
+    async def acquire(self, client_id: UUID, now: datetime) -> None: ...

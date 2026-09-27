@@ -251,8 +251,30 @@ Regenerates a single note the user rejected in the preview screen. This is a sma
 }
 ```
 
-`reason` is one of `too_easy`, `too_hard`, `incorrect`, `duplicate`, `off_topic`, `other`.
-Collecting it costs the user one tap and is the only feedback signal the generator gets.
+`reason` is required and is one of `too_easy`, `too_hard`, `incorrect`, `duplicate`,
+`off_topic`, `other`. Collecting it costs the user one tap and is the only feedback signal the
+generator gets: it steers what the replacement tests (harder, simpler, a different idea…).
+
+The response is a single `GeneratedNote` of the requested `noteType`, with a new `clientId`. It is
+held to the same rules as a note in a job result: its fields are validated for its type, and it
+carries at least one source. To have something to cite, the server runs its own small web search
+for the topic on every call and the model cites that material by number, exactly as in a
+generation job; the regenerated note may therefore cite different pages than the rest of the deck.
+A replacement that asks the same thing as the rejected note is discarded. Nothing is cached,
+stored or queued: no job is created.
+
+- `noteType: image_occlusion` is rejected with `400 VALIDATION_FAILED`, because the note is built
+  on an image the request does not carry.
+- `rejectedNote.fields` is treated as untrusted data. It is not validated against `noteType`, and
+  only its first 2000 characters are shown to the model.
+- `429 RATE_LIMITED` when the client has used up its regeneration budget (see "Quota"), with
+  `retryAfterSeconds` set to when the window resets.
+- `503 UPSTREAM_UNAVAILABLE` when the search or model provider fails, rejects the request (for
+  example a bad API key), answers with malformed data, is too slow for the 10-second budget, or its
+  circuit breaker is open; `retryAfterSeconds` is set. A provider problem is never a `500`: that
+  status is reserved for a bug in this service.
+- `503 NO_VALID_CONTENT` when the search found nothing usable or the model produced no note that
+  passes validation. Tapping regenerate again may succeed.
 
 ### `GET /v1/health`
 
@@ -288,6 +310,14 @@ A per-client generation budget, counted in **jobs** (not cards) over a rolling d
 It appears on `GenerationJobCreated` (after each accepted job) and on `Health` (when the request
 carried `X-Client-Id`). Exhausting the budget does not change these shapes — the next generation
 request is rejected with `429 RATE_LIMITED` and a `retryAfterSeconds`.
+
+`POST /notes/regenerate` has its own, separate budget and does not use up the job quota. It is
+counted per `X-Client-Id` in fixed windows: by default 30 regenerations per hour
+(`DECKLY_LIMIT_NOTE_REGENERATIONS_PER_WINDOW`, `DECKLY_LIMIT_NOTE_REGENERATION_WINDOW_SECONDS`).
+The window starts on the clock, not at the first call, so a client can make up to twice the limit
+across a window boundary. Every call that passes request validation counts, including one that
+then fails upstream. Over the budget, the call is rejected with `429 RATE_LIMITED` and
+`retryAfterSeconds` until the window resets. This budget is not reported in `quota`.
 
 ## Note field shapes
 
@@ -380,12 +410,13 @@ localised and is for logs.
 | -------------------------- | ------------------- | ------------------------------------------------- |
 | `VALIDATION_FAILED`        | 400                 | Request body failed validation                    |
 | `TOPIC_REJECTED`           | 422                 | Topic violates the content policy                 |
-| `RATE_LIMITED`             | 429                 | Too many jobs for this client                     |
+| `RATE_LIMITED`             | 429                 | Too many jobs or regenerations for this client    |
 | `JOB_NOT_FOUND`            | 404                 | Unknown job id                                    |
 | `JOB_ALREADY_TERMINAL`     | 409                 | Cancel on a finished job                          |
 | `IDEMPOTENCY_KEY_CONFLICT` | 409                 | `Idempotency-Key` reused with a different request |
 | `PROVIDER_UNAVAILABLE`     | 200 in the job body | The model or search provider failed the job       |
 | `NO_VALID_CONTENT`         | 200 in the job body | Every note was dropped; nothing safe to return    |
+| `NO_VALID_CONTENT`         | 503 on regenerate   | No valid replacement note could be produced       |
 | `GENERATION_FAILED`        | 200 in the job body | The job failed for any other reason               |
 | `UPSTREAM_UNAVAILABLE`     | 503                 | Model or search provider is down                  |
 | `ROUTE_NOT_FOUND`          | 404                 | No endpoint exists at this path                   |

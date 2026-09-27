@@ -14,6 +14,7 @@ from deckly.config import (
     LimitSettings,
     ProviderSettings,
     RedisSettings,
+    RegenerateSettings,
     Settings,
     load_settings,
 )
@@ -124,6 +125,17 @@ LIMIT_ENVIRONMENT = {
     "DECKLY_LIMIT_GENERATION_JOBS_PER_DAY": "20",
     "DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS": "300",
     "DECKLY_LIMIT_REGENERATE_NOTE_TIMEOUT_SECONDS": "10",
+    "DECKLY_LIMIT_NOTE_REGENERATIONS_PER_WINDOW": "30",
+    "DECKLY_LIMIT_NOTE_REGENERATION_WINDOW_SECONDS": "3600",
+}
+ROOMY_JOB_TIMEOUT_SECONDS = "301"
+REGENERATE_ENVIRONMENT = {
+    "DECKLY_REGENERATE_RATE_LIMIT_TIMEOUT_SECONDS": "0.5",
+    "DECKLY_REGENERATE_SEARCH_TIMEOUT_SECONDS": "2.5",
+    "DECKLY_REGENERATE_SEARCH_MAX_RESULTS": "3",
+    "DECKLY_REGENERATE_SEARCH_MAX_SOURCE_CHARACTERS": "4000",
+    "DECKLY_REGENERATE_MODEL_TIMEOUT_SECONDS": "5.5",
+    "DECKLY_REGENERATE_MODEL_MAX_OUTPUT_TOKENS": "1000",
 }
 
 
@@ -244,11 +256,16 @@ def test_search_base_url_must_be_an_http_url(clean_environment: pytest.MonkeyPat
         ProviderSettings()
 
 
-def settings_with_job_timeout(monkeypatch: pytest.MonkeyPatch, job_timeout_seconds: int) -> Settings:
+def settings_from_environment(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Settings:
     set_provider_environment(monkeypatch)
-    for name, value in LIMIT_ENVIRONMENT.items():
+    environment = {
+        **LIMIT_ENVIRONMENT,
+        "DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS": ROOMY_JOB_TIMEOUT_SECONDS,
+        **REGENERATE_ENVIRONMENT,
+        **overrides,
+    }
+    for name, value in environment.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setenv("DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS", str(job_timeout_seconds))
     return Settings(
         app=AppSettings.model_construct(),
         database=DatabaseSettings.model_construct(),
@@ -256,6 +273,13 @@ def settings_with_job_timeout(monkeypatch: pytest.MonkeyPatch, job_timeout_secon
         providers=ProviderSettings(),
         limits=LimitSettings(),
         cache=CacheSettings.model_construct(),
+        regenerate=RegenerateSettings(),
+    )
+
+
+def settings_with_job_timeout(monkeypatch: pytest.MonkeyPatch, job_timeout_seconds: int) -> Settings:
+    return settings_from_environment(
+        monkeypatch, DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS=str(job_timeout_seconds)
     )
 
 
@@ -377,3 +401,96 @@ def test_thumbnail_as_wide_as_the_smallest_accepted_image_is_accepted(
     clean_environment.setenv("DECKLY_PROVIDER_MEDIA_THUMBNAIL_WIDTH", str(MIN_IMAGE_SIDE))
 
     assert ProviderSettings().media_thumbnail_width == MIN_IMAGE_SIDE
+
+
+def set_regenerate_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, value in REGENERATE_ENVIRONMENT.items():
+        monkeypatch.setenv(name, value)
+
+
+@pytest.mark.parametrize("variable", sorted(REGENERATE_ENVIRONMENT))
+def test_every_regenerate_setting_is_required(clean_environment: pytest.MonkeyPatch, variable: str) -> None:
+    set_regenerate_environment(clean_environment)
+    clean_environment.delenv(variable)
+
+    with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_REGENERATE_").lower()):
+        RegenerateSettings()
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "DECKLY_REGENERATE_RATE_LIMIT_TIMEOUT_SECONDS",
+        "DECKLY_REGENERATE_SEARCH_TIMEOUT_SECONDS",
+        "DECKLY_REGENERATE_MODEL_TIMEOUT_SECONDS",
+    ],
+)
+@pytest.mark.parametrize("value", ["0", "-0.5", "nan", "inf"])
+def test_regenerate_timeouts_must_be_positive_and_finite(
+    clean_environment: pytest.MonkeyPatch, variable: str, value: str
+) -> None:
+    set_regenerate_environment(clean_environment)
+    clean_environment.setenv(variable, value)
+
+    with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_REGENERATE_").lower()):
+        RegenerateSettings()
+
+
+@pytest.mark.parametrize("value", ["0", "21"])
+def test_regenerate_search_result_cap_outside_what_the_provider_serves_is_rejected(
+    clean_environment: pytest.MonkeyPatch, value: str
+) -> None:
+    set_regenerate_environment(clean_environment)
+    clean_environment.setenv("DECKLY_REGENERATE_SEARCH_MAX_RESULTS", value)
+
+    with pytest.raises(ValidationError, match="search_max_results"):
+        RegenerateSettings()
+
+
+def test_regenerate_source_character_limit_too_small_to_keep_any_page_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_regenerate_environment(clean_environment)
+    clean_environment.setenv(
+        "DECKLY_REGENERATE_SEARCH_MAX_SOURCE_CHARACTERS", str(MIN_VISIBLE_CHARACTERS - 1)
+    )
+
+    with pytest.raises(ValidationError, match="search_max_source_characters"):
+        RegenerateSettings()
+
+
+@pytest.mark.parametrize(
+    "variable",
+    ["DECKLY_LIMIT_NOTE_REGENERATIONS_PER_WINDOW", "DECKLY_LIMIT_NOTE_REGENERATION_WINDOW_SECONDS"],
+)
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_regeneration_rate_limit_must_be_positive(
+    clean_environment: pytest.MonkeyPatch, variable: str, value: str
+) -> None:
+    with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_LIMIT_").lower()):
+        settings_from_environment(clean_environment, **{variable: value})
+
+
+def test_regenerate_budget_that_exactly_fills_the_note_timeout_with_the_margin_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_from_environment(clean_environment)
+
+    assert settings.regenerate.budgeted_seconds == settings.limits.regenerate_note_timeout_seconds
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"DECKLY_REGENERATE_MODEL_TIMEOUT_SECONDS": "5.6"},
+        {"DECKLY_REGENERATE_SEARCH_TIMEOUT_SECONDS": "2.6"},
+        {"DECKLY_REGENERATE_RATE_LIMIT_TIMEOUT_SECONDS": "0.6"},
+        {"DECKLY_LIMIT_REGENERATE_NOTE_TIMEOUT_SECONDS": "9"},
+        {"DECKLY_REGENERATE_MODEL_TIMEOUT_SECONDS": "10"},
+    ],
+)
+def test_regenerate_budget_that_eats_into_the_margin_is_rejected(
+    clean_environment: pytest.MonkeyPatch, overrides: dict[str, str]
+) -> None:
+    with pytest.raises(ValueError, match="regenerate note timeout"):
+        settings_from_environment(clean_environment, **overrides)

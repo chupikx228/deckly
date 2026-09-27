@@ -3,6 +3,7 @@ import json
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import replace
 from datetime import datetime
+from enum import StrEnum
 from uuid import UUID
 
 import httpx2
@@ -20,12 +21,14 @@ from deckly.application.ports import (
     SourceMaterial,
     StoredJob,
 )
+from deckly.application.regeneration import RegenerateNote
 from deckly.domain.deck import GenerationResult
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import GenerationJob, JobStage
 from deckly.domain.media import Media, MediaKind
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
+from deckly.domain.regeneration import RegenerationRequest, RejectionReason
 from deckly.infrastructure.llm.client import LlmPrompt, LlmReply, LlmStop
 from deckly.infrastructure.media.client import ImageCandidate, ImageSearch, MediaEndpoint
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
@@ -454,4 +457,89 @@ class Harness:
             generator=self.providers,
             media=self.providers,
             clock=lambda: self.now,
+        )
+
+
+class RegenerationStep(StrEnum):
+    LIMIT = "limit"
+    SEARCH = "search"
+    PARSE = "parse"
+    GENERATE = "generate"
+
+
+def regeneration_request(
+    note_type: NoteType = NoteType.BASIC, reason: RejectionReason = RejectionReason.TOO_EASY
+) -> RegenerationRequest:
+    return RegenerationRequest(
+        topic="Road signs",
+        language="ru",
+        note_type=note_type,
+        rejected_fields={"front": "front 9", "back": "back"},
+        reason=reason,
+    )
+
+
+class FakeRegeneration:
+    def __init__(self) -> None:
+        self.note = basic_note(1)
+        self.steps: list[RegenerationStep] = []
+        self.acquired: list[tuple[UUID, datetime]] = []
+        self.searched: list[tuple[UUID, GenerationRequest]] = []
+        self.parsed: list[tuple[UUID, tuple[RetrievedPage, ...]]] = []
+        self.regenerated: list[tuple[UUID, RegenerationRequest, tuple[SourceMaterial, ...]]] = []
+        self.cancelled: list[RegenerationStep] = []
+        self.failures: dict[RegenerationStep, Exception] = {}
+        self.during: dict[RegenerationStep, Hook] = {}
+
+    async def acquire(self, client_id: UUID, now: datetime) -> None:
+        self.acquired.append((client_id, now))
+        await self._reach(RegenerationStep.LIMIT)
+
+    async def retrieve(self, job_id: UUID, request: GenerationRequest) -> tuple[RetrievedPage, ...]:
+        self.searched.append((job_id, request))
+        await self._reach(RegenerationStep.SEARCH)
+        return PAGES
+
+    async def parse(
+        self, job_id: UUID, request: GenerationRequest, pages: tuple[RetrievedPage, ...]
+    ) -> tuple[SourceMaterial, ...]:
+        del request
+        self.parsed.append((job_id, pages))
+        await self._reach(RegenerationStep.PARSE)
+        return MATERIAL
+
+    async def regenerate(
+        self, request_id: UUID, request: RegenerationRequest, material: tuple[SourceMaterial, ...]
+    ) -> Note:
+        self.regenerated.append((request_id, request, material))
+        await self._reach(RegenerationStep.GENERATE)
+        return self.note
+
+    async def _reach(self, step: RegenerationStep) -> None:
+        self.steps.append(step)
+        hook = self.during.get(step)
+        if hook is not None:
+            try:
+                await hook()
+            except asyncio.CancelledError:
+                self.cancelled.append(step)
+                raise
+        failure = self.failures.get(step)
+        if failure is not None:
+            raise failure
+
+
+class RegenerationHarness:
+    def __init__(self, timeout_seconds: float = 10) -> None:
+        self.providers = FakeRegeneration()
+        self.now = T0
+        ids = sequential_job_ids()
+        self.regenerate = RegenerateNote(
+            limiter=self.providers,
+            retriever=self.providers,
+            parser=self.providers,
+            regenerator=self.providers,
+            clock=lambda: self.now,
+            new_request_id=lambda: next(ids),
+            timeout_seconds=timeout_seconds,
         )

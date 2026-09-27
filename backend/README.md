@@ -184,6 +184,40 @@ more are oversized; the app's wizard asks for at most 50. The estimate only clas
 request still asks for the whole `MODEL_MAX_OUTPUT_TOKENS`. A timeout while connecting cannot be
 told apart from a slow reply, so for an oversized request it is not counted either.
 
+## Note regeneration
+
+`POST /v1/notes/regenerate` runs in the API process, synchronously: no job, no queue, nothing
+cached or stored. `application/regeneration.py` checks the client's regeneration budget, runs one
+web search for the topic, parses it with the same `CleaningSourceParser` as a job, and asks the
+model for one note of the requested type (`card_generator/regenerator.py`). The rejection
+`reason` picks a line of guidance in the prompt; the rejected note's fields are shown to the model
+as JSON data, cut at 2000 characters, with `<` and `>` escaped so they cannot open or close a
+prompt block, and NUL and lone surrogates stripped like the rest of the prompt. The reply goes
+through the same extraction and the same per-note validation as a job (`NoteDrafter`): wrong
+type, mismatched fields, no citable source or a repeat of the rejected note are dropped, and the
+first note that survives is returned. None surviving is `503 NO_VALID_CONTENT`.
+
+The call must answer within `DECKLY_LIMIT_REGENERATE_NOTE_TIMEOUT_SECONDS` (10). Each step has its
+own `DECKLY_REGENERATE_*` timeout, separate from the job settings: the rate-limit check in Redis
+(0.5 s), the search (2.5 s) and the model (5.5 s). Settings refuse to load unless those three
+plus 1.5 s for parsing, validation and the response fit within the total. Search and model get
+**one attempt each, no retry**: a second attempt after a timeout cannot fit in what is left, and
+one that follows an instant `429`/`5xx` is better left to the user tapping again, told when by
+`retryAfterSeconds`. Timeouts, transient errors and an open circuit are `503
+UPSTREAM_UNAVAILABLE`. Each step already has its own timeout; on top of that, the whole use
+case runs under `asyncio.timeout` of the total, which cancels whatever is still running and
+answers 503. Search and model calls go through their own circuit breakers in the API process,
+configured with the job's `DECKLY_PROVIDER_*_CIRCUIT_*` values; breaker state is per process, so
+it is not shared with the worker's. The model's output is capped at
+`DECKLY_REGENERATE_MODEL_MAX_OUTPUT_TOKENS`, and the search keeps at most
+`DECKLY_REGENERATE_SEARCH_MAX_RESULTS` pages of `DECKLY_REGENERATE_SEARCH_MAX_SOURCE_CHARACTERS`,
+so the prompt stays small enough for a quick reply.
+
+The budget is a fixed-window counter in Redis per `X-Client-Id`
+(`infrastructure/rate_limit.py`, `DECKLY_LIMIT_NOTE_REGENERATIONS_PER_WINDOW` per
+`DECKLY_LIMIT_NOTE_REGENERATION_WINDOW_SECONDS`), separate from the job quota. If Redis cannot
+be reached, regeneration fails closed with 503 rather than running unmetered.
+
 ## Media
 
 `infrastructure/media/` implements the `MediaFetcher` port against the Wikimedia Commons API (raw
