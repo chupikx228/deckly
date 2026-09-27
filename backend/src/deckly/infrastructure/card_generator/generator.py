@@ -1,6 +1,6 @@
 import logging
 from collections import Counter
-from collections.abc import Callable, Hashable, Mapping
+from collections.abc import Callable, Collection, Hashable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from uuid import UUID
@@ -108,6 +108,55 @@ def outcome_level(reply: LlmReply, document: ModelDocument) -> int:
 
 
 @dataclass(frozen=True, slots=True)
+class NoteDrafter:
+    new_id: Callable[[], UUID]
+    handlers: Mapping[NoteType, NoteTypeHandler]
+
+    def draft(
+        self, raw: object, note_types: Collection[NoteType], material: tuple[SourceMaterial, ...]
+    ) -> DraftNote:
+        note = as_object(raw)
+        if note is None:
+            raise DroppedNoteError(DropReason.NOT_AN_OBJECT)
+        fields = self._fields(note, note_types)
+        try:
+            built = Note(
+                client_id=self.new_id(),
+                fields=fields,
+                sources=cited_sources(note.get("sources"), material),
+                tags=read_labels(note.get("tags")),
+            )
+        except MissingSourceError as error:
+            raise DroppedNoteError(DropReason.MISSING_SOURCE) from error
+        except InvariantViolationError as error:
+            raise DroppedNoteError(DropReason.INVALID_CONTENT) from error
+        return DraftNote(note=built, image_query=image_query_of(note.get("image")))
+
+    def _fields(self, note: JsonObject, note_types: Collection[NoteType]) -> NoteFields:
+        handler = self._handler(note.get("noteType"), note_types)
+        fields = as_object(note.get("fields"))
+        if fields is None:
+            raise DroppedNoteError(DropReason.MISMATCHED_FIELDS)
+        try:
+            return handler.parse(fields)
+        except UnusableOutputError as error:
+            raise DroppedNoteError(DropReason.MISMATCHED_FIELDS) from error
+        except InvariantViolationError as error:
+            raise DroppedNoteError(DropReason.INVALID_CONTENT) from error
+
+    def _handler(self, value: object, note_types: Collection[NoteType]) -> NoteTypeHandler:
+        note_type = note_type_of(value)
+        if note_type is None:
+            raise DroppedNoteError(DropReason.UNKNOWN_TYPE)
+        if note_type not in note_types:
+            raise DroppedNoteError(DropReason.UNREQUESTED_TYPE)
+        handler = self.handlers.get(note_type)
+        if handler is None:
+            raise DroppedNoteError(DropReason.UNSUPPORTED_TYPE)
+        return handler
+
+
+@dataclass(frozen=True, slots=True)
 class LlmCardGenerator:
     llm: LlmClient
     new_id: Callable[[], UUID]
@@ -158,11 +207,12 @@ class LlmCardGenerator:
         material: tuple[SourceMaterial, ...],
         drops: Counter[DropReason],
     ) -> tuple[DraftNote, ...]:
+        drafter = NoteDrafter(new_id=self.new_id, handlers=self.handlers)
         valid: list[DraftNote] = []
         seen: set[tuple[NoteType, Hashable]] = set()
         for raw in document.notes:
             try:
-                draft = self._draft(raw, request, material)
+                draft = drafter.draft(raw, request.note_types, material)
             except DroppedNoteError as error:
                 drops[error.reason] += 1
                 continue
@@ -176,46 +226,3 @@ class LlmCardGenerator:
         if excess > 0:
             drops[DropReason.OVER_CARD_COUNT] += excess
         return tuple(valid[: request.card_count])
-
-    def _draft(
-        self, raw: object, request: GenerationRequest, material: tuple[SourceMaterial, ...]
-    ) -> DraftNote:
-        note = as_object(raw)
-        if note is None:
-            raise DroppedNoteError(DropReason.NOT_AN_OBJECT)
-        fields = self._fields(note, request)
-        try:
-            built = Note(
-                client_id=self.new_id(),
-                fields=fields,
-                sources=cited_sources(note.get("sources"), material),
-                tags=read_labels(note.get("tags")),
-            )
-        except MissingSourceError as error:
-            raise DroppedNoteError(DropReason.MISSING_SOURCE) from error
-        except InvariantViolationError as error:
-            raise DroppedNoteError(DropReason.INVALID_CONTENT) from error
-        return DraftNote(note=built, image_query=image_query_of(note.get("image")))
-
-    def _fields(self, note: JsonObject, request: GenerationRequest) -> NoteFields:
-        handler = self._handler(note.get("noteType"), request)
-        fields = as_object(note.get("fields"))
-        if fields is None:
-            raise DroppedNoteError(DropReason.MISMATCHED_FIELDS)
-        try:
-            return handler.parse(fields)
-        except UnusableOutputError as error:
-            raise DroppedNoteError(DropReason.MISMATCHED_FIELDS) from error
-        except InvariantViolationError as error:
-            raise DroppedNoteError(DropReason.INVALID_CONTENT) from error
-
-    def _handler(self, value: object, request: GenerationRequest) -> NoteTypeHandler:
-        note_type = note_type_of(value)
-        if note_type is None:
-            raise DroppedNoteError(DropReason.UNKNOWN_TYPE)
-        if note_type not in request.note_types:
-            raise DroppedNoteError(DropReason.UNREQUESTED_TYPE)
-        handler = self.handlers.get(note_type)
-        if handler is None:
-            raise DroppedNoteError(DropReason.UNSUPPORTED_TYPE)
-        return handler

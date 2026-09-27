@@ -109,45 +109,53 @@ def require_client_id(client_id: Annotated[CanonicalUuid, Header(alias=CLIENT_ID
     return client_id
 
 
+def require_language_tag(value: str) -> str:
+    if not value.isascii() or (
+        LANGUAGE_TAG.fullmatch(value) is None and value.lower() not in IRREGULAR_LANGUAGE_TAGS
+    ):
+        message = "language must be a well-formed BCP 47 tag"
+        raise ValueError(message)
+    return value
+
+
+def require_visible_topic(value: str) -> str:
+    if visible_length(value) < MIN_TOPIC_LENGTH:
+        message = f"topic must contain at least {MIN_TOPIC_LENGTH} visible characters"
+        raise ValueError(message)
+    return value
+
+
+def reject_nul(value: str) -> str:
+    if NUL in value:
+        message = "text must not contain NUL characters"
+        raise ValueError(message)
+    return value
+
+
+type Topic = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=MIN_TOPIC_LENGTH, max_length=MAX_TOPIC_LENGTH),
+    AfterValidator(require_visible_topic),
+    AfterValidator(reject_nul),
+]
+type LanguageTag = Annotated[str, AfterValidator(require_language_tag)]
+
+
 class GenerationRequestBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    topic: Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, min_length=MIN_TOPIC_LENGTH, max_length=MAX_TOPIC_LENGTH),
-    ]
-    language: str
+    topic: Topic
+    language: LanguageTag
     card_count: int = Field(alias="cardCount", ge=MIN_CARD_COUNT, le=MAX_CARD_COUNT, strict=True)
     difficulty: Difficulty = Difficulty.INTERMEDIATE
     note_types: tuple[NoteType, ...] = Field(alias="noteTypes", default=(NoteType.BASIC,), min_length=1)
     include_images: bool = Field(alias="includeImages", default=False, strict=True)
     instructions: str | None = Field(default=None, max_length=MAX_INSTRUCTIONS_LENGTH)
 
-    @field_validator("language")
+    @field_validator("instructions")
     @classmethod
-    def require_language_tag(cls, value: str) -> str:
-        if not value.isascii() or (
-            LANGUAGE_TAG.fullmatch(value) is None and value.lower() not in IRREGULAR_LANGUAGE_TAGS
-        ):
-            message = "language must be a well-formed BCP 47 tag"
-            raise ValueError(message)
-        return value
-
-    @field_validator("topic")
-    @classmethod
-    def require_visible_topic(cls, value: str) -> str:
-        if visible_length(value) < MIN_TOPIC_LENGTH:
-            message = f"topic must contain at least {MIN_TOPIC_LENGTH} visible characters"
-            raise ValueError(message)
-        return value
-
-    @field_validator("topic", "instructions")
-    @classmethod
-    def reject_nul(cls, value: str | None) -> str | None:
-        if value is not None and NUL in value:
-            message = "text must not contain NUL characters"
-            raise ValueError(message)
-        return value
+    def reject_nul_in_instructions(cls, value: str | None) -> str | None:
+        return value if value is None else reject_nul(value)
 
     @field_validator("instructions", mode="before")
     @classmethod

@@ -11,6 +11,7 @@ from starlette.exceptions import HTTPException
 from deckly.application.exceptions import (
     ApplicationError,
     IdempotencyKeyConflictError,
+    NoValidContentError,
     RateLimitedError,
     RetryableError,
     UpstreamUnavailableError,
@@ -64,6 +65,9 @@ PROBLEM_KINDS: Mapping[type[Exception], ProblemKind] = {
     RateLimitedError: ProblemKind(HTTPStatus.TOO_MANY_REQUESTS, ErrorCode.RATE_LIMITED, "Rate limited"),
     UpstreamUnavailableError: ProblemKind(
         HTTPStatus.SERVICE_UNAVAILABLE, ErrorCode.UPSTREAM_UNAVAILABLE, "Upstream unavailable"
+    ),
+    NoValidContentError: ProblemKind(
+        HTTPStatus.SERVICE_UNAVAILABLE, ErrorCode.NO_VALID_CONTENT, "No valid content"
     ),
 }
 
