@@ -212,5 +212,22 @@ async def test_unreachable_dependency_makes_health_degraded(service: Service, de
     body, elapsed = await health(service, {"X-Client-Id": str(uuid4())})
 
     assert body["status"] == "degraded"
-    assert "quota" in body
+    assert ("quota" in body) is (dependency is Dependency.POSTGRES)
     assert elapsed < BOUND_SECONDS[dependency] + 1
+
+
+async def test_frozen_redis_leaves_the_quota_out_of_a_degraded_health_within_its_bound(
+    service: Service,
+) -> None:
+    await until_ok(service)
+    service.proxies[Dependency.REDIS].freeze()
+
+    body, elapsed = await health(service, {"X-Client-Id": str(uuid4())})
+
+    assert body == {"status": "degraded", "version": service.version}
+    assert elapsed < REDIS_TIMEOUT_SECONDS + 1
+
+    service.proxies[Dependency.REDIS].thaw()
+    await until_ok(service)
+    recovered, _ = await health(service, {"X-Client-Id": str(uuid4())})
+    assert "quota" in recovered

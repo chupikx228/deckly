@@ -125,6 +125,7 @@ PROVIDER_ENVIRONMENT = {
 }
 LIMIT_ENVIRONMENT = {
     "DECKLY_LIMIT_GENERATION_JOBS_PER_DAY": "20",
+    "DECKLY_LIMIT_GENERATION_JOBS_PER_ADDRESS_PER_DAY": "100",
     "DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS": "300",
     "DECKLY_LIMIT_REGENERATE_NOTE_TIMEOUT_SECONDS": "10",
     "DECKLY_LIMIT_NOTE_REGENERATIONS_PER_WINDOW": "30",
@@ -496,3 +497,37 @@ def test_regenerate_budget_that_eats_into_the_margin_is_rejected(
 ) -> None:
     with pytest.raises(ValueError, match="regenerate note timeout"):
         settings_from_environment(clean_environment, **overrides)
+
+
+@pytest.mark.parametrize("per_address", ["19", "1"])
+def test_address_limit_below_the_client_limit_is_rejected(
+    clean_environment: pytest.MonkeyPatch, per_address: str
+) -> None:
+    with pytest.raises(ValidationError, match="per-address generation limit"):
+        settings_from_environment(
+            clean_environment, DECKLY_LIMIT_GENERATION_JOBS_PER_ADDRESS_PER_DAY=per_address
+        )
+
+
+def test_address_limit_equal_to_the_client_limit_is_accepted(clean_environment: pytest.MonkeyPatch) -> None:
+    settings = settings_from_environment(
+        clean_environment, DECKLY_LIMIT_GENERATION_JOBS_PER_ADDRESS_PER_DAY="20"
+    )
+
+    assert settings.limits.generation_jobs_per_address_per_day == settings.limits.generation_jobs_per_day
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "ten"])
+def test_address_limit_must_be_a_positive_count(clean_environment: pytest.MonkeyPatch, value: str) -> None:
+    with pytest.raises(ValidationError, match="generation_jobs_per_address_per_day"):
+        settings_from_environment(clean_environment, DECKLY_LIMIT_GENERATION_JOBS_PER_ADDRESS_PER_DAY=value)
+
+
+def test_address_limit_is_required(clean_environment: pytest.MonkeyPatch) -> None:
+    set_provider_environment(clean_environment)
+    for name, value in {**LIMIT_ENVIRONMENT, **REGENERATE_ENVIRONMENT}.items():
+        clean_environment.setenv(name, value)
+    clean_environment.delenv("DECKLY_LIMIT_GENERATION_JOBS_PER_ADDRESS_PER_DAY")
+
+    with pytest.raises(ValidationError, match="generation_jobs_per_address_per_day"):
+        LimitSettings()

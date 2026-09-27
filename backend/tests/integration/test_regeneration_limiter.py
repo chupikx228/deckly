@@ -98,7 +98,7 @@ async def test_counter_expires_with_its_window(pool: ArqRedis) -> None:
     try:
         await limiter.acquire(client_id, WINDOW_START)
 
-        ttl = await pool.ttl(window_key(client_id, WINDOW_START, WINDOW_SECONDS))
+        ttl = await pool.ttl(window_key(KEY_PREFIX, client_id, WINDOW_START, WINDOW_SECONDS))
 
         assert 0 < ttl <= WINDOW_SECONDS
     finally:
@@ -135,7 +135,7 @@ async def fill_window(settings: Settings, client_id: UUID) -> None:
     now = utc_now()
     try:
         for moment in (now, now + timedelta(seconds=window_seconds)):
-            key = window_key(client_id, moment, window_seconds)
+            key = window_key(KEY_PREFIX, client_id, moment, window_seconds)
             await redis.set(key, settings.limits.note_regenerations_per_window, ex=window_seconds * 2)
     finally:
         await redis.aclose()

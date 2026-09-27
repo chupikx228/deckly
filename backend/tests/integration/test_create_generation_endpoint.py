@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from deckly.config import Settings
 from deckly.main import API_PREFIX, create_app
-from tests.integration.conftest import Cleanup, open_queue_pool
+from tests.integration.conftest import Cleanup, open_queue_pool, with_generation_limits
 from tests.transport.openapi import spec_errors
 
 pytestmark = pytest.mark.integration
@@ -89,7 +89,22 @@ def test_reusing_a_key_for_a_different_body_is_a_conflict(client: TestClient, cl
     assert replay["jobId"] == first["jobId"]
 
 
-def test_p95_latency_is_within_budget(client: TestClient, cleanup: Cleanup) -> None:
+@pytest.fixture
+def unmetered_client(settings: Settings) -> Iterator[TestClient]:
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    total = WARMUP_REQUESTS + MEASURED_REQUESTS
+    try:
+        with TestClient(
+            create_app(with_generation_limits(settings, per_client=total, per_address=total))
+        ) as test_client:
+            yield test_client
+    finally:
+        root.handlers, root.level = handlers, level
+
+
+def test_p95_latency_is_within_budget(unmetered_client: TestClient, cleanup: Cleanup) -> None:
+    client = unmetered_client
     client_id = uuid4()
     for _ in range(WARMUP_REQUESTS):
         post(client, cleanup, client_id, uuid4())

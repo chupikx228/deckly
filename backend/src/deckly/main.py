@@ -21,7 +21,7 @@ from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.logging import configure_logging
 from deckly.infrastructure.provider_faults import UpstreamFaultRegenerator, UpstreamFaultRetriever
 from deckly.infrastructure.queue import ArqJobQueue, create_queue_pool, create_redis_settings
-from deckly.infrastructure.quota import UnmeteredQuota
+from deckly.infrastructure.quota import QuotaLimits, RedisGenerationQuota
 from deckly.infrastructure.rate_limit import RedisRegenerationLimiter, RegenerationWindow
 from deckly.infrastructure.resilience import RetryPolicy
 from deckly.infrastructure.search.client import SearchClient, SearchEndpoint
@@ -152,7 +152,14 @@ def build_lifespan(settings: Settings) -> Lifespan:
                 app.state.session_factory = session_factory
                 app.state.queue = queue
                 jobs = ArqJobQueue(queue, command_timeout_seconds=settings.redis.connect_timeout_seconds)
-                quota = UnmeteredQuota(settings.limits.generation_jobs_per_day)
+                quota = RedisGenerationQuota(
+                    queue,
+                    QuotaLimits(
+                        jobs_per_client=settings.limits.generation_jobs_per_day,
+                        jobs_per_address=settings.limits.generation_jobs_per_address_per_day,
+                        command_timeout_seconds=settings.redis.connect_timeout_seconds,
+                    ),
+                )
                 app.state.create_generation = CreateGeneration(
                     store=store,
                     queue=jobs,

@@ -23,6 +23,7 @@ from deckly.domain.job import (
 )
 from tests.domain.builders import T0, at, basic_note, result_with
 from tests.fakes import (
+    ADDRESS,
     GENERATED,
     MATERIAL,
     PAGES,
@@ -89,7 +90,7 @@ class UnreachableJobStore(InMemoryJobStore):
 
 
 async def create(harness: Harness, request: GenerationRequest) -> UUID:
-    return (await harness.create(request, scope())).job.job_id
+    return (await harness.create(request, scope(), ADDRESS)).job.job_id
 
 
 def calls_through(stage: JobStage) -> list[JobStage]:

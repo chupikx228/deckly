@@ -41,6 +41,10 @@ class StallingJobStore(InMemoryJobStore):
         await self._answer()
         return await super().add(job, request, scope)
 
+    async def find(self, scope: IdempotencyScope) -> StoredJob | None:
+        await self._answer()
+        return await super().find(scope)
+
     async def get(self, job_id: UUID) -> GenerationJob | None:
         await self._answer()
         return await super().get(job_id)
@@ -100,6 +104,8 @@ async def test_answering_store_passes_every_call_through() -> None:
     assert cancelled is not None
     assert await store.get(job.job_id) == cancelled
     assert await store.get_stored(job.job_id) == StoredJob(job=cancelled, request=generation_request())
+    assert await store.find(scope()) == StoredJob(job=cancelled, request=generation_request())
+    assert await store.find(scope(key=2)) is None
     assert await store.get(job_id(2)) is None
 
 
@@ -130,11 +136,12 @@ async def test_unanswered_call_times_out_within_its_bound_and_is_cancelled_once(
     "call",
     [
         lambda store: store.add(queued(), generation_request(), scope()),
+        lambda store: store.find(scope()),
         lambda store: store.get(job_id(1)),
         lambda store: store.get_stored(job_id(1)),
         lambda store: store.update(job_id(1), lambda stored: stored),
     ],
-    ids=["add", "get", "get_stored", "update"],
+    ids=["add", "find", "get", "get_stored", "update"],
 )
 async def test_every_call_is_bounded_even_when_its_cleanup_never_finishes(
     call: StoreCall, caplog: pytest.LogCaptureFixture

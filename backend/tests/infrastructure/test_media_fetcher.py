@@ -23,6 +23,7 @@ from deckly.infrastructure.resilience import CircuitBreaker, CircuitState, Resil
 from deckly.transport.results import GenerationResultBody
 from tests.domain.builders import basic_note, result_with
 from tests.fakes import (
+    ADDRESS,
     MEDIA_LIMITS,
     MEDIA_POLICY,
     FakeImageSearchClient,
@@ -344,7 +345,7 @@ async def run_with_commons(
         media=commons_fetcher(recorded, time, breaker=breaker),
         clock=lambda: harness.now,
     )
-    job_id = (await harness.create(WITH_IMAGES, scope())).job.job_id
+    job_id = (await harness.create(WITH_IMAGES, scope(), ADDRESS)).job.job_id
     await run(job_id)
     return await harness.get(job_id), seen
 
@@ -435,7 +436,7 @@ async def test_bug_in_the_media_adapter_still_yields_a_succeeded_job(
         media=fetcher,
         clock=lambda: harness.now,
     )
-    job_id = (await harness.create(WITH_IMAGES, scope())).job.job_id
+    job_id = (await harness.create(WITH_IMAGES, scope(), ADDRESS)).job.job_id
 
     with caplog.at_level(logging.INFO, logger=PIPELINE_LOGGER):
         await run(job_id)

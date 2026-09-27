@@ -43,6 +43,7 @@ from deckly.infrastructure.resilience import (
 from deckly.transport.results import GenerationResultBody
 from tests.domain.builders import JOB_ID, T0
 from tests.fakes import (
+    ADDRESS,
     MODEL_THINKING_SECONDS,
     FakeLlmClient,
     Harness,
@@ -1292,7 +1293,7 @@ def pipeline_for(harness: Harness, llm: LlmClient) -> RunGeneration:
 
 async def run_job(llm: LlmClient) -> GenerationJob:
     harness = Harness()
-    job_id = (await harness.create(generation_request(), scope())).job.job_id
+    job_id = (await harness.create(generation_request(), scope(), ADDRESS)).job.job_id
     await pipeline_for(harness, llm)(job_id)
     return await harness.get(job_id)
 
@@ -1311,7 +1312,7 @@ async def test_cancel_during_the_model_call_aborts_the_call_and_leaves_the_job_c
     model = SlowModel(model_reply(document(basic(1))))
     llm = FakeLlmClient(model.think)
     breaker = CircuitBreaker(failure_threshold=1, reset_seconds=30, clock=lambda: 0.0)
-    job_id = (await harness.create(generation_request(), scope())).job.job_id
+    job_id = (await harness.create(generation_request(), scope(), ADDRESS)).job.job_id
     running = asyncio.create_task(pipeline_for(harness, resilient(llm, breaker, PATIENT_POLICY))(job_id))
     harness.queue.running[job_id] = running
     await model.reached.wait()
