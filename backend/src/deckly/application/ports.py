@@ -86,6 +86,10 @@ class QuotaReader(Protocol):
     async def current(self, client_id: UUID, now: datetime) -> Quota: ...
 
 
+class DependencyProbe(Protocol):
+    async def is_healthy(self) -> bool: ...
+
+
 class SourceRetriever(Protocol):
     async def retrieve(self, job_id: UUID, request: GenerationRequest) -> tuple[RetrievedPage, ...]: ...
 

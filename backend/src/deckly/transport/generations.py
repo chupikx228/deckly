@@ -16,7 +16,7 @@ from pydantic import (
 )
 
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration, JobCreated
-from deckly.application.ports import IdempotencyScope
+from deckly.application.ports import IdempotencyScope, Quota
 from deckly.domain.exceptions import JobNotFoundError
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import Failed, GenerationJob, JobStage, JobStatus, Succeeded
@@ -182,6 +182,10 @@ class QuotaBody(ResponseBody):
     remaining: int
     resets_at: datetime = Field(alias="resetsAt")
 
+    @classmethod
+    def from_quota(cls, quota: Quota) -> Self:
+        return cls(limit=quota.limit, remaining=quota.remaining, resets_at=quota.resets_at)
+
 
 class GenerationJobCreatedBody(ResponseBody):
     job_id: UUID = Field(alias="jobId")
@@ -195,11 +199,7 @@ class GenerationJobCreatedBody(ResponseBody):
             job_id=created.job.job_id,
             status=created.job.status,
             created_at=created.job.created_at,
-            quota=QuotaBody(
-                limit=created.quota.limit,
-                remaining=created.quota.remaining,
-                resets_at=created.quota.resets_at,
-            ),
+            quota=QuotaBody.from_quota(created.quota),
         )
 
 

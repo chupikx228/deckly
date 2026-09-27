@@ -6,6 +6,7 @@ from uuid import uuid4
 from fastapi import APIRouter, FastAPI
 
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
+from deckly.application.health import CheckHealth
 from deckly.application.ports import RegenerationLimiter
 from deckly.application.regeneration import RegenerateNote
 from deckly.config import Settings, load_settings
@@ -13,7 +14,8 @@ from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.card_generator.regenerator import LlmNoteRegenerator
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.database import create_engine, create_session_factory, verify_connection
-from deckly.infrastructure.job_store import PostgresJobStore
+from deckly.infrastructure.health import postgres_probe, redis_probe
+from deckly.infrastructure.job_store import BoundedJobStore, PostgresJobStore
 from deckly.infrastructure.llm.client import LlmClient, LlmEndpoint
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.logging import configure_logging
@@ -26,13 +28,13 @@ from deckly.infrastructure.search.client import SearchClient, SearchEndpoint
 from deckly.infrastructure.search.parser import CleaningSourceParser
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
-from deckly.transport import generations, notes
+from deckly.transport import generations, health, notes
 from deckly.transport.error_handlers import register_error_handlers
 from deckly.worker.settings import LLM_CLIENTS, resilient_caller
 
 API_PREFIX = "/v1"
 SERVICE_TITLE = "Deckly generation service"
-ROUTERS: tuple[APIRouter, ...] = (generations.router, notes.router)
+ROUTERS: tuple[APIRouter, ...] = (generations.router, notes.router, health.router)
 SINGLE_ATTEMPT = 1
 
 Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
@@ -142,17 +144,32 @@ def build_lifespan(settings: Settings) -> Lifespan:
             )
             try:
                 session_factory = create_session_factory(engine)
-                store = PostgresJobStore(session_factory)
+                store = BoundedJobStore(
+                    PostgresJobStore(session_factory),
+                    timeout_seconds=settings.database.job_store_timeout_seconds,
+                )
                 app.state.settings = settings
                 app.state.session_factory = session_factory
                 app.state.queue = queue
                 jobs = ArqJobQueue(queue, command_timeout_seconds=settings.redis.connect_timeout_seconds)
+                quota = UnmeteredQuota(settings.limits.generation_jobs_per_day)
                 app.state.create_generation = CreateGeneration(
                     store=store,
                     queue=jobs,
-                    quota=UnmeteredQuota(settings.limits.generation_jobs_per_day),
+                    quota=quota,
                     clock=utc_now,
                     new_job_id=uuid4,
+                )
+                app.state.check_health = CheckHealth(
+                    probes=(
+                        postgres_probe(
+                            engine, timeout_seconds=settings.database.health_check_timeout_seconds
+                        ),
+                        redis_probe(queue, timeout_seconds=settings.redis.connect_timeout_seconds),
+                    ),
+                    quota=quota,
+                    clock=utc_now,
+                    version=settings.app.version,
                 )
                 app.state.get_generation = GetGeneration(store=store)
                 app.state.cancel_generation = CancelGeneration(store=store, queue=jobs, clock=utc_now)

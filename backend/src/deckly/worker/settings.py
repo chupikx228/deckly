@@ -15,7 +15,7 @@ from deckly.infrastructure.card_generator.generator import LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.database import create_engine, create_session_factory, verify_connection
-from deckly.infrastructure.job_store import PostgresJobStore
+from deckly.infrastructure.job_store import BoundedJobStore, PostgresJobStore
 from deckly.infrastructure.llm.anthropic_client import AnthropicLlmClient
 from deckly.infrastructure.llm.client import LlmClient, LlmEndpoint
 from deckly.infrastructure.llm.deepseek_client import DeepSeekLlmClient
@@ -162,7 +162,10 @@ async def startup(ctx: WorkerContext) -> None:
     media = build_media_fetcher(settings.providers)
     ctx[MEDIA_FETCHER_KEY] = media
     ctx[RUN_GENERATION_KEY] = RunGeneration(
-        store=PostgresJobStore(create_session_factory(engine)),
+        store=BoundedJobStore(
+            PostgresJobStore(create_session_factory(engine)),
+            timeout_seconds=settings.database.job_store_timeout_seconds,
+        ),
         retriever=retriever,
         parser=CleaningSourceParser(max_characters=settings.providers.search_max_source_characters),
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),

@@ -57,6 +57,8 @@ class DatabaseSettings(BaseSettings):
     pool_size: PositiveInt
     max_overflow: NonNegativeInt
     pool_timeout_seconds: PositiveInt
+    health_check_timeout_seconds: PositiveSeconds
+    job_store_timeout_seconds: PositiveSeconds
 
     @field_validator("url")
     @classmethod

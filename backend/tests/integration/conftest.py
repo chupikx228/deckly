@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Iterator
 from uuid import UUID, uuid4
 
@@ -70,6 +71,16 @@ class Cleanup:
 @pytest.fixture
 def settings() -> Settings:
     return load_settings()
+
+
+@pytest.fixture
+def restored_logging() -> Iterator[None]:
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    try:
+        yield
+    finally:
+        root.handlers, root.level = handlers, level
 
 
 @pytest.fixture

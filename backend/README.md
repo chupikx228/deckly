@@ -70,6 +70,38 @@ is already stored by then, so replaying the request with the same `Idempotency-K
 again. When that cleanup gives up, redis-py only lets go of the connection once it is
 garbage-collected, which asyncio logs as `Unclosed client session`.
 
+`GET /v1/health` checks Postgres (`SELECT 1` through the API's engine) and Redis (`PING`
+through the queue pool) concurrently and reports `degraded` if either fails or does not answer in
+time: `DECKLY_DATABASE_HEALTH_CHECK_TIMEOUT_SECONDS` for Postgres, and
+`DECKLY_REDIS_CONNECT_TIMEOUT_SECONDS`, the same bound every queue command gets, for Redis
+(`infrastructure/health.py`). A plain timeout around the Postgres query is not enough: when a
+pooled connection freezes mid-query, cancelling it makes asyncpg send a cancel request and wait,
+with no timeout, for the server to acknowledge it, and SQLAlchemy's cleanup waits on that. So
+each check runs as its own task that the request only waits on. When the wait runs out, the task
+is cancelled once and left to clean up in the background, and until it has, further health
+checks answer `degraded` at once instead of starting another. Cancelling it a second time would
+make SQLAlchemy lose track of the connection and shrink the pool for good. Concurrent health
+requests share one check, so an unauthenticated flood of them holds at most one pooled
+connection. The model, search and image providers are not checked (see the contract).
+
+Every job store call, in the API and in the worker, goes through the same kind of bound
+(`BoundedJobStore` in `infrastructure/job_store.py`), with `DECKLY_DATABASE_JOB_STORE_TIMEOUT_SECONDS`
+for the whole call: taking a pooled connection, the queries and the commit. When Postgres freezes,
+`POST /v1/generations`, `GET /v1/generations/{jobId}` and the cancel fail with `500` in that time,
+as an unreachable Postgres does, instead of hanging. Neither of asyncpg's own timeouts covers this.
+Postgres's `statement_timeout` is enforced by the server, so it never fires when the server's
+answers do not arrive at all. asyncpg's `command_timeout` does raise on time, but it leaves the
+connection waiting for the cancel to be acknowledged, and the `ROLLBACK` SQLAlchemy sends next
+(already during the pool's pre-ping) waits on that with no timeout. So each call runs as its own
+task. When the wait runs out it is cancelled once and left to roll back in the background, as the
+health check does. The cancel lands before the commit, so a call that timed out stores nothing
+unless the freeze came while the commit itself was in flight. In that case the create has still
+created the job, and replaying the request with the same `Idempotency-Key` returns it. A cancel
+that timed out that way has already cancelled the job, so a retry gets `409`. Calls left
+cleaning up each hold a pooled connection until Postgres answers again, so a long freeze can
+hold at most the whole pool. Further calls then time out while waiting for a connection, rather
+than opening more.
+
 A cancel also stops the work already in flight. Once the job is stored as cancelled,
 `POST /v1/generations/{jobId}/cancel` leaves an Arq abort marker for it, and the worker
 (`allow_abort_jobs`) cancels the job's task at its next poll, within about half a second. The

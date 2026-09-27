@@ -37,6 +37,8 @@ def set_database_environment(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
     monkeypatch.setenv("DECKLY_DATABASE_POOL_SIZE", "5")
     monkeypatch.setenv("DECKLY_DATABASE_MAX_OVERFLOW", "0")
     monkeypatch.setenv("DECKLY_DATABASE_POOL_TIMEOUT_SECONDS", "10")
+    monkeypatch.setenv("DECKLY_DATABASE_HEALTH_CHECK_TIMEOUT_SECONDS", "2")
+    monkeypatch.setenv("DECKLY_DATABASE_JOB_STORE_TIMEOUT_SECONDS", "5")
 
 
 def test_missing_required_config_fails_fast(clean_environment: pytest.MonkeyPatch) -> None:
