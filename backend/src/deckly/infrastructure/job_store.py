@@ -2,17 +2,20 @@ import asyncio
 import logging
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, delete, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deckly.application.exceptions import UnreadableJobRequestError
 from deckly.application.ports import IdempotencyScope, JobStore, JobTransition, StoredJob
 from deckly.domain.deck import GenerationResult
 from deckly.domain.exceptions import InvalidGenerationRequestError
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import (
+    TERMINAL_STATUSES,
     Cancelled,
     Failed,
     FailureCode,
@@ -30,6 +33,8 @@ from deckly.infrastructure.stored_result import dump_result, load_result
 from deckly.infrastructure.tables import GenerationJobRow
 
 logger = logging.getLogger(__name__)
+
+INSERT_ATTEMPTS = 2
 
 
 class CorruptStoredJobError(Exception):
@@ -107,7 +112,8 @@ def restore_request(row: GenerationJobRow) -> GenerationRequest:
             instructions=row.instructions,
         )
     except (ValueError, InvalidGenerationRequestError) as error:
-        raise CorruptStoredJobError(str(error)) from error
+        message = f"the saved request of job {row.job_id} no longer validates: {error}"
+        raise UnreadableJobRequestError(message) from error
 
 
 def scoped_row(scope: IdempotencyScope) -> Select[tuple[GenerationJobRow]]:
@@ -153,14 +159,15 @@ class PostgresJobStore:
             )
             .returning(GenerationJobRow.job_id)
         )
-        async with self._session_factory.begin() as session:
-            if await session.scalar(statement) is not None:
-                return StoredJob(job=job, request=request)
-            existing = await session.scalar(scoped_row(scope))
-        if existing is None:
-            message = f"idempotency conflict for {scope} but no stored job was found"
-            raise CorruptStoredJobError(message)
-        return restore_stored(existing)
+        for _ in range(INSERT_ATTEMPTS):
+            async with self._session_factory.begin() as session:
+                if await session.scalar(statement) is not None:
+                    return StoredJob(job=job, request=request)
+                existing = await session.scalar(scoped_row(scope))
+            if existing is not None:
+                return restore_stored(existing)
+        message = f"idempotency conflict for {scope} but no stored job was found"
+        raise CorruptStoredJobError(message)
 
     async def find(self, scope: IdempotencyScope) -> StoredJob | None:
         async with self._session_factory() as session:
@@ -191,6 +198,59 @@ class PostgresJobStore:
             row.result = stored.result
             row.updated_at = job.updated_at
         return job
+
+
+class PostgresJobHousekeeping:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def stale(self, status: JobStatus, updated_before: datetime, limit: int) -> tuple[UUID, ...]:
+        statement = (
+            select(GenerationJobRow.job_id)
+            .where(GenerationJobRow.status == status, GenerationJobRow.updated_at < updated_before)
+            .order_by(GenerationJobRow.updated_at)
+            .limit(limit)
+        )
+        async with self._session_factory() as session:
+            return tuple(await session.scalars(statement))
+
+    async def release_idempotency_keys(self, created_before: datetime, limit: int) -> int:
+        expired = (
+            select(GenerationJobRow.job_id)
+            .where(
+                GenerationJobRow.idempotency_key.is_not(None), GenerationJobRow.created_at < created_before
+            )
+            .order_by(GenerationJobRow.created_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        statement = (
+            update(GenerationJobRow)
+            .where(GenerationJobRow.job_id.in_(expired.scalar_subquery()))
+            .values(idempotency_key=None)
+            .returning(GenerationJobRow.job_id)
+        )
+        async with self._session_factory.begin() as session:
+            return len((await session.scalars(statement)).all())
+
+    async def purge_finished(self, finished_before: datetime, limit: int) -> int:
+        expired = (
+            select(GenerationJobRow.job_id)
+            .where(
+                GenerationJobRow.status.in_(TERMINAL_STATUSES),
+                GenerationJobRow.updated_at < finished_before,
+            )
+            .order_by(GenerationJobRow.updated_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        statement = (
+            delete(GenerationJobRow)
+            .where(GenerationJobRow.job_id.in_(expired.scalar_subquery()))
+            .returning(GenerationJobRow.job_id)
+        )
+        async with self._session_factory.begin() as session:
+            return len((await session.scalars(statement)).all())
 
 
 class BoundedJobStore:

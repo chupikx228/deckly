@@ -203,6 +203,7 @@ false`). Bad input → `400 VALIDATION_FAILED`, never a 500.
 - **Persist job state** in a store that survives a process restart and is shared across
   instances (see scaling). Jobs are retained ≥24h after completion so a user who backgrounded
   the app can return to a finished result.
+- **No job stays non-terminal forever.** See "Scheduled housekeeping" below.
 
 ## Idempotency
 
@@ -213,6 +214,44 @@ false`). Bad input → `400 VALIDATION_FAILED`, never a 500.
 - Scope the key to the client (`X-Client-Id`) so two clients cannot collide.
 - The client relies on this to survive network retries without spawning duplicate jobs. Treat
   it as a correctness requirement, not an optimization.
+- Keys expire after `DECKLY_CACHE_IDEMPOTENCY_KEY_TTL_SECONDS` (24h), measured from the original
+  request. Expiry clears the key on the job row (the column is nullable, and Postgres treats NULLs
+  as distinct in the unique constraint); the row itself stays pollable until retention removes it.
+  The key TTL must not exceed the job retention, or deleting a row would silently end its replay
+  window early; config validation enforces this.
+
+## Scheduled housekeeping
+
+One Arq cron task, `run_housekeeping`, runs inside the worker every
+`DECKLY_SWEEP_INTERVAL_MINUTES` (must divide 60; the task's timeout equals the interval so runs
+never overlap, and Arq's `unique` cron ids mean only one worker runs each tick). Each run does,
+in order, with every step capped at `DECKLY_SWEEP_BATCH_SIZE` rows and a failure in one step
+logged without skipping the others:
+
+1. **Stale `running` jobs** — no state change for `DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS`
+   (default 15 min) are failed with `GENERATION_FAILED`. Config validation keeps this above the
+   job timeout plus the job store timeout, so a live job, or one whose interruption is still
+   being recorded, is never swept. Arq re-runs a crashed worker's job after its in-progress key
+   expires, and `RunGeneration` fails it as abandoned; the sweep is the backstop for when that
+   path cannot run (database down, the queue entry lost, retries exhausted).
+2. **Stale `queued` jobs** — after `DECKLY_SWEEP_QUEUED_STALE_AFTER_SECONDS` (default 1 h, never
+   below the running threshold) are failed the same way.
+3. **Expired idempotency keys** are cleared (see "Idempotency").
+4. **Finished jobs** older than `DECKLY_CACHE_JOB_RETENTION_SECONDS` (at least 24h, measured from
+   completion) are hard-deleted; polling one afterwards returns `404 JOB_NOT_FOUND`. Unfinished
+   rows are never deleted. The backend is not the system of record, so there is no archive.
+
+The sweep changes state only through `JobStore.update()`, and its transition re-checks the
+locked row: the job must still have the status it was listed with and a last change older than
+the cutoff, otherwise it is skipped. A worker that claims or advances a job while the sweep is
+looking at it therefore wins cleanly, and a worker that arrives after the sweep gets
+`JobAlreadyTerminalError` and stops without spending provider budget. A job the sweep cannot
+update (for example a row whose stored stage no longer restores) is logged as
+`stale_job_not_swept` and skipped, so one bad row cannot stall every later run.
+
+A queued job whose saved request no longer validates (a contract change made it invalid after it
+was stored) is not re-validated by the sweep. The worker fails it with `GENERATION_FAILED` as
+soon as it picks it up; if it is never picked up, the queued threshold catches it.
 
 ## Error handling
 

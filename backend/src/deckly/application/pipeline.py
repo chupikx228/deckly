@@ -4,7 +4,12 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from uuid import UUID
 
-from deckly.application.exceptions import JobStoppedError, NoValidContentError, UpstreamUnavailableError
+from deckly.application.exceptions import (
+    JobStoppedError,
+    NoValidContentError,
+    UnreadableJobRequestError,
+    UpstreamUnavailableError,
+)
 from deckly.application.generations import Clock
 from deckly.application.ports import (
     CardGenerator,
@@ -107,7 +112,11 @@ class RunGeneration:
     clock: Clock
 
     async def __call__(self, job_id: UUID) -> None:
-        stored = await self.store.get_stored(job_id)
+        try:
+            stored = await self.store.get_stored(job_id)
+        except UnreadableJobRequestError:
+            await self._reject_unreadable(job_id)
+            return
         if stored is None or stored.job.is_terminal:
             logger.info("generation_skipped", extra={"job_id": str(job_id)})
             return
@@ -221,6 +230,14 @@ class RunGeneration:
         progress = stage_progress(stage)
         entered = await self._update(job_id, lambda job: job.advance(stage, progress, now))
         logger.info("generation_stage_entered", extra=log_context(entered))
+
+    async def _reject_unreadable(self, job_id: UUID) -> None:
+        try:
+            rejected = await self._fail(job_id, FailureCode.GENERATION_FAILED)
+        except JobStoppedError:
+            logger.info("generation_stopped", extra={"job_id": str(job_id)})
+            return
+        logger.error("generation_request_unreadable", extra=log_context(rejected))
 
     async def _record_interruption(self, job_id: UUID) -> None:
         try:

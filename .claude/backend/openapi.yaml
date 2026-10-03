@@ -67,7 +67,10 @@ paths:
         '200':
           description: >
             Current job state. A failed generation is reported here with status "failed",
-            not as an HTTP error.
+            not as an HTTP error. A job that stops making progress is failed by the server with
+            GENERATION_FAILED instead of being left queued or running. A job is deleted once
+            it has been finished for 24 hours, and polling it after that returns 404
+            JOB_NOT_FOUND.
           headers:
             Retry-After:
               description: Seconds to wait before polling again. Sent while non-terminal.
@@ -184,7 +187,9 @@ components:
         request body with the same key returns the original job instead of starting a second
         one. Reusing the key with a different body returns 409 IDEMPOTENCY_KEY_CONFLICT. Bodies
         are compared after defaults are applied and the topic is trimmed, so key order and
-        explicitly sent defaults do not matter.
+        explicitly sent defaults do not matter. A key is honoured for 24 hours after the
+        original request; after that the same key starts a new job, and the original job can
+        still be polled until it is deleted.
       schema:
         type: string
         format: uuid

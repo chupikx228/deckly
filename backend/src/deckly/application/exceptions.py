@@ -14,6 +14,14 @@ class JobStoppedError(ApplicationError):
     pass
 
 
+class JobNoLongerStaleError(ApplicationError):
+    pass
+
+
+class UnreadableJobRequestError(ApplicationError):
+    pass
+
+
 class RetryableError(ApplicationError):
     def __init__(self, retry_after_seconds: int) -> None:
         super().__init__(retry_after_seconds)

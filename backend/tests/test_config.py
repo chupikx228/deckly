@@ -10,6 +10,7 @@ from deckly.config import (
     MAX_MEDIA_IMAGES,
     MAX_MODERATION_TIMEOUT_SECONDS,
     MEDIA_URL_MIN_VALIDITY_SECONDS,
+    MIN_JOB_RETENTION_SECONDS,
     AppSettings,
     CacheSettings,
     DatabaseSettings,
@@ -18,6 +19,7 @@ from deckly.config import (
     RedisSettings,
     RegenerateSettings,
     Settings,
+    SweepSettings,
     load_settings,
 )
 from deckly.infrastructure.media.licensing import MIN_IMAGE_SIDE
@@ -148,6 +150,13 @@ REGENERATE_ENVIRONMENT = {
     "DECKLY_REGENERATE_MODEL_TIMEOUT_SECONDS": "5.5",
     "DECKLY_REGENERATE_MODEL_MAX_OUTPUT_TOKENS": "1000",
 }
+SWEEP_ENVIRONMENT = {
+    "DECKLY_SWEEP_INTERVAL_MINUTES": "5",
+    "DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS": "900",
+    "DECKLY_SWEEP_QUEUED_STALE_AFTER_SECONDS": "3600",
+    "DECKLY_SWEEP_BATCH_SIZE": "500",
+}
+JOB_STORE_TIMEOUT_SECONDS = 5
 
 
 def set_provider_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -273,18 +282,20 @@ def settings_from_environment(monkeypatch: pytest.MonkeyPatch, **overrides: str)
         **LIMIT_ENVIRONMENT,
         "DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS": ROOMY_JOB_TIMEOUT_SECONDS,
         **REGENERATE_ENVIRONMENT,
+        **SWEEP_ENVIRONMENT,
         **overrides,
     }
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
     return Settings(
         app=AppSettings.model_construct(),
-        database=DatabaseSettings.model_construct(),
+        database=DatabaseSettings.model_construct(job_store_timeout_seconds=JOB_STORE_TIMEOUT_SECONDS),
         redis=RedisSettings.model_construct(),
         providers=ProviderSettings(),
         limits=LimitSettings(),
         cache=CacheSettings.model_construct(),
         regenerate=RegenerateSettings(),
+        sweep=SweepSettings(),
     )
 
 
@@ -617,3 +628,160 @@ def test_generation_result_ttl_that_could_outlive_media_urls_is_rejected(
 
     with pytest.raises(ValidationError, match="generation_result_ttl_seconds"):
         CacheSettings()
+
+
+def set_cache_environment(monkeypatch: pytest.MonkeyPatch, *, idempotency_ttl: str, retention: str) -> None:
+    monkeypatch.setenv("DECKLY_CACHE_GENERATION_RESULT_TTL_SECONDS", "43200")
+    monkeypatch.setenv("DECKLY_CACHE_IDEMPOTENCY_KEY_TTL_SECONDS", idempotency_ttl)
+    monkeypatch.setenv("DECKLY_CACHE_JOB_RETENTION_SECONDS", retention)
+
+
+@pytest.mark.parametrize("retention", [str(MIN_JOB_RETENTION_SECONDS - 1), "3600", "0", "-1"])
+def test_job_retention_shorter_than_the_contracted_day_is_rejected(
+    clean_environment: pytest.MonkeyPatch, retention: str
+) -> None:
+    set_cache_environment(clean_environment, idempotency_ttl="60", retention=retention)
+
+    with pytest.raises(ValidationError, match="job_retention_seconds"):
+        CacheSettings()
+
+
+@pytest.mark.parametrize("retention", [MIN_JOB_RETENTION_SECONDS, 7 * MIN_JOB_RETENTION_SECONDS])
+def test_job_retention_of_at_least_a_day_is_accepted(
+    clean_environment: pytest.MonkeyPatch, retention: int
+) -> None:
+    set_cache_environment(clean_environment, idempotency_ttl="60", retention=str(retention))
+
+    assert CacheSettings().job_retention_seconds == retention
+
+
+def test_idempotency_key_outliving_its_job_is_rejected(clean_environment: pytest.MonkeyPatch) -> None:
+    set_cache_environment(
+        clean_environment,
+        idempotency_ttl=str(MIN_JOB_RETENTION_SECONDS + 1),
+        retention=str(MIN_JOB_RETENTION_SECONDS),
+    )
+
+    with pytest.raises(ValidationError, match="idempotency key ttl must not exceed the job retention"):
+        CacheSettings()
+
+
+@pytest.mark.parametrize("idempotency_ttl", ["1", str(MIN_JOB_RETENTION_SECONDS)])
+def test_idempotency_key_expiring_no_later_than_its_job_is_accepted(
+    clean_environment: pytest.MonkeyPatch, idempotency_ttl: str
+) -> None:
+    set_cache_environment(
+        clean_environment, idempotency_ttl=idempotency_ttl, retention=str(MIN_JOB_RETENTION_SECONDS)
+    )
+
+    assert CacheSettings().idempotency_key_ttl_seconds == int(idempotency_ttl)
+
+
+@pytest.mark.parametrize("idempotency_ttl", ["0", "-1"])
+def test_idempotency_key_ttl_must_be_positive(
+    clean_environment: pytest.MonkeyPatch, idempotency_ttl: str
+) -> None:
+    set_cache_environment(
+        clean_environment, idempotency_ttl=idempotency_ttl, retention=str(MIN_JOB_RETENTION_SECONDS)
+    )
+
+    with pytest.raises(ValidationError, match="idempotency_key_ttl_seconds"):
+        CacheSettings()
+
+
+def set_sweep_environment(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
+    for name, value in {**SWEEP_ENVIRONMENT, **overrides}.items():
+        monkeypatch.setenv(name, value)
+
+
+@pytest.mark.parametrize("variable", sorted(SWEEP_ENVIRONMENT))
+def test_every_sweep_setting_is_required(clean_environment: pytest.MonkeyPatch, variable: str) -> None:
+    set_sweep_environment(clean_environment)
+    clean_environment.delenv(variable)
+
+    with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_SWEEP_").lower()):
+        SweepSettings()
+
+
+@pytest.mark.parametrize("interval", ["0", "-5", "61", "7", "25", "45"])
+def test_sweep_interval_that_does_not_divide_the_hour_is_rejected(
+    clean_environment: pytest.MonkeyPatch, interval: str
+) -> None:
+    set_sweep_environment(clean_environment, DECKLY_SWEEP_INTERVAL_MINUTES=interval)
+
+    with pytest.raises(ValidationError, match="interval_minutes"):
+        SweepSettings()
+
+
+@pytest.mark.parametrize("interval", [1, 5, 15, 30, 60])
+def test_sweep_interval_that_divides_the_hour_is_accepted(
+    clean_environment: pytest.MonkeyPatch, interval: int
+) -> None:
+    set_sweep_environment(clean_environment, DECKLY_SWEEP_INTERVAL_MINUTES=str(interval))
+
+    assert SweepSettings().interval_minutes == interval
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS",
+        "DECKLY_SWEEP_QUEUED_STALE_AFTER_SECONDS",
+        "DECKLY_SWEEP_BATCH_SIZE",
+    ],
+)
+@pytest.mark.parametrize("value", ["0", "-1", "soon"])
+def test_sweep_thresholds_and_batch_size_must_be_positive(
+    clean_environment: pytest.MonkeyPatch, variable: str, value: str
+) -> None:
+    set_sweep_environment(clean_environment, **{variable: value})
+
+    with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_SWEEP_").lower()):
+        SweepSettings()
+
+
+def test_queued_job_going_stale_before_a_running_one_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_sweep_environment(
+        clean_environment,
+        DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS="900",
+        DECKLY_SWEEP_QUEUED_STALE_AFTER_SECONDS="899",
+    )
+
+    with pytest.raises(ValidationError, match="queued job must not go stale sooner than a running one"):
+        SweepSettings()
+
+
+def test_queued_and_running_jobs_may_go_stale_after_the_same_time(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_sweep_environment(
+        clean_environment,
+        DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS="900",
+        DECKLY_SWEEP_QUEUED_STALE_AFTER_SECONDS="900",
+    )
+
+    assert SweepSettings().queued_stale_after_seconds == 900
+
+
+@pytest.mark.parametrize(
+    "stale_after", ["1", "300", str(int(ROOMY_JOB_TIMEOUT_SECONDS) + JOB_STORE_TIMEOUT_SECONDS)]
+)
+def test_running_job_going_stale_before_an_interrupted_job_could_record_its_failure_is_rejected(
+    clean_environment: pytest.MonkeyPatch, stale_after: str
+) -> None:
+    with pytest.raises(ValueError, match="running job must not go stale before the generation job timeout"):
+        settings_from_environment(clean_environment, DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS=stale_after)
+
+
+def test_running_job_going_stale_just_after_an_interrupted_job_settles_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    stale_after = int(ROOMY_JOB_TIMEOUT_SECONDS) + JOB_STORE_TIMEOUT_SECONDS + 1
+
+    settings = settings_from_environment(
+        clean_environment, DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS=str(stale_after)
+    )
+
+    assert settings.sweep.running_stale_after_seconds == stale_after

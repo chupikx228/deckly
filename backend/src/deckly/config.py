@@ -26,6 +26,8 @@ MAX_MEDIA_CONCURRENCY = 8
 MAX_MODERATION_TIMEOUT_SECONDS = 10
 REGENERATE_OVERHEAD_SECONDS = 1.5
 MEDIA_URL_MIN_VALIDITY_SECONDS = 24 * 60 * 60
+MIN_JOB_RETENTION_SECONDS = 24 * 60 * 60
+MINUTES_PER_HOUR = 60
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 ModelProvider = Literal["anthropic", "deepseek"]
@@ -199,7 +201,38 @@ class CacheSettings(BaseSettings):
 
     generation_result_ttl_seconds: Annotated[int, Field(gt=0, lt=MEDIA_URL_MIN_VALIDITY_SECONDS)]
     idempotency_key_ttl_seconds: PositiveInt
-    job_retention_seconds: PositiveInt
+    job_retention_seconds: Annotated[int, Field(ge=MIN_JOB_RETENTION_SECONDS)]
+
+    @model_validator(mode="after")
+    def require_idempotency_keys_to_expire_before_their_jobs(self) -> Self:
+        if self.idempotency_key_ttl_seconds > self.job_retention_seconds:
+            message = "the idempotency key ttl must not exceed the job retention"
+            raise ValueError(message)
+        return self
+
+
+class SweepSettings(BaseSettings):
+    model_config = _settings_config("DECKLY_SWEEP_")
+
+    interval_minutes: Annotated[int, Field(ge=1, le=MINUTES_PER_HOUR)]
+    running_stale_after_seconds: PositiveInt
+    queued_stale_after_seconds: PositiveInt
+    batch_size: PositiveInt
+
+    @field_validator("interval_minutes")
+    @classmethod
+    def require_interval_to_divide_the_hour(cls, interval_minutes: int) -> int:
+        if MINUTES_PER_HOUR % interval_minutes != 0:
+            message = f"the sweep interval must divide {MINUTES_PER_HOUR} minutes evenly"
+            raise ValueError(message)
+        return interval_minutes
+
+    @model_validator(mode="after")
+    def require_queued_jobs_to_wait_at_least_as_long_as_running_ones(self) -> Self:
+        if self.queued_stale_after_seconds < self.running_stale_after_seconds:
+            message = "a queued job must not go stale sooner than a running one"
+            raise ValueError(message)
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +244,7 @@ class Settings:
     limits: LimitSettings
     cache: CacheSettings
     regenerate: RegenerateSettings
+    sweep: SweepSettings
 
     def __post_init__(self) -> None:
         provider_deadlines = (
@@ -231,6 +265,15 @@ class Settings:
                 f"{REGENERATE_OVERHEAD_SECONDS}s of overhead must fit within the regenerate note timeout"
             )
             raise ValueError(message)
+        interrupted_job_settled = (
+            self.limits.generation_job_timeout_seconds + self.database.job_store_timeout_seconds
+        )
+        if self.sweep.running_stale_after_seconds <= interrupted_job_settled:
+            message = (
+                "a running job must not go stale before the generation job timeout and the job store "
+                "timeout have both passed"
+            )
+            raise ValueError(message)
 
 
 def load_settings() -> Settings:
@@ -242,4 +285,5 @@ def load_settings() -> Settings:
         limits=LimitSettings(),
         cache=CacheSettings(),
         regenerate=RegenerateSettings(),
+        sweep=SweepSettings(),
     )

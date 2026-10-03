@@ -602,3 +602,32 @@ async def test_worker_interruption_still_propagates_when_the_failure_cannot_be_r
     await interrupt_during_generation(harness, job_id, lose_the_store)
 
     assert (await harness.get(job_id)).status is JobStatus.RUNNING
+
+
+async def test_job_whose_saved_request_no_longer_validates_is_failed_on_pickup_without_calling_a_port(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = Harness()
+    job_id = await create(harness, WITH_IMAGES)
+    harness.store.unreadable.add(job_id)
+
+    with caplog.at_level(logging.ERROR, logger=PIPELINE_LOGGER):
+        await harness.run(job_id)
+
+    job = await harness.get(job_id)
+    assert isinstance(job.state, Failed)
+    assert (job.state.code, job.stage, job.progress.value) == (FailureCode.GENERATION_FAILED, None, 0.0)
+    assert harness.providers.calls == []
+    assert [record.message for record in caplog.records] == ["generation_request_unreadable"]
+
+
+async def test_unreadable_job_cancelled_before_pickup_stays_cancelled() -> None:
+    harness = Harness()
+    job_id = await create(harness, WITH_IMAGES)
+    await harness.cancel(job_id)
+    harness.store.unreadable.add(job_id)
+
+    await harness.run(job_id)
+
+    assert (await harness.get(job_id)).status is JobStatus.CANCELLED
+    assert harness.providers.calls == []

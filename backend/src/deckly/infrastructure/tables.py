@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, Double, Text, UniqueConstraint
+from sqlalchemy import DateTime, Double, Index, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -12,11 +12,12 @@ class GenerationJobRow(Base):
     __tablename__ = "generation_jobs"
     __table_args__ = (
         UniqueConstraint("client_id", "idempotency_key", name="uq_generation_jobs_client_id_idempotency_key"),
+        Index("ix_generation_jobs_status_updated_at", "status", "updated_at"),
     )
 
     job_id: Mapped[UUID] = mapped_column(primary_key=True)
     client_id: Mapped[UUID]
-    idempotency_key: Mapped[UUID]
+    idempotency_key: Mapped[UUID | None]
     topic: Mapped[str] = mapped_column(Text)
     language: Mapped[str] = mapped_column(Text)
     card_count: Mapped[int]

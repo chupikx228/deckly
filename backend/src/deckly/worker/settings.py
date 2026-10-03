@@ -1,23 +1,31 @@
 import asyncio
+import logging
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
+from datetime import timedelta
 from secrets import SystemRandom
 from uuid import UUID, uuid4
 
-from arq.cron import CronJob
+from arq.cron import CronJob, cron
 from arq.typing import StartupShutdown, WorkerCoroutine
 from arq.worker import Function, func
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from deckly.application.housekeeping import (
+    EnforceJobRetention,
+    RetentionPolicy,
+    StalenessPolicy,
+    SweepStaleJobs,
+)
 from deckly.application.pipeline import RunGeneration
-from deckly.config import ModelProvider, ProviderSettings, Settings
+from deckly.config import MINUTES_PER_HOUR, ModelProvider, ProviderSettings, Settings, SweepSettings
 from deckly.infrastructure.card_generator.generator import LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.database import create_engine, create_session_factory, verify_connection
-from deckly.infrastructure.job_store import BoundedJobStore, PostgresJobStore
+from deckly.infrastructure.job_store import BoundedJobStore, PostgresJobHousekeeping, PostgresJobStore
 from deckly.infrastructure.llm.anthropic_client import AnthropicLlmClient
 from deckly.infrastructure.llm.client import LlmClient, LlmEndpoint
 from deckly.infrastructure.llm.deepseek_client import DeepSeekLlmClient
@@ -42,6 +50,12 @@ MODERATION_LLM_CLIENT_KEY = "moderation_llm_client"
 SOURCE_RETRIEVER_KEY = "source_retriever"
 MEDIA_FETCHER_KEY = "media_fetcher"
 RUN_GENERATION_KEY = "run_generation_use_case"
+SWEEP_STALE_JOBS_KEY = "sweep_stale_jobs_use_case"
+ENFORCE_JOB_RETENTION_KEY = "enforce_job_retention_use_case"
+HOUSEKEEPING_TASK = "run_housekeeping"
+SECONDS_PER_MINUTE = 60
+
+logger = logging.getLogger(__name__)
 
 LLM_CLIENTS: Mapping[ModelProvider, Callable[[LlmEndpoint], LlmClient]] = {
     "anthropic": AnthropicLlmClient,
@@ -185,8 +199,59 @@ def build_result_cache(redis: Redis, settings: Settings) -> RedisResultCache:
     )
 
 
+def build_sweep(
+    store: BoundedJobStore, housekeeping: PostgresJobHousekeeping, settings: Settings
+) -> SweepStaleJobs:
+    return SweepStaleJobs(
+        store=store,
+        housekeeping=housekeeping,
+        policy=StalenessPolicy(
+            running_after=timedelta(seconds=settings.sweep.running_stale_after_seconds),
+            queued_after=timedelta(seconds=settings.sweep.queued_stale_after_seconds),
+        ),
+        batch_size=settings.sweep.batch_size,
+        clock=utc_now,
+    )
+
+
+def build_retention(housekeeping: PostgresJobHousekeeping, settings: Settings) -> EnforceJobRetention:
+    return EnforceJobRetention(
+        housekeeping=housekeeping,
+        policy=RetentionPolicy(
+            idempotency_key_ttl=timedelta(seconds=settings.cache.idempotency_key_ttl_seconds),
+            job_retention=timedelta(seconds=settings.cache.job_retention_seconds),
+        ),
+        batch_size=settings.sweep.batch_size,
+        clock=utc_now,
+    )
+
+
+def housekeeping_cron_jobs(sweep: SweepSettings) -> tuple[CronJob, ...]:
+    return (
+        cron(
+            run_housekeeping,
+            name=HOUSEKEEPING_TASK,
+            minute=set(range(0, MINUTES_PER_HOUR, sweep.interval_minutes)),
+            timeout=sweep.interval_minutes * SECONDS_PER_MINUTE,
+            unique=True,
+        ),
+    )
+
+
 async def run_generation(ctx: WorkerContext, job_id: str) -> None:
     await from_context(ctx, RUN_GENERATION_KEY, RunGeneration)(UUID(job_id))
+
+
+async def run_housekeeping(ctx: WorkerContext) -> None:
+    steps: tuple[tuple[str, Callable[[], Awaitable[object]]], ...] = (
+        (SWEEP_STALE_JOBS_KEY, from_context(ctx, SWEEP_STALE_JOBS_KEY, SweepStaleJobs)),
+        (ENFORCE_JOB_RETENTION_KEY, from_context(ctx, ENFORCE_JOB_RETENTION_KEY, EnforceJobRetention)),
+    )
+    for name, step in steps:
+        try:
+            await step()
+        except Exception:
+            logger.exception("housekeeping_step_failed", extra={"step": name})
 
 
 async def startup(ctx: WorkerContext) -> None:
@@ -207,11 +272,15 @@ async def startup(ctx: WorkerContext) -> None:
     ctx[SOURCE_RETRIEVER_KEY] = retriever
     media = build_media_fetcher(settings.providers)
     ctx[MEDIA_FETCHER_KEY] = media
+    session_factory = create_session_factory(engine)
+    store = BoundedJobStore(
+        PostgresJobStore(session_factory), timeout_seconds=settings.database.job_store_timeout_seconds
+    )
+    housekeeping = PostgresJobHousekeeping(session_factory)
+    ctx[SWEEP_STALE_JOBS_KEY] = build_sweep(store, housekeeping, settings)
+    ctx[ENFORCE_JOB_RETENTION_KEY] = build_retention(housekeeping, settings)
     ctx[RUN_GENERATION_KEY] = RunGeneration(
-        store=BoundedJobStore(
-            PostgresJobStore(create_session_factory(engine)),
-            timeout_seconds=settings.database.job_store_timeout_seconds,
-        ),
+        store=store,
         cache=build_result_cache(from_context(ctx, REDIS_KEY, Redis), settings),
         retriever=retriever,
         parser=CleaningSourceParser(max_characters=settings.providers.search_max_source_characters),

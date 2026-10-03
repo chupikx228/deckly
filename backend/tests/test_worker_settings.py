@@ -1,11 +1,20 @@
+import logging
+from datetime import datetime, timedelta
 from typing import get_args
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from arq.worker import create_worker
 from pydantic import AnyHttpUrl, SecretStr
 
-from deckly.config import ModelProvider, ProviderSettings
+from deckly.application.housekeeping import (
+    EnforceJobRetention,
+    RetentionPolicy,
+    StalenessPolicy,
+    SweepStaleJobs,
+)
+from deckly.config import ModelProvider, ProviderSettings, SweepSettings
+from deckly.domain.job import GenerationJob, JobStatus
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.llm.anthropic_client import AnthropicLlmClient
 from deckly.infrastructure.llm.deepseek_client import DeepSeekLlmClient
@@ -16,27 +25,38 @@ from deckly.infrastructure.resilience import ResilientCaller
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
 from deckly.worker.settings import (
+    ENFORCE_JOB_RETENTION_KEY,
+    HOUSEKEEPING_TASK,
     LLM_CLIENT_KEY,
     LLM_CLIENTS,
     MEDIA_FETCHER_KEY,
     MODERATION_LLM_CLIENT_KEY,
     SOURCE_RETRIEVER_KEY,
+    SWEEP_STALE_JOBS_KEY,
     WorkerContext,
     WorkerSettings,
     build_llm_client,
     build_media_fetcher,
     build_moderation_llm_client,
     build_source_retriever,
+    housekeeping_cron_jobs,
     moderation_llm_client,
+    run_housekeeping,
     shutdown,
 )
+from tests.domain.builders import T0
 from tests.fakes import (
     MEDIA_LIMITS,
     SEARCH_POLICY,
     FakeImageSearchClient,
     FakeLlmClient,
     FakeSearchClient,
+    InMemoryJobHousekeeping,
+    InMemoryJobStore,
     ManualTime,
+    generation_request,
+    job_id,
+    scope,
 )
 
 pytestmark = pytest.mark.anyio
@@ -192,3 +212,76 @@ async def test_shutdown_closes_the_moderation_client_even_when_closing_the_model
         await shutdown(ctx)
 
     assert moderation.closed
+
+
+def sweep_settings(interval_minutes: int) -> SweepSettings:
+    return SweepSettings(
+        interval_minutes=interval_minutes,
+        running_stale_after_seconds=900,
+        queued_stale_after_seconds=3600,
+        batch_size=500,
+    )
+
+
+@pytest.mark.parametrize(
+    ("interval_minutes", "minutes"),
+    [(5, set(range(0, 60, 5))), (15, {0, 15, 30, 45}), (60, {0}), (1, set(range(60)))],
+)
+def test_housekeeping_runs_on_every_interval_boundary_of_the_hour_and_never_overlaps_itself(
+    interval_minutes: int, minutes: set[int]
+) -> None:
+    [job] = housekeeping_cron_jobs(sweep_settings(interval_minutes))
+
+    assert job.name == HOUSEKEEPING_TASK
+    assert job.minute == minutes
+    assert job.second == 0
+    assert job.timeout_s == interval_minutes * 60
+    assert job.unique is True
+    assert job.run_at_startup is False
+
+
+async def test_housekeeping_is_registered_with_the_arq_worker_next_to_the_generation_task() -> None:
+    worker = create_worker(
+        WorkerSettings, cron_jobs=housekeeping_cron_jobs(sweep_settings(5)), handle_signals=False
+    )
+
+    assert HOUSEKEEPING_TASK in worker.functions
+    assert [cron_job.name for cron_job in worker.cron_jobs] == [HOUSEKEEPING_TASK]
+
+
+class UnreachableHousekeeping(InMemoryJobHousekeeping):
+    async def stale(self, status: JobStatus, updated_before: datetime, limit: int) -> tuple[UUID, ...]:
+        del status, updated_before, limit
+        message = "database unreachable"
+        raise ConnectionError(message)
+
+
+async def test_housekeeping_still_enforces_retention_when_the_stale_sweep_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = InMemoryJobStore()
+    await store.add(GenerationJob.queue(job_id(1), T0), generation_request(), scope())
+    now = T0 + timedelta(days=2)
+    ctx: WorkerContext = {
+        SWEEP_STALE_JOBS_KEY: SweepStaleJobs(
+            store=store,
+            housekeeping=UnreachableHousekeeping(store),
+            policy=StalenessPolicy(running_after=timedelta(minutes=15), queued_after=timedelta(hours=1)),
+            batch_size=10,
+            clock=lambda: now,
+        ),
+        ENFORCE_JOB_RETENTION_KEY: EnforceJobRetention(
+            housekeeping=InMemoryJobHousekeeping(store),
+            policy=RetentionPolicy(idempotency_key_ttl=timedelta(days=1), job_retention=timedelta(days=1)),
+            batch_size=10,
+            clock=lambda: now,
+        ),
+    }
+
+    with caplog.at_level(logging.ERROR, logger="deckly.worker.settings"):
+        await run_housekeeping(ctx)
+
+    assert await store.find(scope()) is None
+    assert [(record.message, record.__dict__["step"]) for record in caplog.records] == [
+        ("housekeeping_step_failed", SWEEP_STALE_JOBS_KEY)
+    ]

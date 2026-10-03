@@ -6,7 +6,7 @@ from uuid import UUID
 
 from deckly.domain.deck import GenerationResult
 from deckly.domain.generation import GenerationRequest
-from deckly.domain.job import GenerationJob
+from deckly.domain.job import GenerationJob, JobStatus
 from deckly.domain.media import Media
 from deckly.domain.notes.note import Note
 from deckly.domain.regeneration import RegenerationRequest
@@ -82,6 +82,14 @@ class JobStore(Protocol):
     async def get_stored(self, job_id: UUID) -> StoredJob | None: ...
 
     async def update(self, job_id: UUID, transition: JobTransition) -> GenerationJob | None: ...
+
+
+class JobHousekeeping(Protocol):
+    async def stale(self, status: JobStatus, updated_before: datetime, limit: int) -> tuple[UUID, ...]: ...
+
+    async def release_idempotency_keys(self, created_before: datetime, limit: int) -> int: ...
+
+    async def purge_finished(self, finished_before: datetime, limit: int) -> int: ...
 
 
 class ResultCache(Protocol):
