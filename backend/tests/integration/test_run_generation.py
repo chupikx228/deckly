@@ -21,7 +21,7 @@ from deckly.infrastructure.database import create_engine, create_session_factory
 from deckly.infrastructure.job_store import PostgresJobStore
 from deckly.main import API_PREFIX, create_app
 from tests.domain.builders import FULL_RESULT, T0, basic_note, result_with
-from tests.fakes import FakeProviders, RecordingJobQueue, generation_request
+from tests.fakes import FakeProviders, InMemoryResultCache, RecordingJobQueue, generation_request
 from tests.integration.conftest import Cleanup
 from tests.transport.openapi import spec_errors
 
@@ -45,6 +45,7 @@ def client(settings: Settings) -> Iterator[TestClient]:
 def pipeline(store: JobStore, providers: FakeProviders) -> RunGeneration:
     return RunGeneration(
         store=store,
+        cache=InMemoryResultCache(),
         retriever=providers,
         parser=providers,
         generator=providers,

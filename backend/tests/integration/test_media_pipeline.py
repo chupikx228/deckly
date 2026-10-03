@@ -20,6 +20,7 @@ from tests.domain.builders import T0
 from tests.fakes import (
     FakeLlmClient,
     FakeProviders,
+    InMemoryResultCache,
     ManualTime,
     commons_fetcher,
     commons_page,
@@ -62,6 +63,7 @@ async def run_with(
     media = commons_fetcher(handler, ManualTime())
     run = RunGeneration(
         store=store,
+        cache=InMemoryResultCache(),
         retriever=providers,
         parser=providers,
         generator=LlmCardGenerator(

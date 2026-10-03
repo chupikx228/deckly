@@ -16,6 +16,7 @@ from tests.fakes import (
     FakeLlmClient,
     FakeProviders,
     InMemoryJobStore,
+    InMemoryResultCache,
     ManualTime,
     generation_request,
     model_reply,
@@ -56,6 +57,7 @@ class Pipeline:
         providers = FakeProviders()
         self.run = RunGeneration(
             store=self.store,
+            cache=InMemoryResultCache(),
             retriever=self.retriever,
             parser=parser,
             generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),

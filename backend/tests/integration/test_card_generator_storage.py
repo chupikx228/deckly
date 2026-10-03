@@ -13,7 +13,7 @@ from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.job_store import PostgresJobStore
 from tests.domain.builders import T0
-from tests.fakes import FakeLlmClient, FakeProviders, generation_request, model_reply
+from tests.fakes import FakeLlmClient, FakeProviders, InMemoryResultCache, generation_request, model_reply
 from tests.integration.conftest import Cleanup
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -39,6 +39,7 @@ async def test_generated_text_with_nul_and_lone_surrogates_is_stored_and_read_ba
     providers = FakeProviders()
     run = RunGeneration(
         store=store,
+        cache=InMemoryResultCache(),
         retriever=providers,
         parser=providers,
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),

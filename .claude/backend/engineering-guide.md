@@ -254,7 +254,17 @@ The model and search providers _will_ be slow, rate-limited or down. Design for 
   hashing it into the cache key.
 - Cache the _validated domain result_, not raw provider output.
 - Media URLs must stay valid ≥24h (the client caches media locally); a cache entry pointing at
-  an expired URL is worse than a miss.
+  an expired URL is worse than a miss. The cache TTL (`DECKLY_CACHE_GENERATION_RESULT_TTL_SECONDS`,
+  default 12h) is therefore validated at startup to stay below 24h, rather than re-checking media
+  on every hit.
+- The key covers every request field that shapes the output: `topic` (NFC, whitespace collapsed,
+  case kept), `language` (lowercased), `cardCount`, `difficulty`, sorted `noteTypes`,
+  `includeImages` and `instructions`. It is hashed, so request text never appears in a Redis key.
+- The check runs in the worker right after the job is claimed, so a hit walks the normal job state
+  machine. The cache fails **open**: a Redis outage, timeout or corrupt entry is a miss, and a
+  failed write is logged and ignored. This is the opposite of the quota check, which fails closed
+  because it guards spend. Only fully successful results are stored; a deck whose media step failed
+  is returned but not cached, so an image outage is not pinned for the whole TTL.
 
 ## Rate limiting and abuse
 

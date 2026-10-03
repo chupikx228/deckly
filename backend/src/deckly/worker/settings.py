@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from arq.cron import CronJob
 from arq.typing import StartupShutdown, WorkerCoroutine
 from arq.worker import Function, func
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from deckly.application.pipeline import RunGeneration
@@ -25,12 +26,14 @@ from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
 from deckly.infrastructure.queue import GENERATION_TASK
 from deckly.infrastructure.resilience import CircuitBreaker, ResilientCaller, RetryPolicy, RetryRuntime
+from deckly.infrastructure.result_cache import RedisResultCache, ResultCacheLimits
 from deckly.infrastructure.search.client import SearchEndpoint
 from deckly.infrastructure.search.parser import CleaningSourceParser
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
 
 SETTINGS_KEY = "settings"
+REDIS_KEY = "redis"
 ENGINE_KEY = "engine"
 LLM_CLIENT_KEY = "llm_client"
 SOURCE_RETRIEVER_KEY = "source_retriever"
@@ -141,6 +144,16 @@ def build_media_fetcher(providers: ProviderSettings) -> CommonsMediaFetcher:
     )
 
 
+def build_result_cache(redis: Redis, settings: Settings) -> RedisResultCache:
+    return RedisResultCache(
+        redis,
+        ResultCacheLimits(
+            ttl_seconds=settings.cache.generation_result_ttl_seconds,
+            command_timeout_seconds=settings.redis.connect_timeout_seconds,
+        ),
+    )
+
+
 async def run_generation(ctx: WorkerContext, job_id: str) -> None:
     await from_context(ctx, RUN_GENERATION_KEY, RunGeneration)(UUID(job_id))
 
@@ -166,6 +179,7 @@ async def startup(ctx: WorkerContext) -> None:
             PostgresJobStore(create_session_factory(engine)),
             timeout_seconds=settings.database.job_store_timeout_seconds,
         ),
+        cache=build_result_cache(from_context(ctx, REDIS_KEY, Redis), settings),
         retriever=retriever,
         parser=CleaningSourceParser(max_characters=settings.providers.search_max_source_characters),
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),

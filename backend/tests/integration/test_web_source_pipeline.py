@@ -19,6 +19,7 @@ from tests.domain.builders import MOSCOW, T0
 from tests.fakes import (
     FakeLlmClient,
     FakeProviders,
+    InMemoryResultCache,
     ManualTime,
     generation_request,
     model_reply,
@@ -46,6 +47,7 @@ async def run_with(
     providers = FakeProviders()
     run = RunGeneration(
         store=store,
+        cache=InMemoryResultCache(),
         retriever=retriever,
         parser=parser,
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),

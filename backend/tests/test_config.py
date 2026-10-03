@@ -8,6 +8,7 @@ from deckly.config import (
     MAX_MEDIA_CANDIDATES,
     MAX_MEDIA_CONCURRENCY,
     MAX_MEDIA_IMAGES,
+    MEDIA_URL_MIN_VALIDITY_SECONDS,
     AppSettings,
     CacheSettings,
     DatabaseSettings,
@@ -531,3 +532,34 @@ def test_address_limit_is_required(clean_environment: pytest.MonkeyPatch) -> Non
 
     with pytest.raises(ValidationError, match="generation_jobs_per_address_per_day"):
         LimitSettings()
+
+
+def test_generation_result_ttl_is_read_from_the_environment(clean_environment: pytest.MonkeyPatch) -> None:
+    clean_environment.setenv("DECKLY_CACHE_GENERATION_RESULT_TTL_SECONDS", "43200")
+    clean_environment.setenv("DECKLY_CACHE_IDEMPOTENCY_KEY_TTL_SECONDS", "86400")
+    clean_environment.setenv("DECKLY_CACHE_JOB_RETENTION_SECONDS", "86400")
+
+    assert CacheSettings().generation_result_ttl_seconds == 43200
+
+
+@pytest.mark.parametrize("ttl_seconds", [1, 43200, MEDIA_URL_MIN_VALIDITY_SECONDS - 1])
+def test_generation_result_ttl_below_the_media_validity_window_is_accepted(
+    clean_environment: pytest.MonkeyPatch, ttl_seconds: int
+) -> None:
+    clean_environment.setenv("DECKLY_CACHE_GENERATION_RESULT_TTL_SECONDS", str(ttl_seconds))
+    clean_environment.setenv("DECKLY_CACHE_IDEMPOTENCY_KEY_TTL_SECONDS", "86400")
+    clean_environment.setenv("DECKLY_CACHE_JOB_RETENTION_SECONDS", "86400")
+
+    assert CacheSettings().generation_result_ttl_seconds == ttl_seconds
+
+
+@pytest.mark.parametrize("ttl_seconds", ["0", "-1", str(MEDIA_URL_MIN_VALIDITY_SECONDS), "604800", "soon"])
+def test_generation_result_ttl_that_could_outlive_media_urls_is_rejected(
+    clean_environment: pytest.MonkeyPatch, ttl_seconds: str
+) -> None:
+    clean_environment.setenv("DECKLY_CACHE_GENERATION_RESULT_TTL_SECONDS", ttl_seconds)
+    clean_environment.setenv("DECKLY_CACHE_IDEMPOTENCY_KEY_TTL_SECONDS", "86400")
+    clean_environment.setenv("DECKLY_CACHE_JOB_RETENTION_SECONDS", "86400")
+
+    with pytest.raises(ValidationError, match="generation_result_ttl_seconds"):
+        CacheSettings()

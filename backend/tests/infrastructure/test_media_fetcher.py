@@ -339,6 +339,7 @@ async def run_with_commons(
     time = ManualTime()
     run = RunGeneration(
         store=harness.store,
+        cache=harness.cache,
         retriever=harness.providers,
         parser=harness.providers,
         generator=harness.providers,
@@ -430,6 +431,7 @@ async def test_bug_in_the_media_adapter_still_yields_a_succeeded_job(
     fetcher, _ = fetcher_with(RuntimeError("client bug"))
     run = RunGeneration(
         store=harness.store,
+        cache=harness.cache,
         retriever=harness.providers,
         parser=harness.providers,
         generator=harness.providers,

@@ -32,11 +32,13 @@ from deckly.infrastructure.resilience import (
     RetryPolicy,
     RetryRuntime,
 )
+from deckly.infrastructure.result_cache import RedisResultCache
 from deckly.infrastructure.search.parser import CleaningSourceParser
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.worker.settings import (
     LLM_CLIENT_KEY,
     MEDIA_FETCHER_KEY,
+    REDIS_KEY,
     RUN_GENERATION_KEY,
     SETTINGS_KEY,
     SOURCE_RETRIEVER_KEY,
@@ -51,6 +53,7 @@ from tests.fakes import (
     MODEL_THINKING_SECONDS,
     FakeLlmClient,
     FakeProviders,
+    InMemoryResultCache,
     SlowModel,
     generation_request,
     model_reply,
@@ -100,6 +103,7 @@ def context_with(store: PostgresJobStore, providers: FakeProviders) -> WorkerCon
     return {
         RUN_GENERATION_KEY: RunGeneration(
             store=store,
+            cache=InMemoryResultCache(),
             retriever=providers,
             parser=providers,
             generator=providers,
@@ -146,8 +150,10 @@ async def test_task_of_a_job_cancelled_while_it_waited_in_the_queue_calls_no_por
     assert providers.calls == []
 
 
-async def test_worker_startup_wires_the_web_source_retriever_and_parser(settings: Settings) -> None:
-    ctx: WorkerContext = {SETTINGS_KEY: settings}
+async def test_worker_startup_wires_the_web_source_retriever_and_parser(
+    settings: Settings, queue_pool: ArqRedis
+) -> None:
+    ctx: WorkerContext = {SETTINGS_KEY: settings, REDIS_KEY: queue_pool}
 
     await startup(ctx)
     try:
@@ -162,9 +168,9 @@ async def test_worker_startup_wires_the_web_source_retriever_and_parser(settings
 
 
 async def test_worker_startup_wires_the_commons_media_fetcher_in_place_of_any_stub(
-    settings: Settings,
+    settings: Settings, queue_pool: ArqRedis
 ) -> None:
-    ctx: WorkerContext = {SETTINGS_KEY: settings}
+    ctx: WorkerContext = {SETTINGS_KEY: settings, REDIS_KEY: queue_pool}
 
     await startup(ctx)
     try:
@@ -179,9 +185,9 @@ async def test_worker_startup_wires_the_commons_media_fetcher_in_place_of_any_st
 
 
 async def test_worker_startup_wires_the_llm_card_generator_behind_the_resilience_layer(
-    settings: Settings,
+    settings: Settings, queue_pool: ArqRedis
 ) -> None:
-    ctx: WorkerContext = {SETTINGS_KEY: settings}
+    ctx: WorkerContext = {SETTINGS_KEY: settings, REDIS_KEY: queue_pool}
 
     await startup(ctx)
     try:
@@ -192,6 +198,20 @@ async def test_worker_startup_wires_the_llm_card_generator_behind_the_resilience
 
     assert isinstance(run.generator, LlmCardGenerator)
     assert run.generator.llm is llm
+
+
+async def test_worker_startup_wires_the_redis_result_cache_with_the_configured_ttl(
+    settings: Settings, queue_pool: ArqRedis
+) -> None:
+    ctx: WorkerContext = {SETTINGS_KEY: settings, REDIS_KEY: queue_pool}
+
+    await startup(ctx)
+    try:
+        run = from_context(ctx, RUN_GENERATION_KEY, RunGeneration)
+    finally:
+        await shutdown(ctx)
+
+    assert isinstance(run.cache, RedisResultCache)
 
 
 async def test_job_that_outlives_the_arq_timeout_ends_failed_instead_of_running_forever(
@@ -235,6 +255,7 @@ async def test_cancelling_a_running_job_aborts_its_model_call_inside_the_arq_wor
     providers = FakeProviders()
     run = RunGeneration(
         store=store,
+        cache=InMemoryResultCache(),
         retriever=providers,
         parser=providers,
         generator=LlmCardGenerator(

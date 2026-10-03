@@ -26,7 +26,7 @@ from deckly.application.ports import (
 )
 from deckly.application.regeneration import RegenerateNote
 from deckly.domain.deck import GenerationResult
-from deckly.domain.generation import Difficulty, GenerationRequest
+from deckly.domain.generation import Difficulty, GenerationFingerprint, GenerationRequest
 from deckly.domain.job import GenerationJob, JobStage
 from deckly.domain.media import Media, MediaKind
 from deckly.domain.notes.note import Note
@@ -368,6 +368,27 @@ class InMemoryJobStore:
         self.jobs[job.job_id] = job
 
 
+class InMemoryResultCache:
+    def __init__(self) -> None:
+        self.entries: dict[GenerationFingerprint, GenerationResult] = {}
+        self.reads: list[GenerationRequest] = []
+        self.writes: list[tuple[GenerationRequest, GenerationResult]] = []
+        self.read_failure: Exception | None = None
+        self.write_failure: Exception | None = None
+
+    async def get(self, request: GenerationRequest) -> GenerationResult | None:
+        self.reads.append(request)
+        if self.read_failure is not None:
+            raise self.read_failure
+        return self.entries.get(request.fingerprint())
+
+    async def put(self, request: GenerationRequest, result: GenerationResult) -> None:
+        self.writes.append((request, result))
+        if self.write_failure is not None:
+            raise self.write_failure
+        self.entries[request.fingerprint()] = result
+
+
 class RecordingJobQueue:
     def __init__(self) -> None:
         self.enqueued: list[UUID] = []
@@ -484,6 +505,7 @@ class Harness:
         self.store = InMemoryJobStore() if store is None else store
         self.queue = RecordingJobQueue() if queue is None else queue
         self.providers = FakeProviders()
+        self.cache = InMemoryResultCache()
         self.quota = InMemoryQuota()
         self.now = T0
         ids = sequential_job_ids()
@@ -498,6 +520,7 @@ class Harness:
         self.cancel = CancelGeneration(store=self.store, queue=self.queue, clock=lambda: self.now)
         self.run = RunGeneration(
             store=self.store,
+            cache=self.cache,
             retriever=self.providers,
             parser=self.providers,
             generator=self.providers,
