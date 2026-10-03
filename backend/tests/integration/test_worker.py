@@ -107,6 +107,7 @@ def context_with(store: PostgresJobStore, providers: FakeProviders) -> WorkerCon
             retriever=providers,
             parser=providers,
             generator=providers,
+            moderator=providers,
             media=providers,
             clock=utc_now,
         )
@@ -261,6 +262,7 @@ async def test_cancelling_a_running_job_aborts_its_model_call_inside_the_arq_wor
         generator=LlmCardGenerator(
             llm=patient_llm(model, breaker), new_id=uuid4, handlers=NOTE_TYPE_HANDLERS
         ),
+        moderator=providers,
         media=providers,
         clock=utc_now,
     )

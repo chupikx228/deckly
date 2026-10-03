@@ -51,6 +51,7 @@ async def run_with(
         retriever=retriever,
         parser=parser,
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),
+        moderator=providers,
         media=providers,
         clock=utc_now,
     )

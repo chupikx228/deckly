@@ -19,7 +19,8 @@ from deckly.infrastructure.quota import (
     client_key,
 )
 from deckly.main import API_PREFIX, create_app
-from tests.integration.conftest import Cleanup, purge_quota, with_generation_limits
+from tests.fakes import FakeTopicModerator
+from tests.integration.conftest import Cleanup, purge_quota, screen_topics_with, with_generation_limits
 from tests.integration.test_health_endpoint import LOOPBACK, Proxy
 from tests.transport.openapi import spec_errors
 
@@ -323,8 +324,13 @@ def assert_rate_limited(response: httpx2.Response) -> None:
 
 
 @pytest.fixture
+def topic_moderator() -> FakeTopicModerator:
+    return FakeTopicModerator()
+
+
+@pytest.fixture
 async def app_client(
-    settings: Settings, restored_logging: None, requesters: Requesters
+    settings: Settings, restored_logging: None, requesters: Requesters, topic_moderator: FakeTopicModerator
 ) -> AsyncIterator[tuple[httpx2.AsyncClient, str]]:
     del restored_logging
     address = unique_ipv4()
@@ -335,7 +341,51 @@ async def app_client(
         app.router.lifespan_context(app),
         httpx2.AsyncClient(transport=transport, base_url="http://deckly") as client,
     ):
+        screen_topics_with(app, topic_moderator)
         yield client, address
+
+
+async def test_app_rejects_a_policy_violating_topic_with_a_422_stores_nothing_and_spends_a_unit(
+    app_client: tuple[httpx2.AsyncClient, str],
+    cleanup: Cleanup,
+    requesters: Requesters,
+    topic_moderator: FakeTopicModerator,
+) -> None:
+    client, address = app_client
+    client_id, key = uuid4(), uuid4()
+    requesters.track(Requester(client_id=client_id, address=address))
+    topic_moderator.outcome = False
+
+    rejected = await post(client, cleanup, headers(client_id, key))
+    health = await client.get(HEALTH, headers={"X-Client-Id": str(client_id)})
+    topic_moderator.outcome = True
+    accepted = await post(client, cleanup, headers(client_id, key))
+
+    assert rejected.status_code == HTTPStatus.UNPROCESSABLE_ENTITY, rejected.text
+    assert spec_errors("Problem", rejected.json()) == []
+    assert rejected.json()["code"] == "TOPIC_REJECTED"
+    assert health.json()["quota"]["remaining"] == 1
+    assert accepted.status_code == HTTPStatus.ACCEPTED, accepted.text
+    assert accepted.json()["quota"]["remaining"] == 0
+
+
+async def test_app_gives_the_unit_back_when_the_topic_cannot_be_checked(
+    app_client: tuple[httpx2.AsyncClient, str],
+    cleanup: Cleanup,
+    requesters: Requesters,
+    topic_moderator: FakeTopicModerator,
+) -> None:
+    client, address = app_client
+    client_id = uuid4()
+    requesters.track(Requester(client_id=client_id, address=address))
+    topic_moderator.outcome = UpstreamUnavailableError(5)
+
+    refused = await post(client, cleanup, headers(client_id))
+
+    assert refused.status_code == HTTPStatus.SERVICE_UNAVAILABLE, refused.text
+    assert refused.json()["code"] == "UPSTREAM_UNAVAILABLE"
+    health = await client.get(HEALTH, headers={"X-Client-Id": str(client_id)})
+    assert health.json()["quota"]["remaining"] == 2
 
 
 async def test_app_charges_a_new_job_once_and_reports_the_same_quota_on_health(

@@ -43,6 +43,7 @@ async def test_generated_text_with_nul_and_lone_surrogates_is_stored_and_read_ba
         retriever=providers,
         parser=providers,
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),
+        moderator=providers,
         media=providers,
         clock=utc_now,
     )

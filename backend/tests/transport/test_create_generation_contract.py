@@ -17,7 +17,7 @@ from deckly.transport.generations import CLIENT_ID_HEADER, IDEMPOTENCY_KEY_HEADE
 from deckly.transport.problem import PROBLEM_JSON_MEDIA_TYPE
 from tests.domain.builders import unregister
 from tests.fakes import QUOTA_LIMIT, QUOTA_RETRY_AFTER_SECONDS, Harness
-from tests.transport.openapi import spec_errors
+from tests.transport.openapi import declared_responses, spec_errors
 
 ENDPOINT = f"{API_PREFIX}/generations"
 CLIENT_ID = "0b6f7c1e-4a3d-4f2e-9c8b-7a6d5e4f3a21"
@@ -538,3 +538,50 @@ def test_same_key_from_a_different_client_is_a_different_job() -> None:
     assert_created(other)
     assert other.json()["jobId"] != first.json()["jobId"]
     assert len(harness.store.jobs) == 2
+
+
+def test_topic_the_policy_rejects_is_a_422_problem_the_spec_declares() -> None:
+    harness = Harness()
+    harness.moderator.outcome = False
+
+    response = post(build_client(harness), MINIMAL)
+
+    assert "422" in declared_responses("/generations", "post")
+    assert_problem(response, HTTPStatus.UNPROCESSABLE_ENTITY, "TOPIC_REJECTED")
+    assert "retryAfterSeconds" not in response.json()
+    assert RETRY_AFTER_HEADER not in response.headers
+    assert harness.store.jobs == {}
+    assert harness.queue.enqueued == []
+
+
+def test_rejected_topic_problem_does_not_echo_the_topic() -> None:
+    harness = Harness()
+    harness.moderator.outcome = False
+    topic = "a topic that must not be echoed back"
+
+    response = post(build_client(harness), with_(topic=topic))
+
+    assert topic not in response.text
+
+
+def test_classifier_outage_is_a_503_with_when_to_retry_and_stores_nothing() -> None:
+    harness = Harness()
+    harness.moderator.outcome = UpstreamUnavailableError(5)
+
+    response = post(build_client(harness), MINIMAL)
+
+    assert "503" in declared_responses("/generations", "post")
+    assert_problem(response, HTTPStatus.SERVICE_UNAVAILABLE, "UPSTREAM_UNAVAILABLE")
+    assert response.json()["retryAfterSeconds"] == 5
+    assert response.headers[RETRY_AFTER_HEADER] == "5"
+    assert harness.store.jobs == {}
+    assert harness.quota.used_by_client[UUID(CLIENT_ID)] == 0
+
+
+def test_body_the_spec_rejects_is_refused_before_the_topic_is_screened() -> None:
+    harness = Harness()
+
+    response = post(build_client(harness), with_(topic="ab"))
+
+    assert_validation_failed(response)
+    assert harness.moderator.screened == []

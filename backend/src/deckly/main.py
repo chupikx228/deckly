@@ -1,5 +1,5 @@
 from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -19,6 +19,7 @@ from deckly.infrastructure.job_store import BoundedJobStore, PostgresJobStore
 from deckly.infrastructure.llm.client import LlmClient, LlmEndpoint
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.logging import configure_logging
+from deckly.infrastructure.moderation.moderator import LlmTopicModerator
 from deckly.infrastructure.provider_faults import UpstreamFaultRegenerator, UpstreamFaultRetriever
 from deckly.infrastructure.queue import ArqJobQueue, create_queue_pool, create_redis_settings
 from deckly.infrastructure.quota import QuotaLimits, RedisGenerationQuota
@@ -30,7 +31,7 @@ from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
 from deckly.transport import generations, health, notes
 from deckly.transport.error_handlers import register_error_handlers
-from deckly.worker.settings import LLM_CLIENTS, resilient_caller
+from deckly.worker.settings import LLM_CLIENTS, moderation_llm_client, resilient_caller
 
 API_PREFIX = "/v1"
 SERVICE_TITLE = "Deckly generation service"
@@ -66,6 +67,20 @@ def regeneration_llm_client(settings: Settings) -> LlmClient:
         timeout_seconds=settings.regenerate.model_timeout_seconds,
     )
     return LLM_CLIENTS[settings.providers.model_provider](endpoint)
+
+
+def build_topic_moderator(settings: Settings, llm: LlmClient) -> LlmTopicModerator:
+    providers = settings.providers
+    caller = resilient_caller(
+        single_attempt(
+            providers.moderation_timeout_seconds,
+            base_delay_seconds=providers.model_retry_base_delay_seconds,
+            max_delay_seconds=providers.model_retry_max_delay_seconds,
+        ),
+        failure_threshold=providers.model_circuit_failure_threshold,
+        reset_seconds=providers.model_circuit_reset_seconds,
+    )
+    return LlmTopicModerator(llm=ResilientLlmClient(llm, caller, providers.moderation_max_output_tokens))
 
 
 def regeneration_search_client(settings: Settings) -> SearchClient:
@@ -160,13 +175,6 @@ def build_lifespan(settings: Settings) -> Lifespan:
                         command_timeout_seconds=settings.redis.connect_timeout_seconds,
                     ),
                 )
-                app.state.create_generation = CreateGeneration(
-                    store=store,
-                    queue=jobs,
-                    quota=quota,
-                    clock=utc_now,
-                    new_job_id=uuid4,
-                )
                 app.state.check_health = CheckHealth(
                     probes=(
                         postgres_probe(
@@ -180,26 +188,35 @@ def build_lifespan(settings: Settings) -> Lifespan:
                 )
                 app.state.get_generation = GetGeneration(store=store)
                 app.state.cancel_generation = CancelGeneration(store=store, queue=jobs, clock=utc_now)
-                llm = regeneration_llm_client(settings)
-                try:
+                async with AsyncExitStack() as clients:
+                    llm = regeneration_llm_client(settings)
+                    clients.push_async_callback(llm.aclose)
                     search = regeneration_search_client(settings)
-                    try:
-                        window = RegenerationWindow(
-                            limit=settings.limits.note_regenerations_per_window,
-                            window_seconds=settings.limits.note_regeneration_window_seconds,
-                            command_timeout_seconds=settings.regenerate.rate_limit_timeout_seconds,
-                        )
-                        app.state.regenerate_note = build_regenerate_note(
-                            settings,
-                            RegenerationClients(
-                                llm=llm, search=search, limiter=RedisRegenerationLimiter(queue, window)
-                            ),
-                        )
-                        yield
-                    finally:
-                        await search.aclose()
-                finally:
-                    await llm.aclose()
+                    clients.push_async_callback(search.aclose)
+                    moderation_llm = moderation_llm_client(
+                        settings.providers, settings.providers.moderation_timeout_seconds
+                    )
+                    clients.push_async_callback(moderation_llm.aclose)
+                    app.state.create_generation = CreateGeneration(
+                        store=store,
+                        queue=jobs,
+                        quota=quota,
+                        moderator=build_topic_moderator(settings, moderation_llm),
+                        clock=utc_now,
+                        new_job_id=uuid4,
+                    )
+                    window = RegenerationWindow(
+                        limit=settings.limits.note_regenerations_per_window,
+                        window_seconds=settings.limits.note_regeneration_window_seconds,
+                        command_timeout_seconds=settings.regenerate.rate_limit_timeout_seconds,
+                    )
+                    app.state.regenerate_note = build_regenerate_note(
+                        settings,
+                        RegenerationClients(
+                            llm=llm, search=search, limiter=RedisRegenerationLimiter(queue, window)
+                        ),
+                    )
+                    yield
             finally:
                 await queue.aclose()
         finally:

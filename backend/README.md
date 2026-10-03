@@ -351,6 +351,31 @@ they were. An image outage therefore never fails a job and never produces `PROVI
 The port returns attachments keyed by `clientId`, never notes, so a media adapter cannot drop or
 duplicate a note; attachments for unknown notes are ignored and a repeated `mediaId` is kept once.
 
+## Content safety
+
+`infrastructure/moderation/` screens topics and generated content against one content policy
+(`moderation/prompt.py`), using the configured model provider with a separate, cheap model
+(`DECKLY_PROVIDER_MODERATION_MODEL_NAME`, `claude-haiku-4-5` in `.env.example`). Untrusted text
+reaches the classifier as a JSON document, so it cannot break out of its delimiters.
+
+- **Topic check** (`LlmTopicModerator`, wired in `main.py`): runs in `POST /generations` after the
+  quota is reserved and before the job is stored. The topic and the `instructions` are judged
+  together. A block is `422 TOPIC_REJECTED` and spends the quota unit. There is one attempt,
+  bounded by `DECKLY_PROVIDER_MODERATION_TIMEOUT_SECONDS` (default 2 s, at most 10). A timeout,
+  provider error or unreadable verdict is `503 UPSTREAM_UNAVAILABLE` and gives the unit back.
+  Published latency for Haiku 4.5 is roughly 0.6–0.8 s to the first token, so the request
+  normally takes about 1 s rather than the 500 ms it took before this check.
+- **Generated-content filter** (`LlmContentModerator`, wired in the worker): one batched call
+  per job after `generating_cards`, before media. A note is kept only on an explicit `"allow"`;
+  a missing or unreadable verdict drops it. A deck title that is not allowed is replaced with the
+  topic. Retries follow `DECKLY_PROVIDER_MODERATION_FILTER_{TIMEOUT_SECONDS,DEADLINE_SECONDS,
+MAX_ATTEMPTS}`; the deadline counts towards the generation job timeout. Results are cached after
+  filtering, and a cache hit is not screened again.
+
+Both checks fail closed: a refusal from the classifier counts as a block. Circuit-breaker and
+retry-delay settings are shared with `DECKLY_PROVIDER_MODEL_*`, but each check has its own
+breaker. `POST /v1/notes/regenerate` is not screened yet (DEC-47).
+
 ## Checks
 
 ```bash

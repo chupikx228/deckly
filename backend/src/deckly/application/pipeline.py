@@ -8,6 +8,7 @@ from deckly.application.exceptions import JobStoppedError, NoValidContentError, 
 from deckly.application.generations import Clock
 from deckly.application.ports import (
     CardGenerator,
+    ContentModerator,
     ImageQuery,
     JobStore,
     JobTransition,
@@ -101,6 +102,7 @@ class RunGeneration:
     retriever: SourceRetriever
     parser: SourceParser
     generator: CardGenerator
+    moderator: ContentModerator
     media: MediaFetcher
     clock: Clock
 
@@ -146,7 +148,7 @@ class RunGeneration:
         material = await self.parser.parse(job_id, request, pages)
         await self._enter(job_id, JobStage.GENERATING_CARDS)
         cards = await self.generator.generate(job_id, request, material)
-        result = require_notes(cards.result)
+        result = require_notes(await self.moderator.screen(job_id, request, require_notes(cards.result)))
         cacheable = True
         if request.include_images:
             await self._enter(job_id, JobStage.FETCHING_MEDIA)

@@ -475,7 +475,10 @@ carry an `Allow` header listing the methods the path does accept.
 
 ## Non-functional requirements
 
-- `POST /generations` responds in under 500 ms; it only enqueues.
+- `POST /generations` responds in under 500 ms plus the topic check, which is bounded by
+  `DECKLY_PROVIDER_MODERATION_TIMEOUT_SECONDS` (default 2 s). Apart from that check it only
+  enqueues. A check that does not finish in time is `503 UPSTREAM_UNAVAILABLE`, never a silent
+  pass.
 - `GET /generations/{jobId}` responds in under 200 ms and is cheap enough to poll every 2
   seconds per client.
 - Jobs are retained for at least 24 hours after completion so a user who backgrounded the

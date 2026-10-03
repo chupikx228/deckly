@@ -81,6 +81,7 @@ MATERIAL = (SourceMaterial(source=SOURCES[0], text="A red triangle warns of dang
 GENERATED = result_with(basic_note(1), basic_note(2), basic_note(3))
 
 type Hook = Callable[[], Awaitable[object]]
+type TopicOutcome = bool | Exception | Callable[[], Awaitable[bool]]
 type LlmOutcome = LlmReply | Exception | Callable[[], Awaitable[LlmReply]]
 type SearchOutcome = tuple[SearchHit, ...] | Exception | Callable[[], Awaitable[tuple[SearchHit, ...]]]
 type ImageOutcome = (
@@ -448,9 +449,26 @@ class InMemoryQuota:
             raise self.failure
 
 
+class FakeTopicModerator:
+    def __init__(self) -> None:
+        self.outcome: TopicOutcome = True
+        self.screened: list[GenerationRequest] = []
+
+    async def allows(self, request: GenerationRequest) -> bool:
+        self.screened.append(request)
+        if isinstance(self.outcome, bool):
+            return self.outcome
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return await self.outcome()
+
+
 class FakeProviders:
     def __init__(self) -> None:
         self.result = GENERATED
+        self.unsafe_notes: set[UUID] = set()
+        self.screened: list[GenerationResult] = []
+        self.screen_failure: Exception | None = None
         self.image_queries: tuple[ImageQuery, ...] | None = None
         self.attach: Callable[[tuple[ImageQuery, ...]], tuple[NoteMedia, ...]] = images_for
         self.calls: list[JobStage] = []
@@ -484,6 +502,17 @@ class FakeProviders:
         queries = queries_for_every_note(self.result) if self.image_queries is None else self.image_queries
         return GeneratedCards(result=self.result, image_queries=queries)
 
+    async def screen(
+        self, job_id: UUID, request: GenerationRequest, result: GenerationResult
+    ) -> GenerationResult:
+        del job_id, request
+        self.screened.append(result)
+        if self.screen_failure is not None:
+            raise self.screen_failure
+        return replace(
+            result, notes=tuple(note for note in result.notes if note.client_id not in self.unsafe_notes)
+        )
+
     async def fetch(self, job_id: UUID, queries: tuple[ImageQuery, ...]) -> tuple[NoteMedia, ...]:
         self.fetched_for.append(job_id)
         await self._reach(JobStage.FETCHING_MEDIA, queries)
@@ -507,12 +536,14 @@ class Harness:
         self.providers = FakeProviders()
         self.cache = InMemoryResultCache()
         self.quota = InMemoryQuota()
+        self.moderator = FakeTopicModerator()
         self.now = T0
         ids = sequential_job_ids()
         self.create = CreateGeneration(
             store=self.store,
             queue=self.queue,
             quota=self.quota,
+            moderator=self.moderator,
             clock=lambda: self.now,
             new_job_id=lambda: next(ids),
         )
@@ -524,6 +555,7 @@ class Harness:
             retriever=self.providers,
             parser=self.providers,
             generator=self.providers,
+            moderator=self.providers,
             media=self.providers,
             clock=lambda: self.now,
         )

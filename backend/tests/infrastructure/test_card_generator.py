@@ -1287,6 +1287,7 @@ def pipeline_for(harness: Harness, llm: LlmClient) -> RunGeneration:
         retriever=harness.providers,
         parser=harness.providers,
         generator=LlmCardGenerator(llm=llm, new_id=lambda: next(ids), handlers=NOTE_TYPE_HANDLERS),
+        moderator=harness.providers,
         media=harness.providers,
         clock=lambda: harness.now,
     )

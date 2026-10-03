@@ -126,6 +126,16 @@ class CardGenerator(Protocol):
     ) -> GeneratedCards: ...
 
 
+class TopicModerator(Protocol):
+    async def allows(self, request: GenerationRequest) -> bool: ...
+
+
+class ContentModerator(Protocol):
+    async def screen(
+        self, job_id: UUID, request: GenerationRequest, result: GenerationResult
+    ) -> GenerationResult: ...
+
+
 class MediaFetcher(Protocol):
     async def fetch(self, job_id: UUID, queries: tuple[ImageQuery, ...]) -> tuple[NoteMedia, ...]: ...
 

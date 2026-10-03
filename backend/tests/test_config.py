@@ -8,6 +8,7 @@ from deckly.config import (
     MAX_MEDIA_CANDIDATES,
     MAX_MEDIA_CONCURRENCY,
     MAX_MEDIA_IMAGES,
+    MAX_MODERATION_TIMEOUT_SECONDS,
     MEDIA_URL_MIN_VALIDITY_SECONDS,
     AppSettings,
     CacheSettings,
@@ -123,6 +124,12 @@ PROVIDER_ENVIRONMENT = {
     "DECKLY_PROVIDER_MEDIA_CANDIDATES_PER_QUERY": "10",
     "DECKLY_PROVIDER_MEDIA_THUMBNAIL_WIDTH": "960",
     "DECKLY_PROVIDER_MEDIA_MAX_CONCURRENCY": "4",
+    "DECKLY_PROVIDER_MODERATION_MODEL_NAME": "moderation-model",
+    "DECKLY_PROVIDER_MODERATION_MAX_OUTPUT_TOKENS": "4000",
+    "DECKLY_PROVIDER_MODERATION_TIMEOUT_SECONDS": "2",
+    "DECKLY_PROVIDER_MODERATION_FILTER_TIMEOUT_SECONDS": "15",
+    "DECKLY_PROVIDER_MODERATION_FILTER_DEADLINE_SECONDS": "20",
+    "DECKLY_PROVIDER_MODERATION_FILTER_MAX_ATTEMPTS": "2",
 }
 LIMIT_ENVIRONMENT = {
     "DECKLY_LIMIT_GENERATION_JOBS_PER_DAY": "20",
@@ -132,7 +139,7 @@ LIMIT_ENVIRONMENT = {
     "DECKLY_LIMIT_NOTE_REGENERATIONS_PER_WINDOW": "30",
     "DECKLY_LIMIT_NOTE_REGENERATION_WINDOW_SECONDS": "3600",
 }
-ROOMY_JOB_TIMEOUT_SECONDS = "301"
+ROOMY_JOB_TIMEOUT_SECONDS = "321"
 REGENERATE_ENVIRONMENT = {
     "DECKLY_REGENERATE_RATE_LIMIT_TIMEOUT_SECONDS": "0.5",
     "DECKLY_REGENERATE_SEARCH_TIMEOUT_SECONDS": "2.5",
@@ -287,28 +294,35 @@ def settings_with_job_timeout(monkeypatch: pytest.MonkeyPatch, job_timeout_secon
     )
 
 
-@pytest.mark.parametrize("job_timeout_seconds", [300, 299, 1])
-def test_search_model_and_media_deadlines_that_fill_the_job_timeout_are_rejected(
+@pytest.mark.parametrize("job_timeout_seconds", [320, 319, 1])
+def test_provider_deadlines_that_fill_the_job_timeout_are_rejected(
     clean_environment: pytest.MonkeyPatch, job_timeout_seconds: int
 ) -> None:
-    with pytest.raises(ValueError, match="media deadlines"):
+    with pytest.raises(ValueError, match="moderation deadlines"):
         settings_with_job_timeout(clean_environment, job_timeout_seconds)
 
 
-@pytest.mark.parametrize("job_timeout_seconds", [281, 290])
+@pytest.mark.parametrize("job_timeout_seconds", [301, 310])
 def test_media_deadline_that_pushes_the_total_past_the_job_timeout_is_rejected(
     clean_environment: pytest.MonkeyPatch, job_timeout_seconds: int
 ) -> None:
-    with pytest.raises(ValueError, match="media deadlines"):
+    with pytest.raises(ValueError, match="moderation deadlines"):
         settings_with_job_timeout(clean_environment, job_timeout_seconds)
 
 
-def test_search_model_and_media_deadlines_that_leave_room_in_the_job_timeout_are_accepted(
+def test_moderation_deadline_that_pushes_the_total_past_the_job_timeout_is_rejected(
     clean_environment: pytest.MonkeyPatch,
 ) -> None:
-    settings = settings_with_job_timeout(clean_environment, 301)
+    with pytest.raises(ValueError, match="moderation deadlines"):
+        settings_from_environment(clean_environment, DECKLY_PROVIDER_MODERATION_FILTER_DEADLINE_SECONDS="21")
 
-    assert settings.limits.generation_job_timeout_seconds == 301
+
+def test_provider_deadlines_that_leave_room_in_the_job_timeout_are_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_with_job_timeout(clean_environment, 321)
+
+    assert settings.limits.generation_job_timeout_seconds == 321
 
 
 def test_source_character_limit_too_small_to_keep_any_page_is_rejected(
@@ -343,6 +357,46 @@ def test_media_deadline_equal_to_one_attempt_is_accepted(clean_environment: pyte
     clean_environment.setenv("DECKLY_PROVIDER_MEDIA_DEADLINE_SECONDS", "8")
 
     assert ProviderSettings().media_deadline_seconds == 8
+
+
+def test_moderation_filter_deadline_shorter_than_one_attempt_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MODERATION_FILTER_DEADLINE_SECONDS", "14")
+
+    with pytest.raises(ValidationError, match="moderation filter deadline"):
+        ProviderSettings()
+
+
+def test_moderation_filter_deadline_equal_to_one_attempt_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MODERATION_FILTER_DEADLINE_SECONDS", "15")
+
+    assert ProviderSettings().moderation_filter_deadline_seconds == 15
+
+
+@pytest.mark.parametrize("value", ["0", "-1", str(MAX_MODERATION_TIMEOUT_SECONDS + 0.5), "nan", "inf"])
+def test_topic_check_timeout_outside_its_bounds_is_rejected(
+    clean_environment: pytest.MonkeyPatch, value: str
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MODERATION_TIMEOUT_SECONDS", value)
+
+    with pytest.raises(ValidationError, match="moderation_timeout_seconds"):
+        ProviderSettings()
+
+
+@pytest.mark.parametrize("value", ["0.25", "1.5", str(MAX_MODERATION_TIMEOUT_SECONDS)])
+def test_topic_check_timeout_within_its_bounds_is_accepted(
+    clean_environment: pytest.MonkeyPatch, value: str
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MODERATION_TIMEOUT_SECONDS", value)
+
+    assert ProviderSettings().moderation_timeout_seconds == float(value)
 
 
 @pytest.mark.parametrize("url", ["ftp://commons.wikimedia.org", "commons.wikimedia.org"])
