@@ -12,8 +12,9 @@ from deckly.application.ports import (
     Quota,
     Requester,
     StoredJob,
+    TopicModerator,
 )
-from deckly.domain.exceptions import JobNotFoundError
+from deckly.domain.exceptions import JobNotFoundError, TopicRejectedError
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import GenerationJob, JobStatus
 
@@ -32,6 +33,7 @@ class CreateGeneration:
     store: JobStore
     queue: JobQueue
     quota: GenerationQuota
+    moderator: TopicModerator
     clock: Clock
     new_job_id: JobIdFactory
 
@@ -48,6 +50,13 @@ class CreateGeneration:
             if twin is None:
                 raise
             return await self._replay(twin, request, scope, now)
+        if not await self._screen(request, requester, now):
+            twin = await self.store.find(scope)
+            if twin is None:
+                message = "topic violates the content policy"
+                raise TopicRejectedError(message)
+            await self.quota.release(requester, now)
+            return await self._replay(twin, request, scope, now)
         job = GenerationJob.queue(self.new_job_id(), now)
         try:
             stored = await self.store.add(job, request, scope)
@@ -59,6 +68,13 @@ class CreateGeneration:
             return await self._replay(stored, request, scope, now)
         await self.queue.enqueue(job.job_id)
         return JobCreated(job=job, quota=quota)
+
+    async def _screen(self, request: GenerationRequest, requester: Requester, now: datetime) -> bool:
+        try:
+            return await self.moderator.allows(request)
+        except BaseException:
+            await self.quota.release(requester, now)
+            raise
 
     async def _replay(
         self, stored: StoredJob, request: GenerationRequest, scope: IdempotencyScope, now: datetime

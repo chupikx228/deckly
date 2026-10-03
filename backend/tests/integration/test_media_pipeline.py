@@ -71,6 +71,7 @@ async def run_with(
             new_id=uuid4,
             handlers=NOTE_TYPE_HANDLERS,
         ),
+        moderator=providers,
         media=media,
         clock=utc_now,
     )

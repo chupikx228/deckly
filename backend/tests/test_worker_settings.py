@@ -7,6 +7,8 @@ from pydantic import AnyHttpUrl, SecretStr
 
 from deckly.config import ModelProvider, ProviderSettings
 from deckly.infrastructure.clock import utc_now
+from deckly.infrastructure.llm.anthropic_client import AnthropicLlmClient
+from deckly.infrastructure.llm.deepseek_client import DeepSeekLlmClient
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
@@ -17,12 +19,15 @@ from deckly.worker.settings import (
     LLM_CLIENT_KEY,
     LLM_CLIENTS,
     MEDIA_FETCHER_KEY,
+    MODERATION_LLM_CLIENT_KEY,
     SOURCE_RETRIEVER_KEY,
     WorkerContext,
     WorkerSettings,
     build_llm_client,
     build_media_fetcher,
+    build_moderation_llm_client,
     build_source_retriever,
+    moderation_llm_client,
     shutdown,
 )
 from tests.fakes import (
@@ -35,6 +40,11 @@ from tests.fakes import (
 )
 
 pytestmark = pytest.mark.anyio
+
+PROVIDER_CLIENTS: dict[ModelProvider, type[AnthropicLlmClient | DeepSeekLlmClient]] = {
+    "anthropic": AnthropicLlmClient,
+    "deepseek": DeepSeekLlmClient,
+}
 
 
 def provider_settings(provider: ModelProvider) -> ProviderSettings:
@@ -75,6 +85,12 @@ def provider_settings(provider: ModelProvider) -> ProviderSettings:
         media_candidates_per_query=7,
         media_thumbnail_width=960,
         media_max_concurrency=3,
+        moderation_model_name="moderation-model",
+        moderation_max_output_tokens=500,
+        moderation_timeout_seconds=2,
+        moderation_filter_timeout_seconds=5,
+        moderation_filter_deadline_seconds=10,
+        moderation_filter_max_attempts=2,
     )
 
 
@@ -90,6 +106,20 @@ async def test_llm_client_is_built_behind_the_resilience_layer_for_every_provide
 
     assert isinstance(client, ResilientLlmClient)
     await client.aclose()
+
+
+@pytest.mark.parametrize("provider", get_args(ModelProvider))
+async def test_moderation_client_is_built_for_every_provider_behind_its_own_resilience_layer(
+    provider: ModelProvider,
+) -> None:
+    providers = provider_settings(provider)
+    client = build_moderation_llm_client(providers)
+    plain = moderation_llm_client(providers, providers.moderation_timeout_seconds)
+
+    assert isinstance(client, ResilientLlmClient)
+    assert isinstance(plain, PROVIDER_CLIENTS[provider])
+    await client.aclose()
+    await plain.aclose()
 
 
 async def test_source_retriever_searches_tavily_behind_the_resilience_layer_with_the_configured_cap() -> None:
@@ -147,3 +177,18 @@ async def test_shutdown_closes_the_search_and_image_clients_even_when_closing_th
 
     assert search.closed
     assert images.closed
+
+
+async def test_shutdown_closes_the_moderation_client_even_when_closing_the_model_client_fails() -> None:
+    time = ManualTime()
+    caller = ResilientCaller(SEARCH_POLICY, time.breaker(), time.runtime())
+    moderation = FakeLlmClient()
+    ctx: WorkerContext = {
+        LLM_CLIENT_KEY: ResilientLlmClient(FailingToCloseLlm(), caller, 1000),
+        MODERATION_LLM_CLIENT_KEY: ResilientLlmClient(moderation, caller, 1000),
+    }
+
+    with pytest.raises(RuntimeError):
+        await shutdown(ctx)
+
+    assert moderation.closed

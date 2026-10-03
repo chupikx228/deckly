@@ -7,15 +7,19 @@ from uuid import UUID, uuid4
 import pytest
 from arq.connections import ArqRedis, RedisSettings
 from arq.constants import abort_jobs_ss, default_queue_name, job_key_prefix
+from fastapi import FastAPI
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deckly.application.ports import IdempotencyScope
+from deckly import main
+from deckly.application.generations import CreateGeneration
+from deckly.application.ports import IdempotencyScope, TopicModerator
 from deckly.config import Settings, load_settings
 from deckly.infrastructure.database import create_engine, create_session_factory
 from deckly.infrastructure.queue import ArqJobQueue, create_queue_pool, create_redis_settings
 from deckly.infrastructure.quota import ADDRESS_KEY_PREFIX, CLIENT_KEY_PREFIX, address_bucket
 from deckly.infrastructure.tables import GenerationJobRow
+from tests.fakes import FakeTopicModerator
 
 COMMAND_TIMEOUT_SECONDS = 2
 TEST_PEER_ADDRESSES = ("testclient", "127.0.0.1")
@@ -46,6 +50,17 @@ def with_generation_limits(settings: Settings, *, per_client: int, per_address: 
             update={"generation_jobs_per_day": per_client, "generation_jobs_per_address_per_day": per_address}
         ),
     )
+
+
+@pytest.fixture(autouse=True)
+def topics_screened_without_a_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main, "build_topic_moderator", lambda *_: FakeTopicModerator())
+
+
+def screen_topics_with(app: FastAPI, moderator: TopicModerator) -> None:
+    create = app.state.create_generation
+    assert isinstance(create, CreateGeneration)
+    app.state.create_generation = replace(create, moderator=moderator)
 
 
 async def purge_quota(pool: ArqRedis, client_ids: Iterable[UUID], addresses: Iterable[str]) -> None:

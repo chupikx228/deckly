@@ -1,6 +1,7 @@
 import asyncio
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AsyncExitStack
 from secrets import SystemRandom
 from uuid import UUID, uuid4
 
@@ -24,6 +25,7 @@ from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.media.client import MediaEndpoint
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
+from deckly.infrastructure.moderation.moderator import LlmContentModerator
 from deckly.infrastructure.queue import GENERATION_TASK
 from deckly.infrastructure.resilience import CircuitBreaker, ResilientCaller, RetryPolicy, RetryRuntime
 from deckly.infrastructure.result_cache import RedisResultCache, ResultCacheLimits
@@ -36,6 +38,7 @@ SETTINGS_KEY = "settings"
 REDIS_KEY = "redis"
 ENGINE_KEY = "engine"
 LLM_CLIENT_KEY = "llm_client"
+MODERATION_LLM_CLIENT_KEY = "moderation_llm_client"
 SOURCE_RETRIEVER_KEY = "source_retriever"
 MEDIA_FETCHER_KEY = "media_fetcher"
 RUN_GENERATION_KEY = "run_generation_use_case"
@@ -86,6 +89,34 @@ def build_llm_client(providers: ProviderSettings) -> ResilientLlmClient:
     )
     client = LLM_CLIENTS[providers.model_provider](endpoint)
     return ResilientLlmClient(client, caller, providers.model_max_output_tokens)
+
+
+def moderation_llm_client(providers: ProviderSettings, timeout_seconds: float) -> LlmClient:
+    endpoint = LlmEndpoint(
+        base_url=str(providers.model_base_url),
+        api_key=providers.model_api_key.get_secret_value(),
+        model=providers.moderation_model_name,
+        max_output_tokens=providers.moderation_max_output_tokens,
+        timeout_seconds=timeout_seconds,
+    )
+    return LLM_CLIENTS[providers.model_provider](endpoint)
+
+
+def build_moderation_llm_client(providers: ProviderSettings) -> ResilientLlmClient:
+    policy = RetryPolicy(
+        max_attempts=providers.moderation_filter_max_attempts,
+        attempt_timeout_seconds=providers.moderation_filter_timeout_seconds,
+        deadline_seconds=providers.moderation_filter_deadline_seconds,
+        base_delay_seconds=providers.model_retry_base_delay_seconds,
+        max_delay_seconds=providers.model_retry_max_delay_seconds,
+    )
+    caller = resilient_caller(
+        policy,
+        failure_threshold=providers.model_circuit_failure_threshold,
+        reset_seconds=providers.model_circuit_reset_seconds,
+    )
+    client = moderation_llm_client(providers, providers.moderation_filter_timeout_seconds)
+    return ResilientLlmClient(client, caller, providers.moderation_max_output_tokens)
 
 
 def build_source_retriever(providers: ProviderSettings) -> WebSourceRetriever:
@@ -170,6 +201,8 @@ async def startup(ctx: WorkerContext) -> None:
     await verify_connection(engine)
     llm = build_llm_client(settings.providers)
     ctx[LLM_CLIENT_KEY] = llm
+    moderation_llm = build_moderation_llm_client(settings.providers)
+    ctx[MODERATION_LLM_CLIENT_KEY] = moderation_llm
     retriever = build_source_retriever(settings.providers)
     ctx[SOURCE_RETRIEVER_KEY] = retriever
     media = build_media_fetcher(settings.providers)
@@ -183,30 +216,27 @@ async def startup(ctx: WorkerContext) -> None:
         retriever=retriever,
         parser=CleaningSourceParser(max_characters=settings.providers.search_max_source_characters),
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),
+        moderator=LlmContentModerator(llm=moderation_llm),
         media=media,
         clock=utc_now,
     )
 
 
 async def shutdown(ctx: WorkerContext) -> None:
-    llm = ctx.get(LLM_CLIENT_KEY)
-    retriever = ctx.get(SOURCE_RETRIEVER_KEY)
-    media = ctx.get(MEDIA_FETCHER_KEY)
     engine = ctx.get(ENGINE_KEY)
-    try:
-        if isinstance(llm, ResilientLlmClient):
-            await llm.aclose()
-    finally:
-        try:
-            if isinstance(retriever, WebSourceRetriever):
-                await retriever.aclose()
-        finally:
-            try:
-                if isinstance(media, CommonsMediaFetcher):
-                    await media.aclose()
-            finally:
-                if isinstance(engine, AsyncEngine):
-                    await engine.dispose()
+    media = ctx.get(MEDIA_FETCHER_KEY)
+    retriever = ctx.get(SOURCE_RETRIEVER_KEY)
+    llm_clients = (ctx.get(MODERATION_LLM_CLIENT_KEY), ctx.get(LLM_CLIENT_KEY))
+    async with AsyncExitStack() as closing:
+        if isinstance(engine, AsyncEngine):
+            closing.push_async_callback(engine.dispose)
+        if isinstance(media, CommonsMediaFetcher):
+            closing.push_async_callback(media.aclose)
+        if isinstance(retriever, WebSourceRetriever):
+            closing.push_async_callback(retriever.aclose)
+        for llm in llm_clients:
+            if isinstance(llm, ResilientLlmClient):
+                closing.push_async_callback(llm.aclose)
 
 
 class WorkerSettings:

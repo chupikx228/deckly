@@ -201,6 +201,7 @@ async def run_through_postgres_and_redis(settings: Settings, providers: FakeProv
             retriever=providers,
             parser=providers,
             generator=providers,
+            moderator=providers,
             media=providers,
             clock=utc_now,
         )(job_id)

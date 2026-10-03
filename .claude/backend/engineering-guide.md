@@ -276,9 +276,20 @@ The model and search providers _will_ be slow, rate-limited or down. Design for 
 
 ## Content safety
 
-- Reject topics that violate policy up front → `422 TOPIC_REJECTED`.
+- Reject topics that violate policy up front → `422 TOPIC_REJECTED`. The check runs
+  synchronously in `POST /generations`, after the idempotency lookup and the quota reservation
+  and before the job is stored, so a rejected topic never becomes a job. A rejection spends the
+  quota unit (the check costs a model call); a check that fails or times out gives it back and
+  answers `503 UPSTREAM_UNAVAILABLE`. A replay of an accepted job is never re-checked.
 - Filter **generated** content for policy violations before it reaches the client. The model's
   output is untrusted; a topic passing the gate does not mean every generated card is safe.
+  The filter runs right after generation, before media, and follows the same repair-or-drop rule
+  as validation: a note without an explicit "allow" verdict is dropped, an unsafe deck title is
+  replaced with one built from the topic, and only when no note is left does the job fail with
+  `NO_VALID_CONTENT`. A classifier that cannot answer fails the job with `PROVIDER_UNAVAILABLE`;
+  nothing unscreened is ever shipped.
+- Both checks fail closed. A classifier refusal counts as a block, and a reply that cannot be read
+  is an outage, never a pass.
 - `sources` exist so the user can verify claims — they are a product feature, not decoration.
   Every returned note carries at least one real, reachable source; a note without one is
   dropped.
@@ -338,7 +349,8 @@ and what not to test. The summary:
   instance and restart without dropping jobs.
 - Generation **workers** consume the queue and are scaled independently of the API tier; the
   API only enqueues and reads state.
-- `POST /generations` responds in <500ms (it only enqueues). `GET /generations/{jobId}`
+- `POST /generations` responds in <500ms plus the topic check, bounded by
+  `DECKLY_PROVIDER_MODERATION_TIMEOUT_SECONDS` (otherwise it only enqueues). `GET /generations/{jobId}`
   responds in <200ms and is cheap enough to poll every 2s per client — back it with the store
   and cache, never by recomputing.
 

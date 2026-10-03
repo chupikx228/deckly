@@ -1,3 +1,5 @@
+import asyncio
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -8,6 +10,7 @@ from deckly.application.exceptions import (
     UpstreamUnavailableError,
 )
 from deckly.application.ports import IdempotencyScope, Requester, StoredJob
+from deckly.domain.exceptions import TopicRejectedError
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import GenerationJob, JobStatus
 from tests.domain.builders import T0
@@ -293,3 +296,146 @@ async def test_unreadable_quota_refuses_the_job_before_anything_is_stored() -> N
 
     assert harness.store.jobs == {}
     assert harness.queue.enqueued == []
+
+
+async def test_topic_and_instructions_are_screened_together_before_the_job_is_stored() -> None:
+    harness = Harness()
+    request = replace(generation_request(), instructions="Focus on warning signs")
+
+    await harness.create(request, scope(), ADDRESS)
+
+    assert harness.moderator.screened == [request]
+
+
+async def test_rejected_topic_stores_and_enqueues_nothing_and_spends_its_quota() -> None:
+    harness = Harness()
+    harness.moderator.outcome = False
+
+    with pytest.raises(TopicRejectedError):
+        await harness.create(generation_request(), scope(), ADDRESS)
+
+    assert harness.store.jobs == {}
+    assert harness.queue.enqueued == []
+    assert harness.quota.used_by_client[scope().client_id] == 1
+    assert harness.quota.used_by_address[ADDRESS] == 1
+    assert harness.quota.released == []
+
+
+async def test_retrying_a_rejected_topic_is_rejected_again_and_spends_another_unit() -> None:
+    harness = Harness()
+    harness.moderator.outcome = False
+
+    for _ in range(2):
+        with pytest.raises(TopicRejectedError):
+            await harness.create(generation_request(), scope(), ADDRESS)
+
+    assert harness.quota.used_by_client[scope().client_id] == 2
+    assert harness.store.jobs == {}
+
+
+async def test_classifier_outage_gives_the_quota_back_and_stores_nothing() -> None:
+    harness = Harness()
+    harness.moderator.outcome = UpstreamUnavailableError(5)
+
+    with pytest.raises(UpstreamUnavailableError):
+        await harness.create(generation_request(), scope(), ADDRESS)
+
+    assert harness.quota.used_by_client[scope().client_id] == 0
+    assert harness.quota.released == [Requester(client_id=scope().client_id, address=ADDRESS)]
+    assert harness.store.jobs == {}
+    assert harness.queue.enqueued == []
+
+
+async def test_unexpected_classifier_failure_is_not_disguised_and_gives_the_quota_back() -> None:
+    harness = Harness()
+    harness.moderator.outcome = RuntimeError("classifier bug")
+
+    with pytest.raises(RuntimeError, match="classifier bug"):
+        await harness.create(generation_request(), scope(), ADDRESS)
+
+    assert harness.quota.used_by_client[scope().client_id] == 0
+
+
+async def test_request_cancelled_during_the_topic_check_gives_the_quota_back() -> None:
+    harness = Harness()
+    reached = asyncio.Event()
+
+    async def hang() -> bool:
+        reached.set()
+        await asyncio.Event().wait()
+        return True
+
+    harness.moderator.outcome = hang
+    task = asyncio.create_task(harness.create(generation_request(), scope(), ADDRESS))
+    await reached.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert harness.quota.used_by_client[scope().client_id] == 0
+    assert harness.store.jobs == {}
+
+
+async def test_replay_of_an_accepted_job_is_not_screened_again() -> None:
+    harness = Harness()
+    first = await harness.create(generation_request(), scope(), ADDRESS)
+    harness.moderator.outcome = False
+
+    replay = await harness.create(generation_request(), scope(), ADDRESS)
+
+    assert replay.job == first.job
+    assert len(harness.moderator.screened) == 1
+
+
+async def test_conflicting_reuse_of_a_key_is_refused_without_screening() -> None:
+    harness = Harness()
+    await harness.create(generation_request(), scope(), ADDRESS)
+
+    with pytest.raises(IdempotencyKeyConflictError):
+        await harness.create(generation_request("Something else"), scope(), ADDRESS)
+
+    assert len(harness.moderator.screened) == 1
+
+
+async def test_rate_limited_client_is_refused_before_the_classifier_is_called() -> None:
+    harness = Harness()
+    harness.quota.per_client = 0
+
+    with pytest.raises(RateLimitedError):
+        await harness.create(generation_request(), scope(), ADDRESS)
+
+    assert harness.moderator.screened == []
+
+
+async def test_unreadable_quota_is_refused_before_the_classifier_is_called() -> None:
+    harness = Harness()
+    harness.quota.failure = UpstreamUnavailableError(1)
+
+    with pytest.raises(UpstreamUnavailableError):
+        await harness.create(generation_request(), scope(), ADDRESS)
+
+    assert harness.moderator.screened == []
+
+
+async def test_twin_accepted_while_this_request_was_being_rejected_is_returned_instead_of_a_422() -> None:
+    harness = Harness(store=LateTwinJobStore())
+    twin = await harness.store.add(GenerationJob.queue(job_id(99), T0), generation_request(), scope())
+    harness.moderator.outcome = False
+
+    created = await harness.create(generation_request(), scope(), ADDRESS)
+
+    assert created.job == twin.job
+    assert harness.quota.used_by_client[scope().client_id] == 0
+    assert harness.quota.released == [Requester(client_id=scope().client_id, address=ADDRESS)]
+
+
+async def test_rejection_with_a_twin_for_a_different_request_is_still_a_conflict() -> None:
+    harness = Harness(store=LateTwinJobStore())
+    await harness.store.add(GenerationJob.queue(job_id(99), T0), generation_request("Other"), scope())
+    harness.moderator.outcome = False
+
+    with pytest.raises(IdempotencyKeyConflictError):
+        await harness.create(generation_request(), scope(), ADDRESS)
+
+    assert harness.quota.used_by_client[scope().client_id] == 0

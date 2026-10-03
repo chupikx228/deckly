@@ -343,6 +343,7 @@ async def run_with_commons(
         retriever=harness.providers,
         parser=harness.providers,
         generator=harness.providers,
+        moderator=harness.providers,
         media=commons_fetcher(recorded, time, breaker=breaker),
         clock=lambda: harness.now,
     )
@@ -435,6 +436,7 @@ async def test_bug_in_the_media_adapter_still_yields_a_succeeded_job(
         retriever=harness.providers,
         parser=harness.providers,
         generator=harness.providers,
+        moderator=harness.providers,
         media=fetcher,
         clock=lambda: harness.now,
     )

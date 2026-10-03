@@ -49,6 +49,7 @@ def pipeline(store: JobStore, providers: FakeProviders) -> RunGeneration:
         retriever=providers,
         parser=providers,
         generator=providers,
+        moderator=providers,
         media=providers,
         clock=utc_now,
     )
