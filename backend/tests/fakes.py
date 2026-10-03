@@ -9,7 +9,7 @@ from uuid import UUID
 
 import httpx2
 
-from deckly.application.exceptions import RateLimitedError
+from deckly.application.exceptions import RateLimitedError, UnreadableJobRequestError
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
 from deckly.application.pipeline import RunGeneration
 from deckly.application.ports import (
@@ -27,7 +27,7 @@ from deckly.application.ports import (
 from deckly.application.regeneration import RegenerateNote
 from deckly.domain.deck import GenerationResult
 from deckly.domain.generation import Difficulty, GenerationFingerprint, GenerationRequest
-from deckly.domain.job import GenerationJob, JobStage
+from deckly.domain.job import GenerationJob, JobStage, JobStatus
 from deckly.domain.media import Media, MediaKind
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
@@ -333,6 +333,7 @@ class InMemoryJobStore:
         self.job_ids_by_scope: dict[IdempotencyScope, UUID] = {}
         self.history: list[GenerationJob] = []
         self.update_calls = 0
+        self.unreadable: set[UUID] = set()
 
     async def add(self, job: GenerationJob, request: GenerationRequest, scope: IdempotencyScope) -> StoredJob:
         existing = self.job_ids_by_scope.get(scope)
@@ -353,6 +354,9 @@ class InMemoryJobStore:
         return self.jobs.get(job_id)
 
     async def get_stored(self, job_id: UUID) -> StoredJob | None:
+        if job_id in self.unreadable:
+            message = f"the saved request of job {job_id} no longer validates"
+            raise UnreadableJobRequestError(message)
         job = self.jobs.get(job_id)
         return None if job is None else StoredJob(job=job, request=self.requests[job_id])
 
@@ -367,6 +371,53 @@ class InMemoryJobStore:
 
     def replace(self, job: GenerationJob) -> None:
         self.jobs[job.job_id] = job
+
+    def forget(self, job_id: UUID) -> None:
+        self.jobs.pop(job_id)
+        self.requests.pop(job_id, None)
+        for held_by, holder in list(self.job_ids_by_scope.items()):
+            if holder == job_id:
+                del self.job_ids_by_scope[held_by]
+
+
+class InMemoryJobHousekeeping:
+    def __init__(self, store: InMemoryJobStore) -> None:
+        self.store = store
+        self.after_listing: dict[JobStatus, Callable[[], object]] = {}
+
+    async def stale(self, status: JobStatus, updated_before: datetime, limit: int) -> tuple[UUID, ...]:
+        candidates = [
+            job
+            for job in self.store.jobs.values()
+            if job.status is status and job.updated_at < updated_before
+        ]
+        listed = tuple(job.job_id for job in sorted(candidates, key=lambda job: job.updated_at)[:limit])
+        hook = self.after_listing.pop(status, None)
+        if hook is not None:
+            hook()
+        return listed
+
+    async def release_idempotency_keys(self, created_before: datetime, limit: int) -> int:
+        expired = sorted(
+            (
+                held_by
+                for held_by, holder in self.store.job_ids_by_scope.items()
+                if self.store.jobs[holder].created_at < created_before
+            ),
+            key=lambda held_by: self.store.jobs[self.store.job_ids_by_scope[held_by]].created_at,
+        )[:limit]
+        for held_by in expired:
+            del self.store.job_ids_by_scope[held_by]
+        return len(expired)
+
+    async def purge_finished(self, finished_before: datetime, limit: int) -> int:
+        expired = sorted(
+            (job for job in self.store.jobs.values() if job.is_terminal and job.updated_at < finished_before),
+            key=lambda job: job.updated_at,
+        )[:limit]
+        for job in expired:
+            self.store.forget(job.job_id)
+        return len(expired)
 
 
 class InMemoryResultCache:

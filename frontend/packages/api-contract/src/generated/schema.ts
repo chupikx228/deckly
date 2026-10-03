@@ -266,7 +266,7 @@ export interface components {
     };
     parameters: {
         JobId: string;
-        /** @description Client-generated version 4 UUID in canonical form: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. Replaying the same request body with the same key returns the original job instead of starting a second one. Reusing the key with a different body returns 409 IDEMPOTENCY_KEY_CONFLICT. Bodies are compared after defaults are applied and the topic is trimmed, so key order and explicitly sent defaults do not matter. */
+        /** @description Client-generated version 4 UUID in canonical form: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. Replaying the same request body with the same key returns the original job instead of starting a second one. Reusing the key with a different body returns 409 IDEMPOTENCY_KEY_CONFLICT. Bodies are compared after defaults are applied and the topic is trimmed, so key order and explicitly sent defaults do not matter. A key is honoured for 24 hours after the original request; after that the same key starts a new job, and the original job can still be polled until it is deleted. */
         IdempotencyKey: string;
         /** @description Anonymous device identifier, used for rate limiting. Version 4 UUID in canonical form only: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. */
         ClientId: string;
@@ -281,7 +281,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description Client-generated version 4 UUID in canonical form: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. Replaying the same request body with the same key returns the original job instead of starting a second one. Reusing the key with a different body returns 409 IDEMPOTENCY_KEY_CONFLICT. Bodies are compared after defaults are applied and the topic is trimmed, so key order and explicitly sent defaults do not matter. */
+                /** @description Client-generated version 4 UUID in canonical form: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. Replaying the same request body with the same key returns the original job instead of starting a second one. Reusing the key with a different body returns 409 IDEMPOTENCY_KEY_CONFLICT. Bodies are compared after defaults are applied and the topic is trimmed, so key order and explicitly sent defaults do not matter. A key is honoured for 24 hours after the original request; after that the same key starts a new job, and the original job can still be polled until it is deleted. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
                 /** @description Anonymous device identifier, used for rate limiting. Version 4 UUID in canonical form only: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. */
                 "X-Client-Id": components["parameters"]["ClientId"];
@@ -325,7 +325,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Current job state. A failed generation is reported here with status "failed", not as an HTTP error. */
+            /** @description Current job state. A failed generation is reported here with status "failed", not as an HTTP error. A job that stops making progress is failed by the server with GENERATION_FAILED instead of being left queued or running. A job is deleted once it has been finished for 24 hours, and polling it after that returns 404 JOB_NOT_FOUND. */
             200: {
                 headers: {
                     /** @description Seconds to wait before polling again. Sent while non-terminal. */

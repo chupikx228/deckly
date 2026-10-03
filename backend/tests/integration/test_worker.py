@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import time
+from datetime import timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -16,6 +17,7 @@ from arq.worker import Worker
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deckly.application.generations import CancelGeneration
+from deckly.application.housekeeping import EnforceJobRetention, SweepStaleJobs
 from deckly.application.pipeline import RunGeneration
 from deckly.config import Settings
 from deckly.domain.job import Cancelled, Failed, FailureCode, GenerationJob, JobStage, JobStatus, Succeeded
@@ -36,12 +38,14 @@ from deckly.infrastructure.result_cache import RedisResultCache
 from deckly.infrastructure.search.parser import CleaningSourceParser
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.worker.settings import (
+    ENFORCE_JOB_RETENTION_KEY,
     LLM_CLIENT_KEY,
     MEDIA_FETCHER_KEY,
     REDIS_KEY,
     RUN_GENERATION_KEY,
     SETTINGS_KEY,
     SOURCE_RETRIEVER_KEY,
+    SWEEP_STALE_JOBS_KEY,
     WorkerContext,
     WorkerSettings,
     from_context,
@@ -213,6 +217,30 @@ async def test_worker_startup_wires_the_redis_result_cache_with_the_configured_t
         await shutdown(ctx)
 
     assert isinstance(run.cache, RedisResultCache)
+
+
+async def test_worker_startup_wires_housekeeping_with_the_configured_thresholds_and_the_shared_store(
+    settings: Settings, queue_pool: ArqRedis
+) -> None:
+    ctx: WorkerContext = {SETTINGS_KEY: settings, REDIS_KEY: queue_pool}
+
+    await startup(ctx)
+    try:
+        run = from_context(ctx, RUN_GENERATION_KEY, RunGeneration)
+        sweep = from_context(ctx, SWEEP_STALE_JOBS_KEY, SweepStaleJobs)
+        retention = from_context(ctx, ENFORCE_JOB_RETENTION_KEY, EnforceJobRetention)
+    finally:
+        await shutdown(ctx)
+
+    assert sweep.store is run.store
+    assert sweep.housekeeping is retention.housekeeping
+    assert sweep.policy.running_after == timedelta(seconds=settings.sweep.running_stale_after_seconds)
+    assert sweep.policy.queued_after == timedelta(seconds=settings.sweep.queued_stale_after_seconds)
+    assert retention.policy.idempotency_key_ttl == timedelta(
+        seconds=settings.cache.idempotency_key_ttl_seconds
+    )
+    assert retention.policy.job_retention == timedelta(seconds=settings.cache.job_retention_seconds)
+    assert sweep.batch_size == retention.batch_size == settings.sweep.batch_size
 
 
 async def test_job_that_outlives_the_arq_timeout_ends_failed_instead_of_running_forever(

@@ -131,6 +131,11 @@ without colliding.
   a second one.
 - Reusing a key with a different request returns `409 IDEMPOTENCY_KEY_CONFLICT` and leaves
   the original job untouched. Replaying the original request with that key still works.
+- A key is honoured for 24 hours after the original request
+  (`DECKLY_CACHE_IDEMPOTENCY_KEY_TTL_SECONDS`). After that the same key starts a new job, as if
+  it had never been used. The original job is not affected and can still be polled until it is
+  deleted (see "Non-functional requirements"). Expired keys are released by a scheduled task,
+  so a key can keep replaying for up to one sweep interval past the 24 hours.
 
 Requests are compared after defaults are applied and `topic` is trimmed. Key order, defaults
 sent explicitly, and whitespace around the topic therefore do not count as differences.
@@ -155,7 +160,7 @@ returns the original job and the current budget without using up another job.
 ### `GET /v1/generations/{jobId}`
 
 Polled by the client. Returns `200` in every non-terminal and terminal state; a job that
-does not exist returns `404`.
+does not exist, or that has been deleted after its retention period, returns `404`.
 
 **Access.** `X-Client-Id` is required and validated here under the same rules as on
 `POST /generations`, but access to a job is not scoped by client: anyone who knows a `jobId`
@@ -177,6 +182,10 @@ can poll it. This is intentional. The random v4 job id is itself the capability,
 
 **Statuses.** `queued`, `running`, `succeeded`, `failed`, `cancelled`. The last three are
 terminal; the client stops polling on them.
+
+A job never stays non-terminal forever. If a job stops making progress (its worker died, or it
+was never picked up), a scheduled sweep fails it with `GENERATION_FAILED`: a `running` job
+after 15 minutes without a state change, a `queued` job after an hour.
 
 **Stages**, reported in order so the client can show meaningful progress:
 
@@ -482,7 +491,8 @@ carry an `Allow` header listing the methods the path does accept.
 - `GET /generations/{jobId}` responds in under 200 ms and is cheap enough to poll every 2
   seconds per client.
 - Jobs are retained for at least 24 hours after completion so a user who backgrounded the
-  app can come back to a finished result.
+  app can come back to a finished result. After that they are deleted, and polling one returns
+  `404 JOB_NOT_FOUND`.
 - Identical `(topic, language, cardCount, difficulty, noteTypes)` tuples should hit a server
   side cache. The same "table of irregular verbs" is requested by many users and should be
   generated once. `includeImages` and `instructions` shape the output too, so they are part of
