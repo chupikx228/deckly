@@ -1283,6 +1283,7 @@ def pipeline_for(harness: Harness, llm: LlmClient) -> RunGeneration:
     ids = sequential_job_ids()
     return RunGeneration(
         store=harness.store,
+        cache=harness.cache,
         retriever=harness.providers,
         parser=harness.providers,
         generator=LlmCardGenerator(llm=llm, new_id=lambda: next(ids), handlers=NOTE_TYPE_HANDLERS),

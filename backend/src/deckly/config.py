@@ -24,6 +24,7 @@ MAX_MEDIA_IMAGES = 50
 MAX_MEDIA_CANDIDATES = 50
 MAX_MEDIA_CONCURRENCY = 8
 REGENERATE_OVERHEAD_SECONDS = 1.5
+MEDIA_URL_MIN_VALIDITY_SECONDS = 24 * 60 * 60
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 ModelProvider = Literal["anthropic", "deepseek"]
@@ -180,7 +181,7 @@ class RegenerateSettings(BaseSettings):
 class CacheSettings(BaseSettings):
     model_config = _settings_config("DECKLY_CACHE_")
 
-    generation_result_ttl_seconds: PositiveInt
+    generation_result_ttl_seconds: Annotated[int, Field(gt=0, lt=MEDIA_URL_MIN_VALIDITY_SECONDS)]
     idempotency_key_ttl_seconds: PositiveInt
     job_retention_seconds: PositiveInt
 

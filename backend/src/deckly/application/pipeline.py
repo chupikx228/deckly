@@ -13,6 +13,7 @@ from deckly.application.ports import (
     JobTransition,
     MediaFetcher,
     NoteMedia,
+    ResultCache,
     SourceParser,
     SourceRetriever,
     StoredJob,
@@ -71,6 +72,10 @@ def attach_media(result: GenerationResult, attachments: Iterable[NoteMedia]) -> 
     return replace(result, notes=notes)
 
 
+def failure_level(error: Exception) -> int:
+    return logging.WARNING if isinstance(error, UpstreamUnavailableError) else logging.ERROR
+
+
 def log_context(job: GenerationJob) -> dict[str, object]:
     context: dict[str, object] = {
         "job_id": str(job.job_id),
@@ -84,8 +89,15 @@ def log_context(job: GenerationJob) -> dict[str, object]:
 
 
 @dataclass(frozen=True, slots=True)
+class Illustrated:
+    result: GenerationResult
+    complete: bool
+
+
+@dataclass(frozen=True, slots=True)
 class RunGeneration:
     store: JobStore
+    cache: ResultCache
     retriever: SourceRetriever
     parser: SourceParser
     generator: CardGenerator
@@ -124,6 +136,10 @@ class RunGeneration:
             logger.log(level, "generation_failed", exc_info=error, extra=log_context(failed))
 
     async def _generate(self, job_id: UUID, request: GenerationRequest) -> None:
+        cached = await self._recall(job_id, request)
+        if cached is not None:
+            await self._succeed(job_id, cached, cache_hit=True)
+            return
         await self._enter(job_id, JobStage.RETRIEVING_SOURCES)
         pages = await self.retriever.retrieve(job_id, request)
         await self._enter(job_id, JobStage.PARSING_SOURCES)
@@ -131,28 +147,60 @@ class RunGeneration:
         await self._enter(job_id, JobStage.GENERATING_CARDS)
         cards = await self.generator.generate(job_id, request, material)
         result = require_notes(cards.result)
+        cacheable = True
         if request.include_images:
             await self._enter(job_id, JobStage.FETCHING_MEDIA)
-            result = await self._illustrate(job_id, result, queries_for(result, cards.image_queries))
+            illustrated = await self._illustrate(job_id, result, queries_for(result, cards.image_queries))
+            result, cacheable = illustrated.result, illustrated.complete
         await self._enter(job_id, JobStage.FINALIZING)
+        await self._succeed(job_id, result, cache_hit=False)
+        if cacheable:
+            await self._remember(job_id, request, result)
+
+    async def _succeed(self, job_id: UUID, result: GenerationResult, *, cache_hit: bool) -> None:
         now = self.clock()
         succeeded = await self._update(job_id, lambda job: job.succeed(result, now))
-        logger.info("generation_succeeded", extra={**log_context(succeeded), "notes": len(result.notes)})
+        logger.info(
+            "generation_succeeded",
+            extra={**log_context(succeeded), "notes": len(result.notes), "cache_hit": cache_hit},
+        )
+
+    async def _recall(self, job_id: UUID, request: GenerationRequest) -> GenerationResult | None:
+        try:
+            return await self.cache.get(request)
+        except Exception as error:
+            logger.log(
+                failure_level(error),
+                "generation_cache_read_failed",
+                exc_info=error,
+                extra={"job_id": str(job_id)},
+            )
+            return None
+
+    async def _remember(self, job_id: UUID, request: GenerationRequest, result: GenerationResult) -> None:
+        try:
+            await self.cache.put(request, result)
+        except Exception as error:
+            logger.log(
+                failure_level(error),
+                "generation_cache_write_failed",
+                exc_info=error,
+                extra={"job_id": str(job_id)},
+            )
 
     async def _illustrate(
         self, job_id: UUID, result: GenerationResult, queries: tuple[ImageQuery, ...]
-    ) -> GenerationResult:
+    ) -> Illustrated:
         try:
             illustrated = attach_media(result, await self.media.fetch(job_id, queries))
         except Exception as error:
-            level = logging.WARNING if isinstance(error, UpstreamUnavailableError) else logging.ERROR
             logger.log(
-                level,
+                failure_level(error),
                 "media_skipped",
                 exc_info=error,
                 extra={"job_id": str(job_id), "image_queries": len(queries)},
             )
-            return result
+            return Illustrated(result=result, complete=False)
         illustrated_notes = sum(
             1 for before, after in zip(result.notes, illustrated.notes, strict=True) if after is not before
         )
@@ -164,7 +212,7 @@ class RunGeneration:
                 "illustrated_notes": illustrated_notes,
             },
         )
-        return illustrated
+        return Illustrated(result=illustrated, complete=True)
 
     async def _enter(self, job_id: UUID, stage: JobStage) -> None:
         now = self.clock()

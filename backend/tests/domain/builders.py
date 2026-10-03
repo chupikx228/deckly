@@ -1,10 +1,12 @@
 from datetime import UTC, datetime, timedelta, timezone
 from types import MappingProxyType
+from typing import TypedDict
 from uuid import UUID
 
 import pytest
 
 from deckly.domain.deck import Deck, GenerationResult
+from deckly.domain.generation import Difficulty
 from deckly.domain.media import Media, MediaKind
 from deckly.domain.notes import registry
 from deckly.domain.notes.basic import (
@@ -58,6 +60,16 @@ FIELDS_BY_TYPE: dict[NoteType, NoteFields] = {
         regions=(OcclusionRegion(1, 0.1, 0.1, 0.2, 0.2), OcclusionRegion(3, 0.5, 0.5, 0.5, 0.5)),
     ),
 }
+
+
+class RequestChanges(TypedDict, total=False):
+    topic: str
+    language: str
+    card_count: int
+    difficulty: Difficulty
+    note_types: tuple[NoteType, ...]
+    include_images: bool
+    instructions: str | None
 
 
 def at(seconds: int) -> datetime:

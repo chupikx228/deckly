@@ -94,6 +94,10 @@ def fold_case_simply(character: str) -> str:
     return character
 
 
+def collapse_whitespace(value: str) -> str:
+    return unicodedata.normalize(COMPARISON_FORM, " ".join(value.split()))
+
+
 def normalise_for_comparison(value: str) -> str:
     visible = "".join(
         fold_width(character)

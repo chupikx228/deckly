@@ -482,7 +482,9 @@ carry an `Allow` header listing the methods the path does accept.
   app can come back to a finished result.
 - Identical `(topic, language, cardCount, difficulty, noteTypes)` tuples should hit a server
   side cache. The same "table of irregular verbs" is requested by many users and should be
-  generated once.
+  generated once. `includeImages` and `instructions` shape the output too, so they are part of
+  the cache key. A cache hit is still a job: it goes `queued → running → succeeded` and is polled
+  like any other, and it still counts against the client's daily quota.
 - Generated content must be filtered for policy violations before it reaches the client.
 
 ## Resolved decisions
