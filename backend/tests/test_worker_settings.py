@@ -54,6 +54,7 @@ from tests.fakes import (
     InMemoryJobHousekeeping,
     InMemoryJobStore,
     ManualTime,
+    fresh_probe,
     generation_request,
     job_id,
     scope,
@@ -122,7 +123,7 @@ def test_every_configurable_model_provider_has_a_client() -> None:
 async def test_llm_client_is_built_behind_the_resilience_layer_for_every_provider(
     provider: ModelProvider,
 ) -> None:
-    client = build_llm_client(provider_settings(provider))
+    client = build_llm_client(provider_settings(provider), probe=fresh_probe())
 
     assert isinstance(client, ResilientLlmClient)
     await client.aclose()
@@ -133,7 +134,7 @@ async def test_moderation_client_is_built_for_every_provider_behind_its_own_resi
     provider: ModelProvider,
 ) -> None:
     providers = provider_settings(provider)
-    client = build_moderation_llm_client(providers)
+    client = build_moderation_llm_client(providers, probe=fresh_probe())
     plain = moderation_llm_client(providers, providers.moderation_timeout_seconds)
 
     assert isinstance(client, ResilientLlmClient)
@@ -143,7 +144,7 @@ async def test_moderation_client_is_built_for_every_provider_behind_its_own_resi
 
 
 async def test_source_retriever_searches_tavily_behind_the_resilience_layer_with_the_configured_cap() -> None:
-    retriever = build_source_retriever(provider_settings("anthropic"))
+    retriever = build_source_retriever(provider_settings("anthropic"), probe=fresh_probe())
 
     assert isinstance(retriever, WebSourceRetriever)
     assert isinstance(retriever.client, TavilySearchClient)
@@ -154,7 +155,7 @@ async def test_source_retriever_searches_tavily_behind_the_resilience_layer_with
 async def test_media_fetcher_searches_commons_behind_the_resilience_layer_with_the_configured_limits() -> (
     None
 ):
-    fetcher = build_media_fetcher(provider_settings("anthropic"))
+    fetcher = build_media_fetcher(provider_settings("anthropic"), probe=fresh_probe())
 
     assert isinstance(fetcher, CommonsMediaFetcher)
     assert isinstance(fetcher.client, CommonsImageSearchClient)
@@ -183,7 +184,7 @@ async def test_shutdown_closes_the_search_and_image_clients_even_when_closing_th
     time = ManualTime()
     search = FakeSearchClient(())
     images = FakeImageSearchClient(())
-    caller = ResilientCaller(SEARCH_POLICY, time.breaker(), time.runtime())
+    caller = ResilientCaller(SEARCH_POLICY, time.breaker(), time.runtime(), probe=fresh_probe())
     ctx: WorkerContext = {
         LLM_CLIENT_KEY: ResilientLlmClient(FailingToCloseLlm(), caller, 1000),
         SOURCE_RETRIEVER_KEY: WebSourceRetriever(client=search, caller=caller, clock=utc_now, max_results=6),
@@ -201,7 +202,7 @@ async def test_shutdown_closes_the_search_and_image_clients_even_when_closing_th
 
 async def test_shutdown_closes_the_moderation_client_even_when_closing_the_model_client_fails() -> None:
     time = ManualTime()
-    caller = ResilientCaller(SEARCH_POLICY, time.breaker(), time.runtime())
+    caller = ResilientCaller(SEARCH_POLICY, time.breaker(), time.runtime(), probe=fresh_probe())
     moderation = FakeLlmClient()
     ctx: WorkerContext = {
         LLM_CLIENT_KEY: ResilientLlmClient(FailingToCloseLlm(), caller, 1000),

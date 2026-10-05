@@ -56,7 +56,7 @@ class CommonsMediaFetcher:
     new_id: Callable[[], UUID]
     limits: MediaLimits
 
-    async def fetch(self, job_id: UUID, queries: tuple[ImageQuery, ...]) -> tuple[NoteMedia, ...]:
+    async def fetch(self, _job_id: UUID, queries: tuple[ImageQuery, ...]) -> tuple[NoteMedia, ...]:
         searched = await self._search_all(one_query_per_note(queries, self.limits.max_images))
         attachments = self._choose(searched.outcomes)
         failures = Counter(outcome.failure for outcome in searched.outcomes if outcome.failure is not None)
@@ -64,7 +64,6 @@ class CommonsMediaFetcher:
             logging.WARNING if failures or searched.deadline_reached else logging.INFO,
             "media_fetched",
             extra={
-                "job_id": str(job_id),
                 "image_queries": len(queries),
                 "searched": len(searched.outcomes),
                 "attached": len(attachments),

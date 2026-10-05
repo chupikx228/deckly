@@ -56,7 +56,7 @@ class WebSourceRetriever:
     clock: Callable[[], datetime]
     max_results: int
 
-    async def retrieve(self, job_id: UUID, request: GenerationRequest) -> tuple[RetrievedPage, ...]:
+    async def retrieve(self, _job_id: UUID, request: GenerationRequest) -> tuple[RetrievedPage, ...]:
         query = SearchQuery(
             text=visible_words(strip_unstorable(request.topic)),
             language=language_hint(request.language),
@@ -70,7 +70,7 @@ class WebSourceRetriever:
         logger.log(
             logging.INFO if pages else logging.WARNING,
             "sources_retrieved",
-            extra={"job_id": str(job_id), "hits": len(hits), "pages": len(pages)},
+            extra={"hits": len(hits), "pages": len(pages)},
         )
         return pages
 

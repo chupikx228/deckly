@@ -36,12 +36,12 @@ class CleaningSourceParser:
     max_characters: int
 
     async def parse(
-        self, job_id: UUID, request: GenerationRequest, pages: tuple[RetrievedPage, ...]
+        self, _job_id: UUID, request: GenerationRequest, pages: tuple[RetrievedPage, ...]
     ) -> tuple[SourceMaterial, ...]:
         del request
-        return await asyncio.to_thread(self._parse, job_id, pages)
+        return await asyncio.to_thread(self._parse, pages)
 
-    def _parse(self, job_id: UUID, pages: tuple[RetrievedPage, ...]) -> tuple[SourceMaterial, ...]:
+    def _parse(self, pages: tuple[RetrievedPage, ...]) -> tuple[SourceMaterial, ...]:
         drops: Counter[DropReason] = Counter()
         material: list[SourceMaterial] = []
         seen: set[str] = set()
@@ -60,7 +60,6 @@ class CleaningSourceParser:
             logging.INFO if material else logging.WARNING,
             "sources_parsed",
             extra={
-                "job_id": str(job_id),
                 "pages": len(pages),
                 "kept_pages": len(material),
                 "dropped_pages": dict(drops),

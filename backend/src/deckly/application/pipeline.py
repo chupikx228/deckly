@@ -1,20 +1,26 @@
 import asyncio
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from datetime import datetime
 from uuid import UUID
 
+from deckly.application.correlation import JOB_ID, correlated
 from deckly.application.exceptions import (
     JobStoppedError,
     NoValidContentError,
     UnreadableJobRequestError,
     UpstreamUnavailableError,
 )
-from deckly.application.generations import Clock
+from deckly.application.generations import Clock, elapsed_ms
 from deckly.application.ports import (
     CardGenerator,
     ContentModerator,
+    GenerationTelemetry,
     ImageQuery,
+    JobOutcome,
+    JobRun,
     JobStore,
     JobTransition,
     MediaFetcher,
@@ -110,70 +116,97 @@ class RunGeneration:
     moderator: ContentModerator
     media: MediaFetcher
     clock: Clock
+    telemetry: GenerationTelemetry
 
     async def __call__(self, job_id: UUID) -> None:
+        with correlated(JOB_ID, job_id), self.telemetry.run(job_id) as run:
+            await self._execute(job_id, run)
+
+    async def _execute(self, job_id: UUID, run: JobRun) -> None:
         try:
             stored = await self.store.get_stored(job_id)
         except UnreadableJobRequestError:
-            await self._reject_unreadable(job_id)
+            await self._reject_unreadable(job_id, run)
             return
         if stored is None or stored.job.is_terminal:
             logger.info("generation_skipped", extra={"job_id": str(job_id)})
+            run.finish(JobOutcome.SKIPPED)
             return
         try:
-            await self._run(stored)
+            await self._run(stored, run)
         except JobStoppedError:
             logger.info("generation_stopped", extra={"job_id": str(job_id)})
+            run.finish(JobOutcome.STOPPED)
 
-    async def _run(self, stored: StoredJob) -> None:
+    async def _run(self, stored: StoredJob, run: JobRun) -> None:
         job_id = stored.job.job_id
         if stored.job.status is JobStatus.RUNNING:
             abandoned = await self._fail(job_id, FailureCode.GENERATION_FAILED)
             logger.warning("generation_abandoned", extra=log_context(abandoned))
+            run.finish(JobOutcome.FAILED, FailureCode.GENERATION_FAILED)
             return
         now = self.clock()
-        await self._update(job_id, lambda job: job.start(now))
+        started = await self._update(job_id, lambda job: job.start(now))
+        logger.info("generation_started", extra=log_context(started))
         try:
-            await self._generate(job_id, stored.request)
+            await self._generate(job_id, stored.request, now, run)
         except JobStoppedError:
             raise
         except asyncio.CancelledError:
-            await self._record_interruption(job_id)
+            await self._record_interruption(job_id, run)
             raise
         except Exception as error:
             code = failure_code_for(error)
             failed = await self._fail(job_id, code)
             level = logging.WARNING if code in EXPECTED_FAILURES else logging.ERROR
-            logger.log(level, "generation_failed", exc_info=error, extra=log_context(failed))
+            logger.log(
+                level,
+                "generation_failed",
+                exc_info=error,
+                extra={**log_context(failed), "duration_ms": elapsed_ms(now, failed.updated_at)},
+            )
+            run.finish(JobOutcome.FAILED, code)
 
-    async def _generate(self, job_id: UUID, request: GenerationRequest) -> None:
-        cached = await self._recall(job_id, request)
-        if cached is not None:
-            await self._succeed(job_id, cached, cache_hit=True)
-            return
-        await self._enter(job_id, JobStage.RETRIEVING_SOURCES)
-        pages = await self.retriever.retrieve(job_id, request)
-        await self._enter(job_id, JobStage.PARSING_SOURCES)
-        material = await self.parser.parse(job_id, request, pages)
-        await self._enter(job_id, JobStage.GENERATING_CARDS)
-        cards = await self.generator.generate(job_id, request, material)
-        result = require_notes(await self.moderator.screen(job_id, request, require_notes(cards.result)))
+    async def _generate(
+        self, job_id: UUID, request: GenerationRequest, started: datetime, run: JobRun
+    ) -> None:
+        with self.telemetry.stage(JobStage.PLANNING):
+            cached = await self._recall(job_id, request)
+            if cached is not None:
+                await self._succeed(job_id, cached, started, cache_hit=True)
+                run.finish(JobOutcome.SUCCEEDED)
+                return
+        async with self._stage(job_id, JobStage.RETRIEVING_SOURCES):
+            pages = await self.retriever.retrieve(job_id, request)
+        async with self._stage(job_id, JobStage.PARSING_SOURCES):
+            material = await self.parser.parse(job_id, request, pages)
+        async with self._stage(job_id, JobStage.GENERATING_CARDS):
+            cards = await self.generator.generate(job_id, request, material)
+            result = require_notes(await self.moderator.screen(job_id, request, require_notes(cards.result)))
         cacheable = True
         if request.include_images:
-            await self._enter(job_id, JobStage.FETCHING_MEDIA)
-            illustrated = await self._illustrate(job_id, result, queries_for(result, cards.image_queries))
+            async with self._stage(job_id, JobStage.FETCHING_MEDIA):
+                illustrated = await self._illustrate(job_id, result, queries_for(result, cards.image_queries))
             result, cacheable = illustrated.result, illustrated.complete
-        await self._enter(job_id, JobStage.FINALIZING)
-        await self._succeed(job_id, result, cache_hit=False)
-        if cacheable:
-            await self._remember(job_id, request, result)
+        async with self._stage(job_id, JobStage.FINALIZING):
+            await self._succeed(job_id, result, started, cache_hit=False)
+            run.finish(JobOutcome.SUCCEEDED)
+            if cacheable:
+                await self._remember(job_id, request, result)
 
-    async def _succeed(self, job_id: UUID, result: GenerationResult, *, cache_hit: bool) -> None:
+    async def _succeed(
+        self, job_id: UUID, result: GenerationResult, started: datetime, *, cache_hit: bool
+    ) -> None:
         now = self.clock()
         succeeded = await self._update(job_id, lambda job: job.succeed(result, now))
         logger.info(
             "generation_succeeded",
-            extra={**log_context(succeeded), "notes": len(result.notes), "cache_hit": cache_hit},
+            extra={
+                **log_context(succeeded),
+                "notes": len(result.notes),
+                "cache_hit": cache_hit,
+                "duration_ms": elapsed_ms(started, succeeded.updated_at),
+            },
         )
 
     async def _recall(self, job_id: UUID, request: GenerationRequest) -> GenerationResult | None:
@@ -225,30 +258,40 @@ class RunGeneration:
         )
         return Illustrated(result=illustrated, complete=True)
 
+    @asynccontextmanager
+    async def _stage(self, job_id: UUID, stage: JobStage) -> AsyncIterator[None]:
+        with self.telemetry.stage(stage):
+            await self._enter(job_id, stage)
+            yield
+
     async def _enter(self, job_id: UUID, stage: JobStage) -> None:
         now = self.clock()
         progress = stage_progress(stage)
         entered = await self._update(job_id, lambda job: job.advance(stage, progress, now))
         logger.info("generation_stage_entered", extra=log_context(entered))
 
-    async def _reject_unreadable(self, job_id: UUID) -> None:
+    async def _reject_unreadable(self, job_id: UUID, run: JobRun) -> None:
         try:
             rejected = await self._fail(job_id, FailureCode.GENERATION_FAILED)
         except JobStoppedError:
             logger.info("generation_stopped", extra={"job_id": str(job_id)})
+            run.finish(JobOutcome.STOPPED)
             return
         logger.error("generation_request_unreadable", extra=log_context(rejected))
+        run.finish(JobOutcome.FAILED, FailureCode.GENERATION_FAILED)
 
-    async def _record_interruption(self, job_id: UUID) -> None:
+    async def _record_interruption(self, job_id: UUID, run: JobRun) -> None:
         try:
             interrupted = await self._fail(job_id, FailureCode.GENERATION_FAILED)
         except JobStoppedError:
             logger.info("generation_stopped", extra={"job_id": str(job_id)})
+            run.finish(JobOutcome.STOPPED)
             return
         except Exception:
             logger.exception("generation_interruption_not_recorded", extra={"job_id": str(job_id)})
             return
         logger.warning("generation_interrupted", extra=log_context(interrupted))
+        run.finish(JobOutcome.FAILED, FailureCode.GENERATION_FAILED)
 
     async def _fail(self, job_id: UUID, code: FailureCode) -> GenerationJob:
         now = self.clock()

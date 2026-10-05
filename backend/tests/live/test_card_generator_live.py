@@ -10,6 +10,7 @@ from deckly.domain.source import Source
 from deckly.infrastructure.card_generator.generator import LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.worker.settings import build_llm_client
+from tests.fakes import fresh_probe
 
 pytestmark = [pytest.mark.live, pytest.mark.anyio]
 
@@ -36,7 +37,7 @@ REQUEST = GenerationRequest(
 
 
 async def test_configured_provider_generates_valid_notes_that_cite_the_material() -> None:
-    llm = build_llm_client(load_settings().providers)
+    llm = build_llm_client(load_settings().providers, probe=fresh_probe())
     generator = LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS)
     try:
         result = (await generator.generate(uuid4(), REQUEST, MATERIAL)).result

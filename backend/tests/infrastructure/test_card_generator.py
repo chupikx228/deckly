@@ -9,6 +9,8 @@ from dataclasses import replace
 
 import pytest
 
+from deckly.application.correlation import JOB_ID as JOB_ID_FIELD
+from deckly.application.correlation import correlated
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.pipeline import RunGeneration
 from deckly.application.ports import GeneratedCards, ImageQuery, SourceMaterial
@@ -49,6 +51,8 @@ from tests.fakes import (
     Harness,
     LlmOutcome,
     SlowModel,
+    fresh_probe,
+    fresh_telemetry,
     generation_request,
     hang_forever,
     job_id,
@@ -56,6 +60,7 @@ from tests.fakes import (
     scope,
     sequential_job_ids,
 )
+from tests.logs import captured_json_logs
 from tests.transport.openapi import spec_errors
 
 pytestmark = pytest.mark.anyio
@@ -1230,13 +1235,13 @@ LOGGED_OUTCOMES: dict[str, tuple[tuple[SourceMaterial, ...], str]] = {
 
 @pytest.mark.parametrize(("material", "message"), LOGGED_OUTCOMES.values(), ids=LOGGED_OUTCOMES.keys())
 async def test_outcome_log_line_names_the_job_it_came_from(
-    material: tuple[SourceMaterial, ...], message: str, caplog: pytest.LogCaptureFixture
+    material: tuple[SourceMaterial, ...], message: str
 ) -> None:
-    with caplog.at_level(logging.INFO, logger=GENERATOR_LOGGER):
+    with captured_json_logs() as logs, correlated(JOB_ID_FIELD, JOB_ID):
         await generate(FakeLlmClient(model_reply(document(basic(1)))), request(NoteType.BASIC), material)
 
-    [record] = [record for record in caplog.records if record.getMessage() == message]
-    assert record.__dict__["job_id"] == str(JOB_ID)
+    [line] = logs.named(message)
+    assert line["job_id"] == str(JOB_ID)
 
 
 QUICK_POLICY = RetryPolicy(
@@ -1254,9 +1259,13 @@ MODEL_MAX_OUTPUT_TOKENS = 16_000
 def resilient(
     llm: LlmClient, breaker: CircuitBreaker | None = None, policy: RetryPolicy = QUICK_POLICY
 ) -> ResilientLlmClient:
-    circuit = breaker or CircuitBreaker(failure_threshold=5, reset_seconds=30, clock=lambda: 0.0)
+    circuit = breaker or CircuitBreaker(
+        failure_threshold=5, reset_seconds=30, clock=lambda: 0.0, probe=fresh_probe()
+    )
     runtime = RetryRuntime(clock=lambda: 0.0, sleep=asyncio.sleep, jitter=lambda: 0.0)
-    return ResilientLlmClient(llm, ResilientCaller(policy, circuit, runtime), MODEL_MAX_OUTPUT_TOKENS)
+    return ResilientLlmClient(
+        llm, ResilientCaller(policy, circuit, runtime, probe=fresh_probe()), MODEL_MAX_OUTPUT_TOKENS
+    )
 
 
 DECK_SIZES: dict[str, tuple[int, CircuitState]] = {
@@ -1270,7 +1279,7 @@ DECK_SIZES: dict[str, tuple[int, CircuitState]] = {
 async def test_model_timeouts_count_against_the_provider_unless_the_deck_is_oversized(
     card_count: int, state: CircuitState
 ) -> None:
-    breaker = CircuitBreaker(failure_threshold=1, reset_seconds=30, clock=lambda: 0.0)
+    breaker = CircuitBreaker(failure_threshold=1, reset_seconds=30, clock=lambda: 0.0, probe=fresh_probe())
     llm = resilient(FakeLlmClient(hang_forever), breaker)
 
     with pytest.raises(UpstreamUnavailableError):
@@ -1290,6 +1299,7 @@ def pipeline_for(harness: Harness, llm: LlmClient) -> RunGeneration:
         moderator=harness.providers,
         media=harness.providers,
         clock=lambda: harness.now,
+        telemetry=fresh_telemetry(),
     )
 
 
@@ -1313,7 +1323,7 @@ async def test_cancel_during_the_model_call_aborts_the_call_and_leaves_the_job_c
     harness = Harness()
     model = SlowModel(model_reply(document(basic(1))))
     llm = FakeLlmClient(model.think)
-    breaker = CircuitBreaker(failure_threshold=1, reset_seconds=30, clock=lambda: 0.0)
+    breaker = CircuitBreaker(failure_threshold=1, reset_seconds=30, clock=lambda: 0.0, probe=fresh_probe())
     job_id = (await harness.create(generation_request(), scope(), ADDRESS)).job.job_id
     running = asyncio.create_task(pipeline_for(harness, resilient(llm, breaker, PATIENT_POLICY))(job_id))
     harness.queue.running[job_id] = running
@@ -1355,7 +1365,7 @@ async def test_pipeline_maps_each_adapter_outcome_to_its_failure_code(
 
 
 async def test_pipeline_fails_fast_with_provider_unavailable_while_the_circuit_is_open() -> None:
-    breaker = CircuitBreaker(failure_threshold=1, reset_seconds=30, clock=lambda: 0.0)
+    breaker = CircuitBreaker(failure_threshold=1, reset_seconds=30, clock=lambda: 0.0, probe=fresh_probe())
     breaker.record_failure()
     llm = FakeLlmClient(model_reply(document(basic(1))))
 

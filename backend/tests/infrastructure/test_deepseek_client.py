@@ -8,6 +8,7 @@ import httpx2
 import pytest
 
 from deckly.infrastructure.llm.client import (
+    REDACTED,
     LlmEndpoint,
     LlmError,
     LlmPrompt,
@@ -17,7 +18,7 @@ from deckly.infrastructure.llm.client import (
     LlmStop,
     LlmUnavailableError,
 )
-from deckly.infrastructure.llm.deepseek_client import REDACTED, DeepSeekLlmClient
+from deckly.infrastructure.llm.deepseek_client import DeepSeekLlmClient
 from deckly.infrastructure.resilience import TransientError
 
 pytestmark = pytest.mark.anyio

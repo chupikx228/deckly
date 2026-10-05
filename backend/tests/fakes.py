@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterator
@@ -36,8 +37,18 @@ from deckly.infrastructure.llm.client import LlmPrompt, LlmReply, LlmStop
 from deckly.infrastructure.media.client import ImageCandidate, ImageSearch, MediaEndpoint
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
+from deckly.infrastructure.observability.metrics import Metrics
+from deckly.infrastructure.observability.runtime import Observability, create_observability
+from deckly.infrastructure.observability.telemetry import ObservedGeneration
 from deckly.infrastructure.quota import QUOTA_WINDOW
-from deckly.infrastructure.resilience import CircuitBreaker, ResilientCaller, RetryPolicy, RetryRuntime
+from deckly.infrastructure.resilience import (
+    CircuitBreaker,
+    ProviderOperation,
+    ProviderProbe,
+    ResilientCaller,
+    RetryPolicy,
+    RetryRuntime,
+)
 from deckly.infrastructure.search.client import SearchEndpoint, SearchHit, SearchQuery
 from deckly.infrastructure.search.parser import CleaningSourceParser
 from deckly.infrastructure.search.retriever import WebSourceRetriever
@@ -79,6 +90,7 @@ SOURCE_MAX_CHARACTERS = 2000
 PAGES = (RetrievedPage(source=SOURCES[0], content="<p>A red triangle warns of danger ahead.</p>"),)
 MATERIAL = (SourceMaterial(source=SOURCES[0], text="A red triangle warns of danger ahead."),)
 GENERATED = result_with(basic_note(1), basic_note(2), basic_note(3))
+TEST_SERVICE_NAME = "deckly-test"
 
 type Hook = Callable[[], Awaitable[object]]
 type TopicOutcome = bool | Exception | Callable[[], Awaitable[bool]]
@@ -87,6 +99,22 @@ type SearchOutcome = tuple[SearchHit, ...] | Exception | Callable[[], Awaitable[
 type ImageOutcome = (
     tuple[ImageCandidate, ...] | Exception | Callable[[], Awaitable[tuple[ImageCandidate, ...]]]
 )
+
+
+def fresh_observability() -> Observability:
+    return create_observability(TEST_SERVICE_NAME, "none", io.StringIO())
+
+
+def fresh_metrics() -> Metrics:
+    return fresh_observability().metrics
+
+
+def fresh_probe(operation: ProviderOperation = ProviderOperation.CARD_GENERATION) -> ProviderProbe:
+    return fresh_observability().probe(operation)
+
+
+def fresh_telemetry() -> ObservedGeneration:
+    return fresh_observability().generation()
 
 
 def model_reply(document: object, stop: LlmStop = LlmStop.COMPLETE) -> LlmReply:
@@ -174,7 +202,10 @@ class ManualTime:
 
     def breaker(self, failure_threshold: int = 5) -> CircuitBreaker:
         return CircuitBreaker(
-            failure_threshold=failure_threshold, reset_seconds=RESET_SECONDS, clock=self.clock
+            failure_threshold=failure_threshold,
+            reset_seconds=RESET_SECONDS,
+            clock=self.clock,
+            probe=fresh_probe(),
         )
 
     def runtime(self) -> RetryRuntime:
@@ -190,7 +221,7 @@ def web_sources(
 ) -> tuple[WebSourceRetriever, CleaningSourceParser]:
     retriever = WebSourceRetriever(
         client=TavilySearchClient(SEARCH_ENDPOINT, httpx2.MockTransport(handler)),
-        caller=ResilientCaller(SEARCH_POLICY, time.breaker(), time.runtime()),
+        caller=ResilientCaller(SEARCH_POLICY, time.breaker(), time.runtime(), probe=fresh_probe()),
         clock=clock,
         max_results=SEARCH_MAX_RESULTS,
     )
@@ -245,7 +276,7 @@ def commons_fetcher(
 ) -> CommonsMediaFetcher:
     return CommonsMediaFetcher(
         client=CommonsImageSearchClient(MEDIA_ENDPOINT, httpx2.MockTransport(handler)),
-        caller=ResilientCaller(MEDIA_POLICY, breaker or time.breaker(), time.runtime()),
+        caller=ResilientCaller(MEDIA_POLICY, breaker or time.breaker(), time.runtime(), probe=fresh_probe()),
         new_id=sequential_job_ids().__next__,
         limits=limits,
     )
@@ -589,6 +620,8 @@ class Harness:
         self.quota = InMemoryQuota()
         self.moderator = FakeTopicModerator()
         self.now = T0
+        self.observability = fresh_observability()
+        telemetry = self.observability.generation()
         ids = sequential_job_ids()
         self.create = CreateGeneration(
             store=self.store,
@@ -597,9 +630,12 @@ class Harness:
             moderator=self.moderator,
             clock=lambda: self.now,
             new_job_id=lambda: next(ids),
+            telemetry=telemetry,
         )
         self.get = GetGeneration(store=self.store)
-        self.cancel = CancelGeneration(store=self.store, queue=self.queue, clock=lambda: self.now)
+        self.cancel = CancelGeneration(
+            store=self.store, queue=self.queue, clock=lambda: self.now, telemetry=telemetry
+        )
         self.run = RunGeneration(
             store=self.store,
             cache=self.cache,
@@ -609,6 +645,7 @@ class Harness:
             moderator=self.providers,
             media=self.providers,
             clock=lambda: self.now,
+            telemetry=telemetry,
         )
 
 

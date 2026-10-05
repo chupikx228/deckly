@@ -163,14 +163,13 @@ class LlmCardGenerator:
     handlers: Mapping[NoteType, NoteTypeHandler]
 
     async def generate(
-        self, job_id: UUID, request: GenerationRequest, material: tuple[SourceMaterial, ...]
+        self, _job_id: UUID, request: GenerationRequest, material: tuple[SourceMaterial, ...]
     ) -> GeneratedCards:
         handlers = tuple(self.handlers[kind] for kind in request.note_types if kind in self.handlers)
         if request.card_count < MIN_CARD_COUNT or not handlers or not material:
             logger.warning(
                 "card_generation_skipped",
                 extra={
-                    "job_id": str(job_id),
                     "card_count": request.card_count,
                     "generatable_types": len(handlers),
                     "material_entries": len(material),
@@ -186,7 +185,6 @@ class LlmCardGenerator:
             outcome_level(reply, document),
             "card_generation_finished",
             extra={
-                "job_id": str(job_id),
                 "reply_stop": reply.stop,
                 "document_complete": document.complete,
                 "returned_notes": len(document.notes),

@@ -1,10 +1,11 @@
 import asyncio
-import logging
 from dataclasses import replace
 
 import httpx2
 import pytest
 
+from deckly.application.correlation import JOB_ID as JOB_ID_FIELD
+from deckly.application.correlation import correlated
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.domain.generation import GenerationRequest
 from deckly.infrastructure.resilience import (
@@ -24,7 +25,15 @@ from deckly.infrastructure.search.client import (
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
 from tests.domain.builders import JOB_ID, T0
-from tests.fakes import RESET_SECONDS, SEARCH_ENDPOINT, FakeSearchClient, ManualTime, generation_request
+from tests.fakes import (
+    RESET_SECONDS,
+    SEARCH_ENDPOINT,
+    FakeSearchClient,
+    ManualTime,
+    fresh_probe,
+    generation_request,
+)
+from tests.logs import captured_json_logs
 
 pytestmark = pytest.mark.anyio
 
@@ -57,7 +66,7 @@ def retriever(
 ) -> WebSourceRetriever:
     return WebSourceRetriever(
         client=client,
-        caller=ResilientCaller(policy, breaker or time.breaker(), time.runtime()),
+        caller=ResilientCaller(policy, breaker or time.breaker(), time.runtime(), probe=fresh_probe()),
         clock=lambda: T0,
         max_results=MAX_RESULTS,
     )
@@ -346,7 +355,7 @@ async def test_tavily_quota_statuses_open_the_circuit_so_later_calls_never_reach
 
     search = WebSourceRetriever(
         client=TavilySearchClient(SEARCH_ENDPOINT, httpx2.MockTransport(over_quota)),
-        caller=ResilientCaller(POLICY, breaker, time.runtime()),
+        caller=ResilientCaller(POLICY, breaker, time.runtime(), probe=fresh_probe()),
         clock=lambda: T0,
         max_results=MAX_RESULTS,
     )
@@ -361,9 +370,9 @@ async def test_tavily_quota_statuses_open_the_circuit_so_later_calls_never_reach
     assert breaker.state is CircuitState.OPEN
 
 
-async def test_retrieval_log_names_the_job(caplog: pytest.LogCaptureFixture) -> None:
-    with caplog.at_level(logging.INFO, logger=RETRIEVER_LOGGER):
+async def test_retrieval_log_names_the_job() -> None:
+    with captured_json_logs() as logs, correlated(JOB_ID_FIELD, JOB_ID):
         await retriever(FakeSearchClient((HIT,)), ManualTime()).retrieve(JOB_ID, generation_request())
 
-    [record] = [record for record in caplog.records if record.getMessage() == "sources_retrieved"]
-    assert record.__dict__["job_id"] == str(JOB_ID)
+    [line] = logs.named("sources_retrieved")
+    assert line["job_id"] == str(JOB_ID)

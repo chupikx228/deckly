@@ -21,6 +21,7 @@ from tests.fakes import (
     FakeProviders,
     InMemoryResultCache,
     ManualTime,
+    fresh_telemetry,
     generation_request,
     model_reply,
     tavily_result,
@@ -54,6 +55,7 @@ async def run_with(
         moderator=providers,
         media=providers,
         clock=utc_now,
+        telemetry=fresh_telemetry(),
     )
     job = GenerationJob.queue(uuid4(), T0)
     await store.add(job, generation_request(), cleanup.scope())

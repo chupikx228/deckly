@@ -15,6 +15,7 @@ from deckly.config import (
     CacheSettings,
     DatabaseSettings,
     LimitSettings,
+    ObservabilitySettings,
     ProviderSettings,
     RedisSettings,
     RegenerateSettings,
@@ -296,6 +297,7 @@ def settings_from_environment(monkeypatch: pytest.MonkeyPatch, **overrides: str)
         cache=CacheSettings.model_construct(),
         regenerate=RegenerateSettings(),
         sweep=SweepSettings(),
+        observability=ObservabilitySettings.model_construct(),
     )
 
 
@@ -785,3 +787,44 @@ def test_running_job_going_stale_just_after_an_interrupted_job_settles_is_accept
     )
 
     assert settings.sweep.running_stale_after_seconds == stale_after
+
+
+OBSERVABILITY_ENVIRONMENT = {
+    "DECKLY_OBSERVABILITY_TRACE_EXPORTER": "console",
+    "DECKLY_OBSERVABILITY_WORKER_METRICS_HOST": "127.0.0.1",
+    "DECKLY_OBSERVABILITY_WORKER_METRICS_PORT": "9464",
+}
+
+
+def set_observability_environment(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
+    for name, value in {**OBSERVABILITY_ENVIRONMENT, **overrides}.items():
+        monkeypatch.setenv(name, value)
+
+
+def test_complete_observability_settings_are_accepted(clean_environment: pytest.MonkeyPatch) -> None:
+    set_observability_environment(clean_environment)
+
+    observability = ObservabilitySettings()
+
+    assert observability.trace_exporter == "console"
+    assert observability.worker_metrics_port == 9464
+
+
+@pytest.mark.parametrize("exporter", ["otlp", "jaeger", "CONSOLE", ""])
+def test_unsupported_trace_exporters_are_rejected(
+    clean_environment: pytest.MonkeyPatch, exporter: str
+) -> None:
+    set_observability_environment(clean_environment, DECKLY_OBSERVABILITY_TRACE_EXPORTER=exporter)
+
+    with pytest.raises(ValidationError, match="trace_exporter"):
+        ObservabilitySettings()
+
+
+@pytest.mark.parametrize("port", ["0", "-1", "65536", "metrics"])
+def test_worker_metrics_port_must_be_a_usable_tcp_port(
+    clean_environment: pytest.MonkeyPatch, port: str
+) -> None:
+    set_observability_environment(clean_environment, DECKLY_OBSERVABILITY_WORKER_METRICS_PORT=port)
+
+    with pytest.raises(ValidationError, match="worker_metrics_port"):
+        ObservabilitySettings()

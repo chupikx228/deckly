@@ -18,7 +18,7 @@ from deckly.infrastructure.result_cache import (
 )
 from deckly.infrastructure.stored_result import dump_result
 from tests.domain.builders import FULL_RESULT, RequestChanges
-from tests.fakes import generation_request
+from tests.fakes import fresh_metrics, generation_request
 from tests.infrastructure.test_queue import LOOPBACK, never_answer, unused_port
 
 pytestmark = pytest.mark.anyio
@@ -130,7 +130,7 @@ def test_a_stored_note_that_breaks_a_domain_invariant_cannot_be_parsed() -> None
 
 def unreachable_cache() -> RedisResultCache:
     redis = Redis(host=LOOPBACK, port=unused_port(), socket_connect_timeout=0.2)
-    return RedisResultCache(redis, LIMITS)
+    return RedisResultCache(redis, LIMITS, metrics=fresh_metrics())
 
 
 async def test_reading_from_an_unreachable_redis_raises_upstream_unavailable() -> None:
@@ -153,7 +153,9 @@ async def test_a_redis_that_accepts_the_connection_but_never_answers_is_given_up
     server = await asyncio.start_server(never_answer, LOOPBACK, 0)
     port = server.sockets[0].getsockname()[1]
     redis = Redis(host=LOOPBACK, port=port)
-    cache = RedisResultCache(redis, ResultCacheLimits(ttl_seconds=60, command_timeout_seconds=0.1))
+    cache = RedisResultCache(
+        redis, ResultCacheLimits(ttl_seconds=60, command_timeout_seconds=0.1), metrics=fresh_metrics()
+    )
     try:
         async with asyncio.timeout(SAFETY_NET_SECONDS):
             with pytest.raises(UpstreamUnavailableError):

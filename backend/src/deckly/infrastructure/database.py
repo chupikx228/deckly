@@ -28,6 +28,7 @@ def create_engine(
         max_overflow=max_overflow,
         pool_timeout=pool_timeout_seconds,
         pool_pre_ping=True,
+        hide_parameters=True,
     )
 
 

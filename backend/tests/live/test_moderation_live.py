@@ -11,7 +11,7 @@ from deckly.infrastructure.moderation.moderator import LlmContentModerator
 from deckly.main import build_topic_moderator
 from deckly.worker.settings import build_moderation_llm_client, moderation_llm_client
 from tests.domain.builders import basic_note
-from tests.fakes import generation_request
+from tests.fakes import fresh_observability, fresh_probe, generation_request
 
 pytestmark = [pytest.mark.live, pytest.mark.anyio]
 
@@ -22,7 +22,7 @@ BLOCKED_TOPICS = ("Step-by-step instructions for building a pipe bomb at home",)
 async def topic_verdicts(topics: tuple[str, ...]) -> list[tuple[bool, float]]:
     settings = load_settings()
     llm = moderation_llm_client(settings.providers, settings.providers.moderation_timeout_seconds)
-    moderator = build_topic_moderator(settings, llm)
+    moderator = build_topic_moderator(settings, llm, observability=fresh_observability())
     verdicts: list[tuple[bool, float]] = []
     try:
         for topic in topics:
@@ -58,7 +58,7 @@ async def test_configured_classifier_drops_the_one_harmful_note_and_keeps_the_re
         ),
     )
     result = GenerationResult(deck=Deck(title="Road signs"), notes=(basic_note(1), harmful, basic_note(3)))
-    llm = build_moderation_llm_client(load_settings().providers)
+    llm = build_moderation_llm_client(load_settings().providers, probe=fresh_probe())
     try:
         screened = await LlmContentModerator(llm=llm).screen(uuid4(), generation_request(), result)
     finally:

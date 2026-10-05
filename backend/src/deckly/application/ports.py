@@ -1,18 +1,33 @@
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
 from deckly.domain.deck import GenerationResult
 from deckly.domain.generation import GenerationRequest
-from deckly.domain.job import GenerationJob, JobStatus
+from deckly.domain.job import FailureCode, GenerationJob, JobStage, JobStatus
 from deckly.domain.media import Media
 from deckly.domain.notes.note import Note
 from deckly.domain.regeneration import RegenerationRequest
 from deckly.domain.source import Source
 
 type JobTransition = Callable[[GenerationJob], GenerationJob]
+
+
+class AdmissionOutcome(StrEnum):
+    QUEUED = "queued"
+    REPLAYED = "replayed"
+    TOPIC_REJECTED = "topic_rejected"
+
+
+class JobOutcome(StrEnum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    STOPPED = "stopped"
+    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,3 +171,17 @@ class NoteRegenerator(Protocol):
 
 class RegenerationLimiter(Protocol):
     async def acquire(self, client_id: UUID, now: datetime) -> None: ...
+
+
+class JobRun(Protocol):
+    def finish(self, outcome: JobOutcome, code: FailureCode | None = None) -> None: ...
+
+
+class GenerationTelemetry(Protocol):
+    def admitted(self, outcome: AdmissionOutcome) -> None: ...
+
+    def cancelled(self) -> None: ...
+
+    def run(self, job_id: UUID) -> AbstractContextManager[JobRun]: ...
+
+    def stage(self, stage: JobStage) -> AbstractContextManager[None]: ...

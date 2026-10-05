@@ -11,6 +11,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from deckly.application.exceptions import RateLimitedError, UpstreamUnavailableError
+from deckly.infrastructure.observability.metrics import Metrics, RateLimit
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,11 @@ def require_count(answer: object, command: str) -> int:
     return answer
 
 
+def record_rejection(metrics: Metrics, limit: RateLimit) -> None:
+    metrics.rate_limit_rejections.labels(limit=limit).inc()
+    logger.info("rate_limit_rejected", extra={"limit": limit})
+
+
 @asynccontextmanager
 async def bounded_redis(event: str, timeout_seconds: float) -> AsyncIterator[None]:
     try:
@@ -60,9 +66,10 @@ async def bounded_redis(event: str, timeout_seconds: float) -> AsyncIterator[Non
 
 
 class RedisRegenerationLimiter:
-    def __init__(self, redis: Redis, window: RegenerationWindow) -> None:
+    def __init__(self, redis: Redis, window: RegenerationWindow, metrics: Metrics) -> None:
         self._redis = redis
         self._window = window
+        self._metrics = metrics
 
     async def acquire(self, client_id: UUID, now: datetime) -> None:
         key = window_key(KEY_PREFIX, client_id, now, self._window.window_seconds)
@@ -74,4 +81,5 @@ class RedisRegenerationLimiter:
             pipeline.expire(key, self._window.window_seconds)
             count, _ = await pipeline.execute()
         if require_count(count, "INCR") > self._window.limit:
+            record_rejection(self._metrics, RateLimit.NOTE_REGENERATION)
             raise RateLimitedError(seconds_until_window_end(now, self._window.window_seconds))

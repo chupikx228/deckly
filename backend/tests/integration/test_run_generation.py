@@ -21,7 +21,13 @@ from deckly.infrastructure.database import create_engine, create_session_factory
 from deckly.infrastructure.job_store import PostgresJobStore
 from deckly.main import API_PREFIX, create_app
 from tests.domain.builders import FULL_RESULT, T0, basic_note, result_with
-from tests.fakes import FakeProviders, InMemoryResultCache, RecordingJobQueue, generation_request
+from tests.fakes import (
+    FakeProviders,
+    InMemoryResultCache,
+    RecordingJobQueue,
+    fresh_telemetry,
+    generation_request,
+)
 from tests.integration.conftest import Cleanup
 from tests.transport.openapi import spec_errors
 
@@ -52,6 +58,7 @@ def pipeline(store: JobStore, providers: FakeProviders) -> RunGeneration:
         moderator=providers,
         media=providers,
         clock=utc_now,
+        telemetry=fresh_telemetry(),
     )
 
 
@@ -120,7 +127,9 @@ async def test_cancel_during_generation_stops_the_pipeline_through_postgres(
     store = PostgresJobStore(session_factory)
     job = await queued_in(store, cleanup)
     providers = FakeProviders()
-    cancel = CancelGeneration(store=store, queue=RecordingJobQueue(), clock=utc_now)
+    cancel = CancelGeneration(
+        store=store, queue=RecordingJobQueue(), clock=utc_now, telemetry=fresh_telemetry()
+    )
     providers.during[JobStage.GENERATING_CARDS] = lambda: cancel(job.job_id)
 
     await pipeline(store, providers)(job.job_id)

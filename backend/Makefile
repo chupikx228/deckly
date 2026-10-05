@@ -1,4 +1,4 @@
-.PHONY: install check fix test test-integration test-live run worker migrate revision up down
+.PHONY: install check fix test test-integration test-live run worker migrate revision up down observability
 
 install:
 	uv sync --locked
@@ -39,3 +39,6 @@ up:
 
 down:
 	docker compose down
+
+observability:
+	docker compose --profile observability up -d prometheus

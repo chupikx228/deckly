@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 from dataclasses import replace
 from uuid import UUID
@@ -7,6 +6,8 @@ from uuid import UUID
 import httpx2
 import pytest
 
+from deckly.application.correlation import JOB_ID as JOB_ID_FIELD
+from deckly.application.correlation import correlated
 from deckly.application.pipeline import RunGeneration
 from deckly.application.ports import ImageQuery, NoteMedia
 from deckly.domain.job import STAGE_ORDER, GenerationJob, Succeeded
@@ -33,11 +34,14 @@ from tests.fakes import (
     commons_fetcher,
     commons_page,
     commons_results,
+    fresh_probe,
+    fresh_telemetry,
     generation_request,
     hang_forever,
     scope,
     sequential_job_ids,
 )
+from tests.logs import captured_json_logs
 from tests.transport.openapi import spec_errors
 
 pytestmark = pytest.mark.anyio
@@ -85,7 +89,9 @@ def fetcher_with(
     client = FakeImageSearchClient(*outcomes)
     fetcher = CommonsMediaFetcher(
         client=client,
-        caller=ResilientCaller(MEDIA_POLICY, breaker or clock.breaker(), clock.runtime()),
+        caller=ResilientCaller(
+            MEDIA_POLICY, breaker or clock.breaker(), clock.runtime(), probe=fresh_probe()
+        ),
         new_id=sequential_job_ids().__next__,
         limits=limits,
     )
@@ -294,21 +300,21 @@ async def test_bug_in_the_client_escapes_the_fetcher_for_the_pipeline_bulkhead_t
         await fetcher.fetch(JOB, (query(1),))
 
 
-async def test_outcome_is_logged_with_counts_and_no_query_text(caplog: pytest.LogCaptureFixture) -> None:
+async def test_outcome_is_logged_with_counts_and_no_query_text() -> None:
     fetcher, _ = fetcher_with(
         (candidate("File:A.png"),),
         MediaUnavailableError("503"),
         limits=replace(MEDIA_LIMITS, max_concurrency=1),
     )
 
-    with caplog.at_level(logging.INFO, logger=FETCHER_LOGGER):
+    with captured_json_logs() as logs, correlated(JOB_ID_FIELD, JOB):
         await fetcher.fetch(JOB, (query(1, "secret subject"), query(2)))
 
-    [record] = [record for record in caplog.records if record.getMessage() == "media_fetched"]
-    assert record.__dict__["job_id"] == str(JOB)
-    assert (record.__dict__["searched"], record.__dict__["attached"]) == (2, 1)
-    assert record.__dict__["failed_searches"] == {"UpstreamUnavailableError": 1}
-    assert "secret subject" not in json.dumps(record.__dict__, default=str)
+    [line] = logs.named("media_fetched")
+    assert line["job_id"] == str(JOB)
+    assert (line["searched"], line["attached"]) == (2, 1)
+    assert line["failed_searches"] == {"UpstreamUnavailableError": 1}
+    assert "secret subject" not in logs.text
 
 
 async def test_closing_the_fetcher_closes_the_image_client() -> None:
@@ -346,6 +352,7 @@ async def run_with_commons(
         moderator=harness.providers,
         media=commons_fetcher(recorded, time, breaker=breaker),
         clock=lambda: harness.now,
+        telemetry=fresh_telemetry(),
     )
     job_id = (await harness.create(WITH_IMAGES, scope(), ADDRESS)).job.job_id
     await run(job_id)
@@ -377,7 +384,7 @@ async def test_image_provider_outage_still_yields_a_succeeded_job_with_an_image_
 async def test_open_image_circuit_still_yields_a_succeeded_job_without_calling_commons(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    breaker = CircuitBreaker(failure_threshold=1, reset_seconds=30, clock=lambda: 0.0)
+    breaker = CircuitBreaker(failure_threshold=1, reset_seconds=30, clock=lambda: 0.0, probe=fresh_probe())
     breaker.record_failure()
 
     with caplog.at_level(logging.INFO, logger=PIPELINE_LOGGER):
@@ -439,6 +446,7 @@ async def test_bug_in_the_media_adapter_still_yields_a_succeeded_job(
         moderator=harness.providers,
         media=fetcher,
         clock=lambda: harness.now,
+        telemetry=fresh_telemetry(),
     )
     job_id = (await harness.create(WITH_IMAGES, scope(), ADDRESS)).job.job_id
 

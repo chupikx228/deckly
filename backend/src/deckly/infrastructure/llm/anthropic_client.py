@@ -11,6 +11,7 @@ from deckly.infrastructure.llm.client import (
     LlmResponseError,
     LlmStop,
     LlmUnavailableError,
+    redact_credentials,
     status_error,
 )
 from deckly.infrastructure.resilience import RETRY_AFTER_HEADER
@@ -50,15 +51,21 @@ class AnthropicLlmClient:
             )
         except APIStatusError as error:
             raise status_error(
-                PROVIDER, error.status_code, error.message, error.response.headers.get(RETRY_AFTER_HEADER)
-            ) from error
+                PROVIDER,
+                error.status_code,
+                self._redacted(error.message),
+                error.response.headers.get(RETRY_AFTER_HEADER),
+            ) from None
         except APIConnectionError as error:
-            message = f"{PROVIDER} could not be reached: {error.message}"
+            message = f"{PROVIDER} could not be reached: {self._redacted(error.message)}"
             raise LlmUnavailableError(message) from error
         except APIResponseValidationError as error:
-            message = f"{PROVIDER} answered with an unexpected shape: {error.message}"
-            raise LlmResponseError(message) from error
+            message = f"{PROVIDER} answered with an unexpected shape: {self._redacted(error.message)}"
+            raise LlmResponseError(message) from None
         return reply_from(answer)
+
+    def _redacted(self, detail: str) -> str:
+        return redact_credentials(detail, self._endpoint.api_key)
 
     async def aclose(self) -> None:
         await self._client.close()

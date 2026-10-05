@@ -22,6 +22,7 @@ from deckly.infrastructure.rate_limit import (
 )
 from deckly.main import API_PREFIX, create_app
 from tests.domain.builders import T0
+from tests.fakes import fresh_metrics
 from tests.integration.conftest import open_queue_pool
 from tests.transport.openapi import spec_errors
 
@@ -51,7 +52,7 @@ async def purge(redis: ArqRedis, client_id: UUID) -> None:
 
 
 async def test_client_gets_exactly_the_limit_within_one_window(pool: ArqRedis) -> None:
-    limiter = RedisRegenerationLimiter(pool, WINDOW)
+    limiter = RedisRegenerationLimiter(pool, WINDOW, metrics=fresh_metrics())
     client_id = uuid4()
     try:
         for _ in range(LIMIT):
@@ -66,7 +67,7 @@ async def test_client_gets_exactly_the_limit_within_one_window(pool: ArqRedis) -
 
 
 async def test_next_window_starts_a_fresh_count(pool: ArqRedis) -> None:
-    limiter = RedisRegenerationLimiter(pool, WINDOW)
+    limiter = RedisRegenerationLimiter(pool, WINDOW, metrics=fresh_metrics())
     client_id = uuid4()
     try:
         for _ in range(LIMIT):
@@ -78,7 +79,7 @@ async def test_next_window_starts_a_fresh_count(pool: ArqRedis) -> None:
 
 
 async def test_clients_are_counted_separately(pool: ArqRedis) -> None:
-    limiter = RedisRegenerationLimiter(pool, WINDOW)
+    limiter = RedisRegenerationLimiter(pool, WINDOW, metrics=fresh_metrics())
     heavy, light = uuid4(), uuid4()
     try:
         for _ in range(LIMIT):
@@ -93,7 +94,7 @@ async def test_clients_are_counted_separately(pool: ArqRedis) -> None:
 
 
 async def test_counter_expires_with_its_window(pool: ArqRedis) -> None:
-    limiter = RedisRegenerationLimiter(pool, WINDOW)
+    limiter = RedisRegenerationLimiter(pool, WINDOW, metrics=fresh_metrics())
     client_id = uuid4()
     try:
         await limiter.acquire(client_id, WINDOW_START)
@@ -106,7 +107,7 @@ async def test_counter_expires_with_its_window(pool: ArqRedis) -> None:
 
 
 async def test_concurrent_requests_never_exceed_the_limit(pool: ArqRedis) -> None:
-    limiter = RedisRegenerationLimiter(pool, WINDOW)
+    limiter = RedisRegenerationLimiter(pool, WINDOW, metrics=fresh_metrics())
     client_id = uuid4()
     try:
         outcomes = await asyncio.gather(
@@ -121,7 +122,7 @@ async def test_concurrent_requests_never_exceed_the_limit(pool: ArqRedis) -> Non
 
 async def test_unreachable_redis_is_an_upstream_outage_not_a_free_pass() -> None:
     unreachable = ArqRedis(host="127.0.0.1", port=1, socket_connect_timeout=0.2, socket_timeout=0.2)
-    limiter = RedisRegenerationLimiter(unreachable, WINDOW)
+    limiter = RedisRegenerationLimiter(unreachable, WINDOW, metrics=fresh_metrics())
     try:
         with pytest.raises(UpstreamUnavailableError):
             await limiter.acquire(uuid4(), WINDOW_START)
