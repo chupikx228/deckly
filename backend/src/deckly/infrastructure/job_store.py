@@ -5,9 +5,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Select, delete, select, update
+from sqlalchemy import CTE, Select, delete, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.dml import ReturningDelete, ReturningUpdate
 
 from deckly.application.exceptions import UnreadableJobRequestError
 from deckly.application.ports import IdempotencyScope, JobStore, JobTransition, StoredJob
@@ -200,6 +201,43 @@ class PostgresJobStore:
         return job
 
 
+def evaluated_once(batch: Select[tuple[UUID]]) -> CTE:
+    return batch.cte("batch").prefix_with("MATERIALIZED")
+
+
+def release_expired_keys_statement(created_before: datetime, limit: int) -> ReturningUpdate[tuple[UUID]]:
+    expired = (
+        select(GenerationJobRow.job_id)
+        .where(GenerationJobRow.idempotency_key.is_not(None), GenerationJobRow.created_at < created_before)
+        .order_by(GenerationJobRow.created_at)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    batch = evaluated_once(expired)
+    return (
+        update(GenerationJobRow)
+        .where(GenerationJobRow.job_id.in_(select(batch.c.job_id)))
+        .values(idempotency_key=None)
+        .returning(GenerationJobRow.job_id)
+    )
+
+
+def purge_finished_statement(finished_before: datetime, limit: int) -> ReturningDelete[tuple[UUID]]:
+    expired = (
+        select(GenerationJobRow.job_id)
+        .where(GenerationJobRow.status.in_(TERMINAL_STATUSES), GenerationJobRow.updated_at < finished_before)
+        .order_by(GenerationJobRow.updated_at)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    batch = evaluated_once(expired)
+    return (
+        delete(GenerationJobRow)
+        .where(GenerationJobRow.job_id.in_(select(batch.c.job_id)))
+        .returning(GenerationJobRow.job_id)
+    )
+
+
 class PostgresJobHousekeeping:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -215,42 +253,12 @@ class PostgresJobHousekeeping:
             return tuple(await session.scalars(statement))
 
     async def release_idempotency_keys(self, created_before: datetime, limit: int) -> int:
-        expired = (
-            select(GenerationJobRow.job_id)
-            .where(
-                GenerationJobRow.idempotency_key.is_not(None), GenerationJobRow.created_at < created_before
-            )
-            .order_by(GenerationJobRow.created_at)
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-        )
-        statement = (
-            update(GenerationJobRow)
-            .where(GenerationJobRow.job_id.in_(expired.scalar_subquery()))
-            .values(idempotency_key=None)
-            .returning(GenerationJobRow.job_id)
-        )
         async with self._session_factory.begin() as session:
-            return len((await session.scalars(statement)).all())
+            return len((await session.scalars(release_expired_keys_statement(created_before, limit))).all())
 
     async def purge_finished(self, finished_before: datetime, limit: int) -> int:
-        expired = (
-            select(GenerationJobRow.job_id)
-            .where(
-                GenerationJobRow.status.in_(TERMINAL_STATUSES),
-                GenerationJobRow.updated_at < finished_before,
-            )
-            .order_by(GenerationJobRow.updated_at)
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-        )
-        statement = (
-            delete(GenerationJobRow)
-            .where(GenerationJobRow.job_id.in_(expired.scalar_subquery()))
-            .returning(GenerationJobRow.job_id)
-        )
         async with self._session_factory.begin() as session:
-            return len((await session.scalars(statement)).all())
+            return len((await session.scalars(purge_finished_statement(finished_before, limit))).all())
 
 
 class BoundedJobStore:
