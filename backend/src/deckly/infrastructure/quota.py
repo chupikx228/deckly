@@ -1,4 +1,5 @@
 import contextlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from ipaddress import IPv6Address, IPv6Network, ip_address
@@ -8,8 +9,10 @@ from redis.asyncio import Redis
 
 from deckly.application.exceptions import RateLimitedError, UpstreamUnavailableError
 from deckly.application.ports import Quota, Requester
+from deckly.infrastructure.observability.metrics import Metrics, RateLimit
 from deckly.infrastructure.rate_limit import (
     bounded_redis,
+    record_rejection,
     require_count,
     seconds_until_window_end,
     window_end,
@@ -23,12 +26,21 @@ ADDRESS_KEY_PREFIX = "deckly:generation-quota:address"
 IPV6_BUCKET_PREFIX_LENGTH = 64
 
 ADMITTED = 0
+CLIENT_LIMIT_REACHED = 1
+ADDRESS_LIMIT_REACHED = 2
+REJECTIONS: Mapping[int, RateLimit] = {
+    CLIENT_LIMIT_REACHED: RateLimit.GENERATION_CLIENT,
+    ADDRESS_LIMIT_REACHED: RateLimit.GENERATION_ADDRESS,
+}
 RESERVATION_FIELDS = 2
 RESERVE_SCRIPT = """
 local client = tonumber(redis.call('GET', KEYS[1]) or '0')
 local address = tonumber(redis.call('GET', KEYS[2]) or '0')
-if client >= tonumber(ARGV[1]) or address >= tonumber(ARGV[2]) then
+if client >= tonumber(ARGV[1]) then
     return {1, client}
+end
+if address >= tonumber(ARGV[2]) then
+    return {2, client}
 end
 client = redis.call('INCR', KEYS[1])
 redis.call('INCR', KEYS[2])
@@ -95,9 +107,10 @@ def parse_used(answer: object) -> int:
 
 
 class RedisGenerationQuota:
-    def __init__(self, redis: Redis, limits: QuotaLimits) -> None:
+    def __init__(self, redis: Redis, limits: QuotaLimits, metrics: Metrics) -> None:
         self._redis = redis
         self._limits = limits
+        self._metrics = metrics
         self._reserve = redis.register_script(RESERVE_SCRIPT)
         self._release = redis.register_script(RELEASE_SCRIPT)
 
@@ -114,6 +127,7 @@ class RedisGenerationQuota:
             )
         outcome, used = parse_reservation(answer)
         if outcome != ADMITTED:
+            record_rejection(self._metrics, REJECTIONS.get(outcome, RateLimit.GENERATION_CLIENT))
             raise RateLimitedError(seconds_until_window_end(now, QUOTA_WINDOW_SECONDS))
         return quota_from(self._limits.jobs_per_client, used, now)
 

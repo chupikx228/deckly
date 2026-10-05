@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID
 
+from deckly.application.correlation import REQUEST_ID, correlated
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.generations import Clock
 from deckly.application.ports import NoteRegenerator, RegenerationLimiter, SourceParser, SourceRetriever
@@ -44,8 +45,9 @@ class RegenerateNote:
     async def __call__(self, request: RegenerationRequest, client_id: UUID) -> Note:
         request_id = self.new_request_id()
         try:
-            async with asyncio.timeout(self.timeout_seconds):
-                return await self._regenerate(request_id, request, client_id)
+            with correlated(REQUEST_ID, request_id):
+                async with asyncio.timeout(self.timeout_seconds):
+                    return await self._regenerate(request_id, request, client_id)
         except TimeoutError as error:
             logger.warning(
                 "note_regeneration_timed_out",

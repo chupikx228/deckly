@@ -18,6 +18,7 @@ from tests.fakes import (
     InMemoryJobStore,
     InMemoryResultCache,
     ManualTime,
+    fresh_telemetry,
     generation_request,
     model_reply,
     scope,
@@ -64,6 +65,7 @@ class Pipeline:
             moderator=providers,
             media=providers,
             clock=lambda: T0,
+            telemetry=fresh_telemetry(),
         )
 
     async def finish(self) -> GenerationJob:

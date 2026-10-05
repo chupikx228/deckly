@@ -1,16 +1,18 @@
-import logging
 import re
 import unicodedata
 from dataclasses import replace
 
 import pytest
 
+from deckly.application.correlation import JOB_ID as JOB_ID_FIELD
+from deckly.application.correlation import correlated
 from deckly.application.ports import RetrievedPage, SourceMaterial
 from deckly.domain.source import Source
 from deckly.infrastructure.search.cleaning import MAX_TITLE_CHARACTERS
 from deckly.infrastructure.search.parser import MIN_VISIBLE_CHARACTERS, CleaningSourceParser
 from tests.domain.builders import JOB_ID, T0
 from tests.fakes import generation_request
+from tests.logs import captured_json_logs
 
 pytestmark = pytest.mark.anyio
 
@@ -232,12 +234,10 @@ async def test_page_at_exactly_the_garbage_share_limit_is_kept_and_just_above_is
     assert [entry.source for entry in await parse(at_limit, above)] == [SOURCE]
 
 
-async def test_parsing_log_names_the_job_and_counts_what_was_dropped(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    with caplog.at_level(logging.INFO, logger=PARSER_LOGGER):
+async def test_parsing_log_names_the_job_and_counts_what_was_dropped() -> None:
+    with captured_json_logs() as logs, correlated(JOB_ID_FIELD, JOB_ID):
         await parse(PAGE, page("Stop."))
 
-    [record] = [record for record in caplog.records if record.getMessage() == "sources_parsed"]
-    assert record.__dict__["job_id"] == str(JOB_ID)
-    assert record.__dict__["dropped_pages"] == {"too_short": 1}
+    [line] = logs.named("sources_parsed")
+    assert line["job_id"] == str(JOB_ID)
+    assert line["dropped_pages"] == {"too_short": 1}

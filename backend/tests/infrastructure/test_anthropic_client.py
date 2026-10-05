@@ -1,5 +1,6 @@
 import asyncio
 import json
+import traceback
 from collections.abc import Callable
 
 import httpx2
@@ -7,7 +8,9 @@ import pytest
 
 from deckly.infrastructure.llm.anthropic_client import AnthropicLlmClient
 from deckly.infrastructure.llm.client import (
+    REDACTED,
     LlmEndpoint,
+    LlmError,
     LlmPrompt,
     LlmRejectedError,
     LlmReply,
@@ -178,3 +181,18 @@ async def test_cancelling_the_caller_aborts_the_request_in_flight() -> None:
         await client.aclose()
 
     assert provider.endings == ["aborted"]
+
+
+@pytest.mark.parametrize("status", [401, 400, 529])
+async def test_key_echoed_in_an_error_body_never_reaches_the_logged_traceback(status: int) -> None:
+    body = {
+        "type": "error",
+        "error": {"type": "authentication_error", "message": f"invalid x-api-key {API_KEY}"},
+    }
+
+    with pytest.raises(LlmError) as raised:
+        await complete_with(lambda _: httpx2.Response(status, json=body))
+
+    logged = "".join(traceback.format_exception(raised.value))
+    assert f"invalid x-api-key {REDACTED}" in logged
+    assert API_KEY not in logged

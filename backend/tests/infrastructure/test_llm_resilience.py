@@ -23,7 +23,7 @@ from deckly.infrastructure.resilience import (
     RetryPolicy,
     RetryRuntime,
 )
-from tests.fakes import RESET_SECONDS, FakeLlmClient, ManualTime, hang_forever
+from tests.fakes import RESET_SECONDS, FakeLlmClient, ManualTime, fresh_probe, hang_forever
 
 pytestmark = pytest.mark.anyio
 
@@ -47,7 +47,9 @@ def resilient(
 ) -> ResilientLlmClient:
     runtime = RetryRuntime(clock=time.clock, sleep=time.sleep, jitter=time.jitter)
     return ResilientLlmClient(
-        inner, ResilientCaller(policy, breaker or time.breaker(), runtime), MAX_OUTPUT_TOKENS
+        inner,
+        ResilientCaller(policy, breaker or time.breaker(), runtime, probe=fresh_probe()),
+        MAX_OUTPUT_TOKENS,
     )
 
 
@@ -368,7 +370,9 @@ async def test_cancelling_during_the_backoff_starts_no_further_attempt() -> None
 
     inner = FakeLlmClient(unavailable(), REPLY)
     runtime = RetryRuntime(clock=time.clock, sleep=sleep_until_cancelled, jitter=time.jitter)
-    client = ResilientLlmClient(inner, ResilientCaller(POLICY, time.breaker(), runtime), MAX_OUTPUT_TOKENS)
+    client = ResilientLlmClient(
+        inner, ResilientCaller(POLICY, time.breaker(), runtime, probe=fresh_probe()), MAX_OUTPUT_TOKENS
+    )
     call = asyncio.create_task(client.complete(PROMPT))
     await backing_off.wait()
     call.cancel()

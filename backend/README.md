@@ -376,6 +376,137 @@ Both checks fail closed: a refusal from the classifier counts as a block. Circui
 retry-delay settings are shared with `DECKLY_PROVIDER_MODEL_*`, but each check has its own
 breaker. `POST /v1/notes/regenerate` is not screened yet (DEC-47).
 
+## Observability
+
+Everything lives in `infrastructure/observability/` and `infrastructure/logging.py`, and is built
+once per process (`create_observability`): the API in `create_app`, the worker in `worker/main.py`.
+Nothing needs external infrastructure: logs go to stdout, metrics are scraped over HTTP, and traces
+are either kept in-process (their ids still land in the logs) or printed to stdout.
+
+### Logs
+
+Every line is one JSON object on stdout (`JsonFormatter`). Event names are
+`<subject>_<past-tense verb>` in snake_case (`generation_stage_entered`, `provider_call_finished`),
+and field names are snake_case. A filter on the handler adds the correlation fields to every line,
+including library lines, unless the call passed the same field itself:
+
+| Field        | Set by                                                                          |
+| ------------ | ------------------------------------------------------------------------------- |
+| `job_id`     | `RunGeneration` for everything a job does in the worker, explicitly elsewhere   |
+| `client_id`  | the HTTP middleware, from `X-Client-Id`, only when it is a canonical UUID v4    |
+| `request_id` | `RegenerateNote`, for everything one `POST /v1/notes/regenerate` does           |
+| `trace_id`   | the current OpenTelemetry span, so it also links the API line that queued a job |
+| `span_id`    | the current span                                                                |
+
+The binding is a context variable (`application/correlation.py`), so adapters never pass the id
+by hand and code that runs in another task or thread (`asyncio.to_thread`, the concurrent image
+searches) inherits it.
+
+The events that make up one job, in order:
+
+| Event                                                                                                                    | Where                  | Carries                                           |
+| ------------------------------------------------------------------------------------------------------------------------ | ---------------------- | ------------------------------------------------- |
+| `http_request_finished`                                                                                                  | API, every request     | method, route template, status, `duration_ms`     |
+| `generation_admitted`                                                                                                    | API                    | `admission` (`queued` or `replayed`), status      |
+| `topic_rejected`, `rate_limit_rejected`                                                                                  | API                    | `limit` for the rate limit                        |
+| `generation_started`                                                                                                     | worker                 | status, stage                                     |
+| `generation_cache_checked`                                                                                               | worker                 | `result` (`hit`, `miss`, `corrupt`, `error`)      |
+| `generation_stage_entered`                                                                                               | worker, every stage    | stage, progress                                   |
+| `provider_call_finished`                                                                                                 | every provider attempt | `operation`, `attempt`, `outcome`, `duration_ms`  |
+| `provider_call_retrying`, `provider_call_refused`, `circuit_opened`, `circuit_closed`                                    | resilience layer       | `operation`                                       |
+| `sources_retrieved`, `sources_parsed`, `card_generation_finished`, `content_screened`, `media_fetched`, `media_attached` | adapters               | counts only                                       |
+| `generation_succeeded` / `generation_failed` / `generation_stopped`                                                      | worker                 | `duration_ms`, failure code, traceback on failure |
+| `generation_cancelled`                                                                                                   | API                    | stage and progress at the time                    |
+
+To follow one job locally:
+
+```bash
+make run    2>&1 | tee api.log
+make worker 2>&1 | tee worker.log
+jq -c 'select(.job_id == "<jobId>") | [.timestamp, .message, .stage // .operation // .result]' api.log worker.log
+jq -c 'select(.trace_id == "<trace_id from the lines above>")' api.log   # the POST that queued it
+```
+
+`tests/integration/test_observability.py` does exactly this against a full run: it posts a job
+through the real app, runs it through the worker entry point with Tavily and Commons answering
+over mock HTTP, and asserts the complete ordered list of lines carrying that `job_id`, that they
+all share the trace of the `POST`, and that the request and admission lines carry the client.
+
+What is never logged: API keys (redacted from provider error text, and the Anthropic SDK error is
+not chained into the traceback because its message is the raw error body), the topic,
+`instructions` and generated text (adapters log counts only; the search query is redacted from
+Tavily error text), SQL parameters (`hide_parameters=True` on the engine), client IP addresses
+(uvicorn's access log is off; `http_request_finished` replaces it), query strings and path values
+(the route template is logged instead, and a method outside the standard set is logged as
+`_OTHER`), and the URLs HTTP clients request (`httpx`/`httpx2` are
+raised to `WARNING`, since Commons search URLs carry search terms taken from generated cards). One
+known residue: a Commons API error copies up to 500 characters of the provider's `info` text into
+the exception, and that text can echo search terms.
+
+### Metrics
+
+Prometheus format, from `prometheus-client`. The API serves `GET /metrics` on its own port (not
+under `/v1`, not in the OpenAPI document); the worker serves the same format on
+`DECKLY_OBSERVABILITY_WORKER_METRICS_HOST`:`DECKLY_OBSERVABILITY_WORKER_METRICS_PORT` (default
+`127.0.0.1:9464`). Each process has its own registry, so scrape both. A worker whose metrics port
+is taken (a second worker on the same host) logs `worker_metrics_unavailable` and runs without
+exposing metrics rather than refusing to start.
+
+| Metric                                                                     | Labels                    | Process |
+| -------------------------------------------------------------------------- | ------------------------- | ------- |
+| `deckly_generation_jobs_admitted_total`                                    | `outcome`                 | API     |
+| `deckly_generation_jobs_cancelled_total`                                   |                           | API     |
+| `deckly_generation_jobs_finished_total`                                    | `outcome`, `failure_code` | worker  |
+| `deckly_generation_job_duration_seconds`                                   | `outcome`                 | worker  |
+| `deckly_generation_stage_duration_seconds`                                 | `stage`, `outcome`        | worker  |
+| `deckly_provider_call_duration_seconds`                                    | `operation`, `outcome`    | both    |
+| `deckly_provider_call_retries_total`                                       | `operation`               | both    |
+| `deckly_provider_circuit_rejections_total`, `deckly_provider_circuit_open` | `operation`               | both    |
+| `deckly_generation_cache_lookups_total`                                    | `result`                  | worker  |
+| `deckly_generation_queue_depth`                                            | `queue`                   | API     |
+| `deckly_rate_limit_rejections_total`                                       | `limit`                   | API     |
+
+Throughput is the rate of `jobs_finished_total`; failure rates are the `failed` share of a
+histogram's `_count`; the cache hit rate is `hit` over all lookups. Queue depth is read from
+Redis (`ZCARD arq:queue`) on every scrape and is `NaN` when Redis does not answer, rather than a
+stale number; every API instance reports the same queue, so aggregate it with `max`. Every label
+takes a fixed set of values.
+
+`make observability` starts Prometheus on `:9090` (compose profile `observability`, config in
+`observability/prometheus.yml`), scraping `host.docker.internal:8000` and `:9464`. `make up` does not
+start it. On Linux, run uvicorn with `--host 0.0.0.0` and set the worker metrics host to `0.0.0.0`
+so the container can reach them.
+
+### Traces
+
+OpenTelemetry API and SDK, with spans created by hand rather than by instrumentation packages:
+
+```
+POST /v1/generations                        (API, one per request)
+└── provider.call topic_moderation
+generation.run                              (worker, child of the POST through the queued job)
+├── generation.stage.planning             (the cache lookup)
+├── generation.stage.retrieving_sources
+│   └── provider.call web_search            (one per attempt)
+├── generation.stage.parsing_sources
+├── generation.stage.generating_cards
+│   ├── provider.call card_generation
+│   └── provider.call content_moderation
+├── generation.stage.fetching_media
+│   └── provider.call image_search          (concurrent)
+└── generation.stage.finalizing
+```
+
+The API puts the W3C `traceparent` of the request into the Arq job as a second argument, and
+`run_generation` continues it, so one trace covers the request and the work it queued. Jobs queued
+before this existed have no second argument and start a trace of their own. Spans record status,
+outcome and error type, never exception messages.
+
+`DECKLY_OBSERVABILITY_TRACE_EXPORTER` is `none` (spans are created, so ids reach the logs, but
+nothing is exported) or `console` (one compact JSON line per finished span on stdout, next to the
+logs). Exporting over OTLP to Jaeger or similar is a follow-up: it needs
+`opentelemetry-exporter-otlp-proto-http`, which there is no deployment target for yet.
+
 ## Checks
 
 ```bash

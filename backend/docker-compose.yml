@@ -27,5 +27,18 @@ services:
       timeout: 3s
       retries: 15
 
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: ['observability']
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=2d'
+    ports:
+      - '9090:9090'
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+
 volumes:
   postgres-data:

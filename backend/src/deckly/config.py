@@ -15,6 +15,7 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from deckly.infrastructure.media.licensing import MIN_IMAGE_SIDE
+from deckly.infrastructure.observability.tracing import TraceExporter
 from deckly.infrastructure.search.parser import MIN_VISIBLE_CHARACTERS
 
 ASYNC_POSTGRES_SCHEME = "postgresql+asyncpg"
@@ -31,6 +32,7 @@ MINUTES_PER_HOUR = 60
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 ModelProvider = Literal["anthropic", "deepseek"]
+MAX_PORT = 65535
 PositiveSeconds = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 
 
@@ -235,6 +237,14 @@ class SweepSettings(BaseSettings):
         return self
 
 
+class ObservabilitySettings(BaseSettings):
+    model_config = _settings_config("DECKLY_OBSERVABILITY_")
+
+    trace_exporter: TraceExporter
+    worker_metrics_host: str
+    worker_metrics_port: Annotated[int, Field(ge=1, le=MAX_PORT)]
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     app: AppSettings
@@ -245,6 +255,7 @@ class Settings:
     cache: CacheSettings
     regenerate: RegenerateSettings
     sweep: SweepSettings
+    observability: ObservabilitySettings
 
     def __post_init__(self) -> None:
         provider_deadlines = (
@@ -286,4 +297,5 @@ def load_settings() -> Settings:
         cache=CacheSettings(),
         regenerate=RegenerateSettings(),
         sweep=SweepSettings(),
+        observability=ObservabilitySettings(),
     )

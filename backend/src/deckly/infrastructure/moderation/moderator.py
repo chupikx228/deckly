@@ -132,9 +132,9 @@ class LlmContentModerator:
     llm: LlmClient
 
     async def screen(
-        self, job_id: UUID, request: GenerationRequest, result: GenerationResult
+        self, _job_id: UUID, request: GenerationRequest, result: GenerationResult
     ) -> GenerationResult:
-        with moderation_faults_as_upstream({"job_id": str(job_id), "subject": "content"}):
+        with moderation_faults_as_upstream({"subject": "content"}):
             reply = await self.llm.complete(build_content_prompt(result))
             verdicts = content_verdicts(reply)
         judged = [verdicts.notes.get(note_number(index)) for index in range(len(result.notes))]
@@ -146,7 +146,6 @@ class LlmContentModerator:
             logging.INFO if len(kept) == len(result.notes) and deck_allowed else logging.WARNING,
             "content_screened",
             extra={
-                "job_id": str(job_id),
                 "reply_stop": reply.stop,
                 "screened_notes": len(result.notes),
                 "kept_notes": len(kept),

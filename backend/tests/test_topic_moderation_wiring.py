@@ -18,7 +18,16 @@ from deckly.infrastructure.llm.client import LlmReply, LlmUnavailableError
 from deckly.main import API_PREFIX, build_topic_moderator
 from deckly.transport import generations
 from deckly.transport.error_handlers import RETRY_AFTER_HEADER, register_error_handlers
-from tests.fakes import ADDRESS, FakeLlmClient, Harness, generation_request, hang_forever, model_reply, scope
+from tests.fakes import (
+    ADDRESS,
+    FakeLlmClient,
+    Harness,
+    fresh_observability,
+    generation_request,
+    hang_forever,
+    model_reply,
+    scope,
+)
 from tests.test_config import settings_from_environment
 from tests.transport.openapi import spec_errors
 
@@ -56,7 +65,9 @@ def fast_settings(clean_environment: pytest.MonkeyPatch) -> Settings:
 
 
 def moderated(harness: Harness, settings: Settings, llm: FakeLlmClient) -> CreateGeneration:
-    return replace(harness.create, moderator=build_topic_moderator(settings, llm))
+    return replace(
+        harness.create, moderator=build_topic_moderator(settings, llm, observability=fresh_observability())
+    )
 
 
 def client_for(create: CreateGeneration) -> TestClient:

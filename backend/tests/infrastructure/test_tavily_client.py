@@ -1,4 +1,5 @@
 import json
+import traceback
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -202,6 +203,19 @@ async def test_api_key_echoed_back_by_the_provider_never_reaches_the_error() -> 
 
     assert API_KEY not in str(raised.value)
     assert REDACTED in str(raised.value)
+
+
+@pytest.mark.parametrize("status", [400, 422, 503])
+async def test_query_echoed_back_by_the_provider_never_reaches_the_error(status: int) -> None:
+    query = SearchQuery(text="canary topic about a private matter", language="ru", max_results=6)
+    body = {"detail": {"error": f"Could not search for '{query.text}' right now"}}
+
+    with pytest.raises(SearchError) as raised:
+        await search_with(answering(body, status), query)
+
+    logged = "".join(traceback.format_exception(raised.value))
+    assert query.text not in logged
+    assert f"Could not search for '{REDACTED}' right now" in logged
 
 
 async def test_oversized_error_detail_is_truncated() -> None:

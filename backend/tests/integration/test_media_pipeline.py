@@ -25,6 +25,7 @@ from tests.fakes import (
     commons_fetcher,
     commons_page,
     commons_results,
+    fresh_telemetry,
     generation_request,
     model_reply,
 )
@@ -74,6 +75,7 @@ async def run_with(
         moderator=providers,
         media=media,
         clock=utc_now,
+        telemetry=fresh_telemetry(),
     )
     job = GenerationJob.queue(uuid4(), T0)
     await store.add(job, replace(generation_request(), include_images=True), cleanup.scope())

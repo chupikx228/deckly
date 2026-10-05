@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -5,6 +6,8 @@ from typing import Protocol
 from deckly.infrastructure.resilience import TransientError, is_transient_status, parse_retry_after
 
 MAX_DETAIL_LENGTH = 500
+MASKED_CREDENTIAL = re.compile(r"(?<![\w*-])[\w-]*\*{3,}[\w*-]*")
+REDACTED = "[redacted]"
 
 
 class LlmStop(StrEnum):
@@ -55,6 +58,11 @@ class LlmRejectedError(LlmError):
 
 class LlmResponseError(LlmError):
     pass
+
+
+def redact_credentials(text: str, api_key: str) -> str:
+    unmasked = text.replace(api_key, REDACTED) if api_key else text
+    return MASKED_CREDENTIAL.sub(REDACTED, unmasked)
 
 
 def status_error(provider: str, status: int, detail: str, retry_after: str | None) -> LlmError:

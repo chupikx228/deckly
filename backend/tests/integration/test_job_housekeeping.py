@@ -26,7 +26,7 @@ from deckly.infrastructure.database import create_engine, create_session_factory
 from deckly.infrastructure.job_store import PostgresJobHousekeeping, PostgresJobStore
 from deckly.infrastructure.tables import GenerationJobRow
 from tests.domain.builders import FULL_RESULT
-from tests.fakes import FakeProviders, InMemoryResultCache, generation_request
+from tests.fakes import FakeProviders, InMemoryResultCache, fresh_telemetry, generation_request
 from tests.integration.conftest import Cleanup
 from tests.integration.test_postgres_job_store import RowHolder, until_an_update_waits_on_the_row_lock
 
@@ -78,6 +78,7 @@ def pipeline(store: PostgresJobStore, providers: FakeProviders) -> RunGeneration
         moderator=providers,
         media=providers,
         clock=utc_now,
+        telemetry=fresh_telemetry(),
     )
 
 

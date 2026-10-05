@@ -10,6 +10,9 @@ dependencies = [
     "asyncpg>=0.31.0",
     "fastapi>=0.141.1",
     "httpx2>=2.13.1",
+    "opentelemetry-api>=1.45.0",
+    "opentelemetry-sdk>=1.45.0",
+    "prometheus-client>=0.26.0",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
     "redis==5.3.1",
@@ -121,6 +124,8 @@ forbidden_modules = [
     "pydantic_settings",
     "anthropic",
     "httpx2",
+    "prometheus_client",
+    "opentelemetry",
 ]
 
 [[tool.importlinter.contracts]]
@@ -167,6 +172,8 @@ forbidden_modules = [
     "pydantic_settings",
     "anthropic",
     "httpx2",
+    "prometheus_client",
+    "opentelemetry",
 ]
 
 [tool.pytest.ini_options]

@@ -1,3 +1,5 @@
+from collections.abc import Iterable
+
 import httpx2
 
 from deckly.infrastructure.resilience import RETRY_AFTER_HEADER, is_transient_status, parse_retry_after
@@ -68,21 +70,27 @@ def hits_from(response: httpx2.Response) -> tuple[SearchHit, ...]:
     raise SearchResponseError(message)
 
 
-def error_detail(response: httpx2.Response, api_key: str) -> str:
+def withheld_from(detail: str, withheld: Iterable[str]) -> str:
+    for value in withheld:
+        if value:
+            detail = detail.replace(value, REDACTED)
+    return detail
+
+
+def error_detail(response: httpx2.Response, withheld: Iterable[str]) -> str:
     try:
         payload: object = response.json()
     except ValueError:
         return ""
     match payload:
         case {"detail": {"error": str() as detail}} | {"detail": str() as detail}:
-            redacted = detail.replace(api_key, REDACTED) if api_key else detail
-            return redacted[:MAX_DETAIL_LENGTH]
+            return withheld_from(detail, withheld)[:MAX_DETAIL_LENGTH]
     return ""
 
 
-def status_error(response: httpx2.Response, api_key: str) -> SearchError:
+def status_error(response: httpx2.Response, withheld: Iterable[str]) -> SearchError:
     status = response.status_code
-    message = f"{PROVIDER} answered {status}: {error_detail(response, api_key)}"
+    message = f"{PROVIDER} answered {status}: {error_detail(response, withheld)}"
     if status in QUOTA_STATUSES:
         return SearchQuotaExhaustedError(message)
     if is_transient_status(status):
@@ -111,7 +119,7 @@ class TavilySearchClient:
             message = f"{PROVIDER} request failed: {type(error).__name__}"
             raise SearchResponseError(message) from error
         if not response.is_success:
-            raise status_error(response, self._api_key)
+            raise status_error(response, (self._api_key, query.text))
         return hits_from(response)
 
     async def aclose(self) -> None:

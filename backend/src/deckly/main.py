@@ -1,9 +1,10 @@
+import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from uuid import uuid4
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Request, Response
 
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
 from deckly.application.health import CheckHealth
@@ -20,11 +21,18 @@ from deckly.infrastructure.llm.client import LlmClient, LlmEndpoint
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.logging import configure_logging
 from deckly.infrastructure.moderation.moderator import LlmTopicModerator
+from deckly.infrastructure.observability.exposition import (
+    METRICS_CONTENT_TYPE,
+    METRICS_PATH,
+    MetricsExposition,
+)
+from deckly.infrastructure.observability.http import ObservedRequests
+from deckly.infrastructure.observability.runtime import Observability, create_observability
 from deckly.infrastructure.provider_faults import UpstreamFaultRegenerator, UpstreamFaultRetriever
 from deckly.infrastructure.queue import ArqJobQueue, create_queue_pool, create_redis_settings
 from deckly.infrastructure.quota import QuotaLimits, RedisGenerationQuota
 from deckly.infrastructure.rate_limit import RedisRegenerationLimiter, RegenerationWindow
-from deckly.infrastructure.resilience import RetryPolicy
+from deckly.infrastructure.resilience import ProviderOperation, RetryPolicy
 from deckly.infrastructure.search.client import SearchClient, SearchEndpoint
 from deckly.infrastructure.search.parser import CleaningSourceParser
 from deckly.infrastructure.search.retriever import WebSourceRetriever
@@ -37,6 +45,8 @@ API_PREFIX = "/v1"
 SERVICE_TITLE = "Deckly generation service"
 ROUTERS: tuple[APIRouter, ...] = (generations.router, notes.router, health.router)
 SINGLE_ATTEMPT = 1
+API_SERVICE_NAME = "deckly-api"
+METRICS_EXPOSITION_STATE = "metrics_exposition"
 
 Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
 
@@ -46,6 +56,7 @@ class RegenerationClients:
     llm: LlmClient
     search: SearchClient
     limiter: RegenerationLimiter
+    observability: Observability
 
 
 def single_attempt(timeout_seconds: float, *, base_delay_seconds: int, max_delay_seconds: int) -> RetryPolicy:
@@ -69,7 +80,9 @@ def regeneration_llm_client(settings: Settings) -> LlmClient:
     return LLM_CLIENTS[settings.providers.model_provider](endpoint)
 
 
-def build_topic_moderator(settings: Settings, llm: LlmClient) -> LlmTopicModerator:
+def build_topic_moderator(
+    settings: Settings, llm: LlmClient, observability: Observability
+) -> LlmTopicModerator:
     providers = settings.providers
     caller = resilient_caller(
         single_attempt(
@@ -77,6 +90,7 @@ def build_topic_moderator(settings: Settings, llm: LlmClient) -> LlmTopicModerat
             base_delay_seconds=providers.model_retry_base_delay_seconds,
             max_delay_seconds=providers.model_retry_max_delay_seconds,
         ),
+        observability.probe(ProviderOperation.TOPIC_MODERATION),
         failure_threshold=providers.model_circuit_failure_threshold,
         reset_seconds=providers.model_circuit_reset_seconds,
     )
@@ -102,6 +116,7 @@ def build_regenerate_note(settings: Settings, clients: RegenerationClients) -> R
             base_delay_seconds=providers.search_retry_base_delay_seconds,
             max_delay_seconds=providers.search_retry_max_delay_seconds,
         ),
+        clients.observability.probe(ProviderOperation.REGENERATION_SEARCH),
         failure_threshold=providers.search_circuit_failure_threshold,
         reset_seconds=providers.search_circuit_reset_seconds,
     )
@@ -111,6 +126,7 @@ def build_regenerate_note(settings: Settings, clients: RegenerationClients) -> R
             base_delay_seconds=providers.model_retry_base_delay_seconds,
             max_delay_seconds=providers.model_retry_max_delay_seconds,
         ),
+        clients.observability.probe(ProviderOperation.NOTE_REGENERATION),
         failure_threshold=providers.model_circuit_failure_threshold,
         reset_seconds=providers.model_circuit_reset_seconds,
     )
@@ -138,7 +154,15 @@ def build_regenerate_note(settings: Settings, clients: RegenerationClients) -> R
     )
 
 
-def build_lifespan(settings: Settings) -> Lifespan:
+async def serve_metrics(request: Request) -> Response:
+    exposition: object = getattr(request.app.state, METRICS_EXPOSITION_STATE, None)
+    if not isinstance(exposition, MetricsExposition):
+        message = f"{METRICS_EXPOSITION_STATE} is not wired into the application state"
+        raise TypeError(message)
+    return Response(await exposition.render(), media_type=METRICS_CONTENT_TYPE)
+
+
+def build_lifespan(settings: Settings, observability: Observability) -> Lifespan:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_engine(
@@ -174,7 +198,12 @@ def build_lifespan(settings: Settings) -> Lifespan:
                         jobs_per_address=settings.limits.generation_jobs_per_address_per_day,
                         command_timeout_seconds=settings.redis.connect_timeout_seconds,
                     ),
+                    observability.metrics,
                 )
+                setattr(
+                    app.state, METRICS_EXPOSITION_STATE, MetricsExposition(observability.metrics, jobs.depth)
+                )
+                telemetry = observability.generation()
                 app.state.check_health = CheckHealth(
                     probes=(
                         postgres_probe(
@@ -187,7 +216,9 @@ def build_lifespan(settings: Settings) -> Lifespan:
                     version=settings.app.version,
                 )
                 app.state.get_generation = GetGeneration(store=store)
-                app.state.cancel_generation = CancelGeneration(store=store, queue=jobs, clock=utc_now)
+                app.state.cancel_generation = CancelGeneration(
+                    store=store, queue=jobs, clock=utc_now, telemetry=telemetry
+                )
                 async with AsyncExitStack() as clients:
                     llm = regeneration_llm_client(settings)
                     clients.push_async_callback(llm.aclose)
@@ -201,9 +232,10 @@ def build_lifespan(settings: Settings) -> Lifespan:
                         store=store,
                         queue=jobs,
                         quota=quota,
-                        moderator=build_topic_moderator(settings, moderation_llm),
+                        moderator=build_topic_moderator(settings, moderation_llm, observability),
                         clock=utc_now,
                         new_job_id=uuid4,
+                        telemetry=telemetry,
                     )
                     window = RegenerationWindow(
                         limit=settings.limits.note_regenerations_per_window,
@@ -213,7 +245,10 @@ def build_lifespan(settings: Settings) -> Lifespan:
                     app.state.regenerate_note = build_regenerate_note(
                         settings,
                         RegenerationClients(
-                            llm=llm, search=search, limiter=RedisRegenerationLimiter(queue, window)
+                            llm=llm,
+                            search=search,
+                            limiter=RedisRegenerationLimiter(queue, window, observability.metrics),
+                            observability=observability,
                         ),
                     )
                     yield
@@ -221,6 +256,7 @@ def build_lifespan(settings: Settings) -> Lifespan:
                 await queue.aclose()
         finally:
             await engine.dispose()
+            observability.shutdown()
 
     return lifespan
 
@@ -228,8 +264,13 @@ def build_lifespan(settings: Settings) -> Lifespan:
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or load_settings()
     configure_logging(resolved.app.log_level)
-    app = FastAPI(title=SERVICE_TITLE, version=resolved.app.version, lifespan=build_lifespan(resolved))
+    observability = create_observability(API_SERVICE_NAME, resolved.observability.trace_exporter, sys.stdout)
+    app = FastAPI(
+        title=SERVICE_TITLE, version=resolved.app.version, lifespan=build_lifespan(resolved, observability)
+    )
     register_error_handlers(app, str(resolved.app.problem_type_base_url))
     for router in ROUTERS:
         app.include_router(router, prefix=API_PREFIX)
+    app.add_api_route(METRICS_PATH, serve_metrics, include_in_schema=False)
+    app.add_middleware(ObservedRequests, tracer=observability.tracer, quiet_paths=frozenset({METRICS_PATH}))
     return app

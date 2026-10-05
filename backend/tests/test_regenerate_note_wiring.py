@@ -26,7 +26,14 @@ from deckly.infrastructure.search.client import (
 from deckly.main import API_PREFIX, RegenerationClients, build_regenerate_note, single_attempt
 from deckly.transport import notes
 from deckly.transport.error_handlers import register_error_handlers
-from tests.fakes import FakeLlmClient, FakeSearchClient, hang_forever, model_reply, regeneration_request
+from tests.fakes import (
+    FakeLlmClient,
+    FakeSearchClient,
+    fresh_observability,
+    hang_forever,
+    model_reply,
+    regeneration_request,
+)
 from tests.test_config import settings_from_environment
 from tests.transport.openapi import spec_errors
 
@@ -82,7 +89,12 @@ def settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
 
 
 def regenerate_note(settings: Settings, llm: FakeLlmClient, search: FakeSearchClient) -> RegenerateNote:
-    return build_regenerate_note(settings, RegenerationClients(llm=llm, search=search, limiter=OpenLimiter()))
+    return build_regenerate_note(
+        settings,
+        RegenerationClients(
+            llm=llm, search=search, limiter=OpenLimiter(), observability=fresh_observability()
+        ),
+    )
 
 
 def client_for(regenerate: RegenerateNote) -> TestClient:

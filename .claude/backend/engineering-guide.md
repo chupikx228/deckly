@@ -360,6 +360,21 @@ You cannot debug a non-deterministic pipeline you cannot see.
   offline banner from it before the user fills in the wizard. A health check that always
   returns `ok` is worse than none.
 
+How this is built is in `backend/README.md` ("Observability"). The rules for new code:
+
+- **Event names** are `<subject>_<past-tense verb>` in snake_case; **fields** are snake_case
+  (`job_id`, `client_id`, `request_id`, `duration_ms`), even where the API spells them `jobId`.
+- **Correlation comes from context, not arguments.** Bind `job_id` / `request_id` with
+  `correlated(...)` at the use-case entry; do not add them to `extra` in adapters. An explicit
+  field always wins over the context, so a wrong explicit value silently mislabels a line.
+- **Every outbound provider call goes through `ResilientCaller`** with its own
+  `ProviderOperation`, which is what times, counts, traces and logs it.
+- **Never log** keys, the topic or `instructions`, generated text, provider response bodies, URLs
+  with query strings, or client addresses. Log counts and enum values. Exceptions logged with
+  `exc_info` print their whole `__cause__` chain, so an SDK exception that carries a response body
+  must not be chained (`from None`) once its useful part has been redacted into the new message.
+- **Metric labels** take a fixed, small set of values (enums), never ids or user input.
+
 ## Testing
 
 [`testing.md`](testing.md) is the full approach — how to test, the boundary-case checklist,

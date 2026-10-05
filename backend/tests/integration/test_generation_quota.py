@@ -19,7 +19,7 @@ from deckly.infrastructure.quota import (
     client_key,
 )
 from deckly.main import API_PREFIX, create_app
-from tests.fakes import FakeTopicModerator
+from tests.fakes import FakeTopicModerator, fresh_metrics
 from tests.integration.conftest import Cleanup, purge_quota, screen_topics_with, with_generation_limits
 from tests.integration.test_health_endpoint import LOOPBACK, Proxy
 from tests.transport.openapi import spec_errors
@@ -84,7 +84,7 @@ async def requesters(queue_pool: ArqRedis) -> AsyncIterator[Requesters]:
 
 @pytest.fixture
 def quota(queue_pool: ArqRedis) -> RedisGenerationQuota:
-    return RedisGenerationQuota(queue_pool, LIMITS)
+    return RedisGenerationQuota(queue_pool, LIMITS, metrics=fresh_metrics())
 
 
 async def test_client_gets_exactly_its_limit_then_a_429_until_the_next_utc_midnight(
@@ -260,7 +260,7 @@ async def test_counters_expire_with_their_window(
 
 async def test_unreachable_redis_refuses_rather_than_running_unmetered() -> None:
     unreachable = ArqRedis(host=LOOPBACK, port=1, socket_connect_timeout=0.2, socket_timeout=0.2)
-    quota = RedisGenerationQuota(unreachable, LIMITS)
+    quota = RedisGenerationQuota(unreachable, LIMITS, metrics=fresh_metrics())
     requester = Requester(client_id=uuid4(), address=unique_ipv4())
     try:
         with pytest.raises(UpstreamUnavailableError):
@@ -277,7 +277,7 @@ async def test_frozen_redis_refuses_within_the_command_timeout(
 ) -> None:
     proxy = Proxy(settings.redis.url.host or LOOPBACK, settings.redis.url.port or 0)
     frozen = ArqRedis(host=LOOPBACK, port=await proxy.start(), socket_timeout=SAFETY_NET_SECONDS)
-    quota = RedisGenerationQuota(frozen, LIMITS)
+    quota = RedisGenerationQuota(frozen, LIMITS, metrics=fresh_metrics())
     requester = requesters.new()
     loop = asyncio.get_running_loop()
     try:

@@ -41,6 +41,7 @@ from deckly.worker.settings import (
     ENFORCE_JOB_RETENTION_KEY,
     LLM_CLIENT_KEY,
     MEDIA_FETCHER_KEY,
+    OBSERVABILITY_KEY,
     REDIS_KEY,
     RUN_GENERATION_KEY,
     SETTINGS_KEY,
@@ -59,6 +60,9 @@ from tests.fakes import (
     FakeProviders,
     InMemoryResultCache,
     SlowModel,
+    fresh_observability,
+    fresh_probe,
+    fresh_telemetry,
     generation_request,
     model_reply,
 )
@@ -114,6 +118,7 @@ def context_with(store: PostgresJobStore, providers: FakeProviders) -> WorkerCon
             moderator=providers,
             media=providers,
             clock=utc_now,
+            telemetry=fresh_telemetry(),
         )
     }
 
@@ -158,7 +163,11 @@ async def test_task_of_a_job_cancelled_while_it_waited_in_the_queue_calls_no_por
 async def test_worker_startup_wires_the_web_source_retriever_and_parser(
     settings: Settings, queue_pool: ArqRedis
 ) -> None:
-    ctx: WorkerContext = {SETTINGS_KEY: settings, REDIS_KEY: queue_pool}
+    ctx: WorkerContext = {
+        SETTINGS_KEY: settings,
+        REDIS_KEY: queue_pool,
+        OBSERVABILITY_KEY: fresh_observability(),
+    }
 
     await startup(ctx)
     try:
@@ -175,7 +184,11 @@ async def test_worker_startup_wires_the_web_source_retriever_and_parser(
 async def test_worker_startup_wires_the_commons_media_fetcher_in_place_of_any_stub(
     settings: Settings, queue_pool: ArqRedis
 ) -> None:
-    ctx: WorkerContext = {SETTINGS_KEY: settings, REDIS_KEY: queue_pool}
+    ctx: WorkerContext = {
+        SETTINGS_KEY: settings,
+        REDIS_KEY: queue_pool,
+        OBSERVABILITY_KEY: fresh_observability(),
+    }
 
     await startup(ctx)
     try:
@@ -192,7 +205,11 @@ async def test_worker_startup_wires_the_commons_media_fetcher_in_place_of_any_st
 async def test_worker_startup_wires_the_llm_card_generator_behind_the_resilience_layer(
     settings: Settings, queue_pool: ArqRedis
 ) -> None:
-    ctx: WorkerContext = {SETTINGS_KEY: settings, REDIS_KEY: queue_pool}
+    ctx: WorkerContext = {
+        SETTINGS_KEY: settings,
+        REDIS_KEY: queue_pool,
+        OBSERVABILITY_KEY: fresh_observability(),
+    }
 
     await startup(ctx)
     try:
@@ -208,7 +225,11 @@ async def test_worker_startup_wires_the_llm_card_generator_behind_the_resilience
 async def test_worker_startup_wires_the_redis_result_cache_with_the_configured_ttl(
     settings: Settings, queue_pool: ArqRedis
 ) -> None:
-    ctx: WorkerContext = {SETTINGS_KEY: settings, REDIS_KEY: queue_pool}
+    ctx: WorkerContext = {
+        SETTINGS_KEY: settings,
+        REDIS_KEY: queue_pool,
+        OBSERVABILITY_KEY: fresh_observability(),
+    }
 
     await startup(ctx)
     try:
@@ -222,7 +243,11 @@ async def test_worker_startup_wires_the_redis_result_cache_with_the_configured_t
 async def test_worker_startup_wires_housekeeping_with_the_configured_thresholds_and_the_shared_store(
     settings: Settings, queue_pool: ArqRedis
 ) -> None:
-    ctx: WorkerContext = {SETTINGS_KEY: settings, REDIS_KEY: queue_pool}
+    ctx: WorkerContext = {
+        SETTINGS_KEY: settings,
+        REDIS_KEY: queue_pool,
+        OBSERVABILITY_KEY: fresh_observability(),
+    }
 
     await startup(ctx)
     try:
@@ -268,7 +293,7 @@ async def test_job_that_outlives_the_arq_timeout_ends_failed_instead_of_running_
 
 def patient_llm(model: SlowModel, breaker: CircuitBreaker) -> ResilientLlmClient:
     runtime = RetryRuntime(clock=time.monotonic, sleep=asyncio.sleep, jitter=lambda: 0.0)
-    caller = ResilientCaller(PATIENT_POLICY, breaker, runtime)
+    caller = ResilientCaller(PATIENT_POLICY, breaker, runtime, probe=fresh_probe())
     return ResilientLlmClient(FakeLlmClient(model.think), caller, MAX_OUTPUT_TOKENS)
 
 
@@ -280,7 +305,7 @@ async def test_cancelling_a_running_job_aborts_its_model_call_inside_the_arq_wor
     store = PostgresJobStore(session_factory)
     job = await enqueued_job(store, pool, cleanup)
     model = SlowModel(model_reply({"notes": []}))
-    breaker = CircuitBreaker(failure_threshold=1, reset_seconds=30, clock=time.monotonic)
+    breaker = CircuitBreaker(failure_threshold=1, reset_seconds=30, clock=time.monotonic, probe=fresh_probe())
     providers = FakeProviders()
     run = RunGeneration(
         store=store,
@@ -293,6 +318,7 @@ async def test_cancelling_a_running_job_aborts_its_model_call_inside_the_arq_wor
         moderator=providers,
         media=providers,
         clock=utc_now,
+        telemetry=fresh_telemetry(),
     )
     worker = Worker(
         functions=WorkerSettings.functions,
@@ -307,7 +333,9 @@ async def test_cancelling_a_running_job_aborts_its_model_call_inside_the_arq_wor
     working = asyncio.create_task(worker.main())
     try:
         await asyncio.wait_for(model.reached.wait(), WAIT_SECONDS)
-        await CancelGeneration(store=store, queue=job_queue(pool), clock=utc_now)(job.job_id)
+        await CancelGeneration(
+            store=store, queue=job_queue(pool), clock=utc_now, telemetry=fresh_telemetry()
+        )(job.job_id)
         await asyncio.wait_for(working, WAIT_SECONDS)
         leftovers = (
             await pool.zscore(queue_name, str(job.job_id)),

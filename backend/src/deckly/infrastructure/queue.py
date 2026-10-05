@@ -3,9 +3,12 @@ import logging
 from uuid import UUID
 
 from arq.connections import ArqRedis, RedisSettings
-from arq.constants import abort_jobs_ss
+from arq.constants import abort_jobs_ss, default_queue_name
 from arq.utils import timestamp_ms
 from redis.exceptions import RedisError
+
+from deckly.infrastructure.observability.tracing import current_trace_carrier
+from deckly.infrastructure.rate_limit import bounded_redis, require_count
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +59,14 @@ class ArqJobQueue:
 
     async def enqueue(self, job_id: UUID) -> None:
         async with asyncio.timeout(self._command_timeout_seconds):
-            await self._pool.enqueue_job(GENERATION_TASK, str(job_id), _job_id=str(job_id))
+            await self._pool.enqueue_job(
+                GENERATION_TASK, str(job_id), current_trace_carrier(), _job_id=str(job_id)
+            )
+
+    async def depth(self) -> int:
+        async with bounded_redis("queue_depth_unavailable", self._command_timeout_seconds):
+            answer = await self._pool.zcard(default_queue_name)
+        return require_count(answer, "ZCARD")
 
     async def abort(self, job_id: UUID) -> None:
         try:

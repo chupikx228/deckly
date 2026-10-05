@@ -22,7 +22,7 @@ from deckly.infrastructure.result_cache import RedisResultCache, ResultCacheLimi
 from deckly.main import API_PREFIX, create_app
 from deckly.worker.settings import build_result_cache
 from tests.domain.builders import FULL_RESULT, RequestChanges
-from tests.fakes import GENERATED, FakeProviders, generation_request
+from tests.fakes import GENERATED, FakeProviders, fresh_metrics, fresh_telemetry, generation_request
 from tests.integration.conftest import Cleanup, open_queue_pool
 from tests.transport.openapi import spec_errors
 
@@ -71,7 +71,7 @@ def entries(settings: Settings) -> Iterator[list[GenerationRequest]]:
 async def test_a_stored_result_is_read_back_equal_for_an_equivalent_request(
     pool: ArqRedis, entries: list[GenerationRequest]
 ) -> None:
-    cache = RedisResultCache(pool, limits(60))
+    cache = RedisResultCache(pool, limits(60), metrics=fresh_metrics())
     request = unique_request(language="ru")
     entries.append(request)
 
@@ -82,14 +82,14 @@ async def test_a_stored_result_is_read_back_equal_for_an_equivalent_request(
 
 @pytest.mark.anyio
 async def test_a_request_that_was_never_stored_is_a_miss(pool: ArqRedis) -> None:
-    assert await RedisResultCache(pool, limits(60)).get(unique_request()) is None
+    assert await RedisResultCache(pool, limits(60), metrics=fresh_metrics()).get(unique_request()) is None
 
 
 @pytest.mark.anyio
 async def test_the_entry_carries_the_configured_ttl(
     pool: ArqRedis, settings: Settings, entries: list[GenerationRequest]
 ) -> None:
-    cache = build_result_cache(pool, settings)
+    cache = build_result_cache(pool, settings, metrics=fresh_metrics())
     request = unique_request()
     entries.append(request)
 
@@ -107,7 +107,7 @@ async def test_the_entry_carries_the_configured_ttl(
 async def test_an_entry_expires_when_its_ttl_runs_out(
     pool: ArqRedis, entries: list[GenerationRequest]
 ) -> None:
-    cache = RedisResultCache(pool, limits(SHORT_TTL_SECONDS))
+    cache = RedisResultCache(pool, limits(SHORT_TTL_SECONDS), metrics=fresh_metrics())
     request = unique_request()
     entries.append(request)
     await cache.put(request, GENERATED)
@@ -120,7 +120,7 @@ async def test_an_entry_expires_when_its_ttl_runs_out(
 
 @pytest.mark.anyio
 async def test_storing_again_restarts_the_ttl(pool: ArqRedis, entries: list[GenerationRequest]) -> None:
-    cache = RedisResultCache(pool, limits(60))
+    cache = RedisResultCache(pool, limits(60), metrics=fresh_metrics())
     request = unique_request()
     entries.append(request)
     key = cache_key(request.fingerprint())
@@ -140,7 +140,7 @@ async def test_storing_again_restarts_the_ttl(pool: ArqRedis, entries: list[Gene
 async def test_a_corrupt_entry_is_a_miss_and_the_next_store_repairs_it(
     pool: ArqRedis, entries: list[GenerationRequest], garbage: bytes
 ) -> None:
-    cache = RedisResultCache(pool, limits(60))
+    cache = RedisResultCache(pool, limits(60), metrics=fresh_metrics())
     request = unique_request()
     entries.append(request)
     await pool.set(cache_key(request.fingerprint()), garbage, ex=60)
@@ -155,7 +155,7 @@ async def test_a_corrupt_entry_is_a_miss_and_the_next_store_repairs_it(
 async def test_an_entry_holds_the_validated_domain_result_and_nothing_else(
     pool: ArqRedis, entries: list[GenerationRequest]
 ) -> None:
-    cache = RedisResultCache(pool, limits(60))
+    cache = RedisResultCache(pool, limits(60), metrics=fresh_metrics())
     request = unique_request()
     entries.append(request)
 
@@ -170,7 +170,7 @@ async def test_an_entry_holds_the_validated_domain_result_and_nothing_else(
 async def test_requests_that_differ_only_in_what_shapes_the_output_do_not_share_an_entry(
     pool: ArqRedis, entries: list[GenerationRequest]
 ) -> None:
-    cache = RedisResultCache(pool, limits(60))
+    cache = RedisResultCache(pool, limits(60), metrics=fresh_metrics())
     request = unique_request()
     entries.append(request)
     await cache.put(request, GENERATED)
@@ -197,13 +197,14 @@ async def run_through_postgres_and_redis(settings: Settings, providers: FakeProv
     try:
         await RunGeneration(
             store=PostgresJobStore(create_session_factory(engine)),
-            cache=build_result_cache(redis, settings),
+            cache=build_result_cache(redis, settings, metrics=fresh_metrics()),
             retriever=providers,
             parser=providers,
             generator=providers,
             moderator=providers,
             media=providers,
             clock=utc_now,
+            telemetry=fresh_telemetry(),
         )(job_id)
     finally:
         await redis.aclose()
