@@ -220,12 +220,12 @@ def test_api_key_with_a_character_outside_visible_ascii_is_rejected_without_echo
     clean_environment: pytest.MonkeyPatch, variable: str, character: str
 ) -> None:
     set_provider_environment(clean_environment)
-    clean_environment.setenv(variable, f"AIzaSecretKey{character}Injected")
+    clean_environment.setenv(variable, f"test-secret-key{character}Injected")
 
     with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_PROVIDER_").lower()) as error:
         ProviderSettings()
 
-    assert "AIzaSecretKey" not in str(error.value)
+    assert "test-secret-key" not in str(error.value)
     assert "Injected" not in str(error.value)
 
 
@@ -235,12 +235,12 @@ def test_api_key_with_a_nul_from_the_env_file_is_rejected_without_echoing_it(
 ) -> None:
     set_provider_environment(clean_environment)
     clean_environment.delenv(variable)
-    Path(".env").write_text(f'{variable}="AIzaSecretKey\x00Injected"\n', encoding="utf-8")
+    Path(".env").write_text(f'{variable}="test-secret-key\x00Injected"\n', encoding="utf-8")
 
     with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_PROVIDER_").lower()) as error:
         ProviderSettings()
 
-    assert "AIzaSecretKey" not in str(error.value)
+    assert "test-secret-key" not in str(error.value)
 
 
 @pytest.mark.parametrize("variable", API_KEY_VARIABLES)

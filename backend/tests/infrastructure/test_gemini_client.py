@@ -23,7 +23,7 @@ from deckly.infrastructure.resilience import TransientError
 
 pytestmark = pytest.mark.anyio
 
-API_KEY = "AIzaSyTestGeminiKey0123456789abcdefghij"
+API_KEY = "test-gemini-key-0123456789-abcdefghij-xq7z"
 ENDPOINT = LlmEndpoint(
     base_url="https://generativelanguage.test/v1beta",
     api_key=API_KEY,
