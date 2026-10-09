@@ -62,6 +62,9 @@ class AnthropicLlmClient:
         except APIResponseValidationError as error:
             message = f"{PROVIDER} answered with an unexpected shape: {self._redacted(error.message)}"
             raise LlmResponseError(message) from None
+        except RecursionError as error:
+            message = f"{PROVIDER} answered with a body nested too deeply to parse"
+            raise LlmResponseError(message) from error
         return reply_from(answer)
 
     def _redacted(self, detail: str) -> str:

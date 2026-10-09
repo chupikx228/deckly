@@ -29,6 +29,7 @@ from deckly.infrastructure.job_store import BoundedJobStore, PostgresJobHousekee
 from deckly.infrastructure.llm.anthropic_client import AnthropicLlmClient
 from deckly.infrastructure.llm.client import LlmClient, LlmEndpoint
 from deckly.infrastructure.llm.deepseek_client import DeepSeekLlmClient
+from deckly.infrastructure.llm.gemini_client import GeminiLlmClient
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.media.client import MediaEndpoint
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
@@ -71,6 +72,7 @@ logger = logging.getLogger(__name__)
 LLM_CLIENTS: Mapping[ModelProvider, Callable[[LlmEndpoint], LlmClient]] = {
     "anthropic": AnthropicLlmClient,
     "deepseek": DeepSeekLlmClient,
+    "gemini": GeminiLlmClient,
 }
 
 type WorkerContext = dict[str, object]

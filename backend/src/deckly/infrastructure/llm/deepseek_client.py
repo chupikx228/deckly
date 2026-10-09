@@ -48,7 +48,7 @@ def reply_from(response: httpx2.Response) -> LlmReply:
         raise LlmUnavailableError(message)
     try:
         payload: object = response.json()
-    except ValueError as error:
+    except (ValueError, RecursionError) as error:
         message = f"{PROVIDER} answered with a body that is not JSON"
         raise LlmResponseError(message) from error
     match payload:
