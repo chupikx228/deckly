@@ -1,9 +1,10 @@
+from dataclasses import replace
 from uuid import UUID
 
 import pytest
 
 from deckly.domain.exceptions import InvalidMediaError, InvalidSourceError
-from deckly.domain.media import Media, MediaKind
+from deckly.domain.media import Attribution, Media, MediaKind
 from deckly.domain.source import Source
 from tests.domain.builders import T0, client_id
 
@@ -56,18 +57,10 @@ def test_media_with_a_non_web_url_is_rejected(url: str) -> None:
         image(url=url)
 
 
-@pytest.mark.parametrize("dimension", ["width", "height"])
-@pytest.mark.parametrize("value", [0, -1])
-def test_media_dimensions_must_be_positive(dimension: str, value: int) -> None:
+@pytest.mark.parametrize(("width", "height"), [(0, None), (-1, None), (None, 0), (None, -1)])
+def test_media_dimensions_must_be_positive(width: int | None, height: int | None) -> None:
     with pytest.raises(InvalidMediaError):
-        Media(
-            media_id=client_id(1),
-            kind=MediaKind.IMAGE,
-            url=IMAGE_URL,
-            license="CC0-1.0",
-            alt="Sign",
-            **{dimension: value},
-        )
+        replace(image(), width=width, height=height)
 
 
 def test_media_id_that_is_not_uuid_v4_is_rejected() -> None:
@@ -87,6 +80,45 @@ def test_media_dimension_of_one_pixel_is_accepted() -> None:
     )
 
     assert (media.width, media.height) == (1, 1)
+
+
+ATTRIBUTION = Attribution(
+    author="Jane Doe",
+    title="Stop sign",
+    source_url="https://commons.wikimedia.org/wiki/File:Stop.jpg",
+    license_url="https://creativecommons.org/licenses/by/4.0/",
+)
+
+
+def test_image_with_an_attribution_is_accepted() -> None:
+    media = Media(
+        media_id=client_id(1),
+        kind=MediaKind.IMAGE,
+        url=IMAGE_URL,
+        license="CC-BY-4.0",
+        alt="Sign",
+        attribution=ATTRIBUTION,
+    )
+
+    assert media.attribution == ATTRIBUTION
+
+
+def test_media_without_an_attribution_defaults_to_none() -> None:
+    assert image().attribution is None
+
+
+@pytest.mark.parametrize("field", ["author", "title"])
+@pytest.mark.parametrize("text", ["", "   "])
+def test_attribution_with_a_blank_author_or_title_is_rejected(field: str, text: str) -> None:
+    with pytest.raises(InvalidMediaError):
+        replace(ATTRIBUTION, **{field: text})
+
+
+@pytest.mark.parametrize("field", ["source_url", "license_url"])
+@pytest.mark.parametrize("url", BAD_URLS)
+def test_attribution_with_a_non_web_url_is_rejected(field: str, url: str) -> None:
+    with pytest.raises(InvalidMediaError):
+        replace(ATTRIBUTION, **{field: url})
 
 
 def test_source_with_offset_timestamp_is_accepted() -> None:

@@ -14,7 +14,7 @@ from deckly.infrastructure.stored_result import dump_result, load_result
 
 logger = logging.getLogger(__name__)
 
-KEY_PREFIX = "deckly:generation-result:v1"
+KEY_PREFIX = "deckly:generation-result:v2"
 
 
 @dataclass(frozen=True, slots=True)

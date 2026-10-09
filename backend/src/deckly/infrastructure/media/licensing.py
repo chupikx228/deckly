@@ -1,18 +1,52 @@
 import re
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from types import MappingProxyType
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from deckly.domain.exceptions import InvariantViolationError
-from deckly.domain.media import Media, MediaKind
+from deckly.domain.media import Attribution, Media, MediaKind
 from deckly.domain.text import is_blank, is_web_url, strip_unstorable
 from deckly.infrastructure.media.client import ImageCandidate
 from deckly.infrastructure.search.cleaning import ELLIPSIS, cut_at_word, visible_words
 
-LICENSES: Mapping[str, str] = MappingProxyType({"cc0": "CC0-1.0", "pd": "Public-Domain"})
-NO_ATTRIBUTION = "false"
+
+@dataclass(frozen=True, slots=True)
+class Licence:
+    name: str
+    deed_url: str | None = None
+
+    @property
+    def requires_attribution(self) -> bool:
+        return self.deed_url is not None
+
+
+CREATIVE_COMMONS_DEEDS = "https://creativecommons.org/licenses"
+ATTRIBUTION_VERSIONS = ("1.0", "2.0", "2.5", "3.0", "4.0")
+ATTRIBUTION_LICENCES = {"by": "CC-BY", "by-sa": "CC-BY-SA"}
+
+
+def attribution_licence(kind: str, name: str, version: str) -> Licence:
+    return Licence(name=f"{name}-{version}", deed_url=f"{CREATIVE_COMMONS_DEEDS}/{kind}/{version}/")
+
+
+LICENSES: Mapping[str, Licence] = MappingProxyType(
+    {
+        "cc0": Licence("CC0-1.0"),
+        "pd": Licence("Public-Domain"),
+        **{
+            f"cc-{kind}-{version}": attribution_licence(kind, name, version)
+            for kind, name in ATTRIBUTION_LICENCES.items()
+            for version in ATTRIBUTION_VERSIONS
+        },
+    }
+)
+ATTRIBUTION_FLAGS = {True: "true", False: "false"}
+UNKNOWN_AUTHOR_WORDS = frozenset({"unknown", "author"})
+WORD = re.compile(r"\w+")
+MAX_AUTHOR_CHARACTERS = 200
 SECURE_SCHEME = "https"
 TRUSTED_DOMAIN = "wikimedia.org"
 HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
@@ -70,6 +104,10 @@ def clean_alt(value: str) -> str:
     return cut_at_word(alt, MAX_ALT_CHARACTERS - len(ELLIPSIS)) + ELLIPSIS
 
 
+def clean_line(markup: str) -> str:
+    return visible_words(strip_unstorable(plain_text(markup)))
+
+
 def title_words(file_title: str) -> str:
     name = file_title.removeprefix(FILE_PREFIX)
     stem, separator, _ = name.rpartition(EXTENSION_SEPARATOR)
@@ -111,14 +149,39 @@ def is_trusted_url(url: str) -> bool:
     )
 
 
-def licence_of(candidate: ImageCandidate) -> str | None:
-    code = (candidate.license_code or "").strip().lower()
+def licence_of(candidate: ImageCandidate) -> Licence | None:
+    licence = LICENSES.get((candidate.license_code or "").strip().lower())
+    if licence is None:
+        return None
     attribution = (candidate.attribution_required or "").strip().lower()
-    if attribution != NO_ATTRIBUTION:
+    if attribution != ATTRIBUTION_FLAGS[licence.requires_attribution]:
         return None
     if candidate.restrictions is not None and not is_blank(candidate.restrictions):
         return None
-    return LICENSES.get(code)
+    return licence
+
+
+def is_unknown(author: str) -> bool:
+    return set(WORD.findall(author.lower())) <= UNKNOWN_AUTHOR_WORDS
+
+
+def author_of(candidate: ImageCandidate) -> str | None:
+    offered = (
+        clean_line(markup) for markup in (candidate.credit_line, candidate.artist) if markup is not None
+    )
+    author = next((credit for credit in offered if not is_blank(credit)), None)
+    if author is None or is_unknown(author) or len(author) > MAX_AUTHOR_CHARACTERS:
+        return None
+    return author
+
+
+def attribution_of(candidate: ImageCandidate, deed_url: str) -> Attribution | None:
+    author = author_of(candidate)
+    title = visible_words(strip_unstorable(title_words(candidate.file_title)))
+    source_url = candidate.description_url
+    if author is None or is_blank(title) or source_url is None or not is_trusted_url(source_url):
+        return None
+    return Attribution(author=author, title=title, source_url=source_url, license_url=deed_url)
 
 
 def has_usable_picture(candidate: ImageCandidate) -> bool:
@@ -141,14 +204,20 @@ def licensed_image(candidate: ImageCandidate, new_id: Callable[[], UUID]) -> Med
     if alt is None:
         return None
     try:
+        attribution = None
+        if licence.deed_url is not None:
+            attribution = attribution_of(candidate, licence.deed_url)
+            if attribution is None:
+                return None
         return Media(
             media_id=new_id(),
             kind=MediaKind.IMAGE,
             url=candidate.thumbnail_url,
-            license=licence,
+            license=licence.name,
             alt=alt,
             width=candidate.thumbnail_width,
             height=candidate.thumbnail_height,
+            attribution=attribution,
         )
     except InvariantViolationError:
         return None

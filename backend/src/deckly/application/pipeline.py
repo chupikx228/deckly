@@ -236,7 +236,7 @@ class RunGeneration:
         self, job_id: UUID, result: GenerationResult, queries: tuple[ImageQuery, ...]
     ) -> Illustrated:
         try:
-            illustrated = attach_media(result, await self.media.fetch(job_id, queries))
+            illustrated = attach_media(result, await self.media.fetch(job_id, result, queries))
         except Exception as error:
             logger.log(
                 failure_level(error),

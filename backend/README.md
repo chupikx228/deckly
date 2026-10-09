@@ -207,8 +207,8 @@ opens it and later jobs fail fast without calling Tavily until the reset probe s
 other rejection (`400`, `401`, `403`…) or a body that is not the expected JSON is
 not retried and fails the job `GENERATION_FAILED`. A search with no usable page is not an error
 here: the parser returns no material, the card generator skips the model call, and the job ends
-`NO_VALID_CONTENT`. Settings refuse to load unless the search, model and media deadlines together
-leave room within `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS`.
+`NO_VALID_CONTENT`. Settings refuse to load unless the search, model, media, media judge and
+moderation deadlines together leave room within `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS`.
 
 ## Card generation
 
@@ -336,15 +336,25 @@ The media stage searches once per illustrated note, for at most `MEDIA_MAX_IMAGE
 most `MEDIA_MAX_CONCURRENCY` searches at a time. The phrase is reduced to plain lowercase words
 first, so it cannot use CirrusSearch operators (`insource:`, `-`, `AND`/`OR`/`NOT`, wildcards,
 regexes), cut at a word to the 300 characters CirrusSearch accepts, and the search is limited to
-bitmap and drawing files. Each note gets the first
-candidate in search rank order that passes every check below, and a file already given to an
-earlier note is skipped:
+bitmap and drawing files. The first `MEDIA_JUDGED_CANDIDATES_PER_NOTE` candidates in search rank
+order that pass every check below make the note's shortlist, and the image classifier (see
+"Content safety") picks from it:
 
-- **Licence.** The file's machine-readable `License` code must be `cc0` or `pd`, its
-  `AttributionRequired` flag must be exactly `false`, and its `Restrictions` (personality rights,
-  trademark, insignia) must be empty. The contract's `Media` has no field for an author or a
-  source link, so licences that require attribution (CC BY, CC BY-SA) are dropped, not guessed.
-  The licence is returned as `CC0-1.0` or `Public-Domain`.
+- **Licence.** The file's machine-readable `License` code must be `cc0`, `pd`, or a generic
+  `cc-by-<version>` / `cc-by-sa-<version>` (1.0, 2.0, 2.5, 3.0 or 4.0). Ported variants such as
+  `cc-by-sa-3.0-de` and every NonCommercial or NoDerivatives licence are dropped. The
+  `AttributionRequired` flag must match the licence exactly (`false` for CC0 and public domain,
+  `true` for CC BY and CC BY-SA), and `Restrictions` (personality rights, trademark, insignia)
+  must be empty. The licence is returned as its SPDX id: `CC0-1.0`, `Public-Domain`,
+  `CC-BY-4.0`, `CC-BY-SA-3.0` and so on.
+- **Attribution.** CC BY and CC BY-SA files carry an `attribution`, and a file whose attribution
+  cannot be derived is dropped, never guessed. The author is the file's `Attribution` credit
+  line when the author set one, otherwise its `Artist`, with markup removed; a blank author, one
+  made only of the words "unknown" and "author" (`Unknown author.`, `Author unknown`), or one
+  longer than 200 characters drops the file. The title is the
+  file name, the source is the file's Commons description page (`https` on `wikimedia.org`), and
+  the licence URL is the Creative Commons deed from the backend's own table, never the URL
+  Commons reports.
 - **URL.** The Commons-scaled thumbnail (`MEDIA_THUMBNAIL_WIDTH`, which Commons rounds to one of
   its standard widths; SVG comes back as PNG) must be `https` on `wikimedia.org` or one of its
   subdomains, with no credentials or port. These URLs are unsigned, need no authentication and
@@ -355,13 +365,18 @@ earlier note is skipped:
   the file name when the description is blank. A file with neither is dropped. The description is
   usually English and may not match the card language.
 
-A note with no passing candidate simply has no image. The media stage is a bulkhead: every
+A note with no passing candidate, or none the classifier accepts, simply has no image. The
+classifier ranks the acceptable candidates of every note; each note gets its best-ranked one,
+and a file already given to an earlier note falls through to that note's next pick. The media
+stage is a bulkhead: every
 search goes through the resilience layer with its own breaker and policy, and a failed search
 (outage, timeout, `429`/`5xx`, an open circuit, a block, a malformed answer) only costs that note
 its image. The whole stage stops at `MEDIA_DEADLINE_SECONDS` and keeps what it found by then. The
 pipeline also catches anything that still escapes the adapter, logs `media_skipped` (warning for
 an outage, error with the traceback for anything else) and succeeds with the generated notes as
 they were. An image outage therefore never fails a job and never produces `PROVIDER_UNAVAILABLE`.
+An image classifier outage, or an unreadable reply, is such an escape: the job succeeds without
+images and the result is not cached.
 The port returns attachments keyed by `clientId`, never notes, so a media adapter cannot drop or
 duplicate a note; attachments for unknown notes are ignored and a repeated `mediaId` is kept once.
 
@@ -385,10 +400,25 @@ reaches the classifier as a JSON document, so it cannot break out of its delimit
   topic. Retries follow `DECKLY_PROVIDER_MODERATION_FILTER_{TIMEOUT_SECONDS,DEADLINE_SECONDS,
 MAX_ATTEMPTS}`; the deadline counts towards the generation job timeout. Results are cached after
   filtering, and a cache hit is not screened again.
+- **Image screening** (`LlmCandidateJudge`, wired in the worker): images are found after the
+  content filter has run, and Commons titles and descriptions are third-party wiki text, so one
+  batched call per job judges every shortlisted candidate's file name, description and (up to
+  ten, non-hidden) categories against the note it would illustrate and the phrase it was found
+  with. The prompt adds an image policy to the content policy: photographs of nudity, sexual
+  activity, graphic injury, gore or a dead body are always blocked, and anatomical diagrams,
+  clinical illustrations and artworks only pass when the note's own subject calls for them. A
+  candidate is accepted only when its text shows that the picture's main subject is what the
+  note needs; this is what keeps the Commons hit for "stop sign" that is a photo of letterboxes
+  out of the deck. The reply ranks the acceptable candidates per note, and anything it leaves
+  out, misnumbers or omits gets no image. The call is skipped when no note has a shortlisted
+  candidate. Retries follow `DECKLY_PROVIDER_MEDIA_JUDGE_{TIMEOUT_SECONDS,DEADLINE_SECONDS,
+MAX_ATTEMPTS}`, and the deadline counts towards the generation job timeout. The classifier judges
+  text only, never pixels, so a mislabelled file can still get through.
 
-Both checks fail closed: a refusal from the classifier counts as a block. Circuit-breaker and
-retry-delay settings are shared with `DECKLY_PROVIDER_MODEL_*`, but each check has its own
-breaker. `POST /v1/notes/regenerate` is not screened yet (DEC-47).
+All three checks fail closed: a refusal from the classifier counts as a block (for images: no
+images). Circuit-breaker and retry-delay settings are shared with `DECKLY_PROVIDER_MODEL_*`, but
+each check has its own breaker, so an image classifier outage never fails a job at the content
+filter. `POST /v1/notes/regenerate` is not screened yet (DEC-47).
 
 ## Observability
 
@@ -507,7 +537,8 @@ generation.run                              (worker, child of the POST through t
 │   ├── provider.call card_generation
 │   └── provider.call content_moderation
 ├── generation.stage.fetching_media
-│   └── provider.call image_search          (concurrent)
+│   ├── provider.call image_search          (concurrent)
+│   └── provider.call image_moderation
 └── generation.stage.finalizing
 ```
 

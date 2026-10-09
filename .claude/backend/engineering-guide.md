@@ -325,15 +325,24 @@ The model and search providers _will_ be slow, rate-limited or down. Design for 
   The filter runs right after generation, before media, and follows the same repair-or-drop rule
   as validation: a note without an explicit "allow" verdict is dropped, an unsafe deck title is
   replaced with one built from the topic, and only when no note is left does the job fail with
-  `NO_VALID_CONTENT`. A classifier that cannot answer fails the job with `PROVIDER_UNAVAILABLE`;
-  nothing unscreened is ever shipped.
-- Both checks fail closed. A classifier refusal counts as a block, and a reply that cannot be read
-  is an outage, never a pass.
+  `NO_VALID_CONTENT`. A classifier that cannot answer fails the job with `PROVIDER_UNAVAILABLE`.
+- Screen **images** separately, because they are found after the text filter has run and their
+  titles and descriptions are third-party wiki text. One batched classifier call per job judges
+  every note's licensed candidates for the content policy, the image policy and relevance to the
+  note, and ranks the acceptable ones; only a ranked candidate is attached. Images are best
+  effort, so this check fails closed without failing the job: a refusal means no images, and an
+  outage or an unreadable reply means no images and a result that is not cached. The image
+  classifier has its own circuit breaker, so its outages never trip the text filter's.
+- Nothing unscreened is ever shipped, text or image.
+- All three checks fail closed. A classifier refusal counts as a block, and a reply that cannot
+  be read is an outage, never a pass.
 - `sources` exist so the user can verify claims — they are a product feature, not decoration.
   Every returned note carries at least one real, reachable source; a note without one is
   dropped.
 - Media without a known `license` must not be returned at all. Licensing is a legal
-  requirement, not a nice-to-have.
+  requirement, not a nice-to-have. An attribution licence (CC BY, CC BY-SA) is accepted only
+  when the author, title and source page can all be derived from the provider's metadata; the
+  licence deed URL comes from the backend's own allowlist, never from the provider.
 
 ## Configuration and secrets
 

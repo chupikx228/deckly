@@ -482,7 +482,33 @@ components:
           type: integer
         license:
           type: string
-          description: Required. Content with no known licence must not be returned.
+          description: >
+            Required. Content with no known licence must not be returned. An SPDX identifier:
+            CC0-1.0, CC-BY-<version>, CC-BY-SA-<version>, or Public-Domain.
+        attribution:
+          $ref: '#/components/schemas/Attribution'
+
+    Attribution:
+      type: object
+      required: [author, title, sourceUrl, licenseUrl]
+      description: >
+        Present exactly when the licence requires attribution (CC BY, CC BY-SA), absent for CC0 and
+        public domain. The client must show it with the image.
+      properties:
+        author:
+          type: string
+          description: The credit line, as the author asks to be credited.
+        title:
+          type: string
+          description: The title of the work.
+        sourceUrl:
+          type: string
+          format: uri
+          description: The page the work comes from, where its full licence details are given.
+        licenseUrl:
+          type: string
+          format: uri
+          description: The licence deed.
 
     Source:
       type: object

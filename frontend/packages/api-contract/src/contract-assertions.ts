@@ -2,6 +2,7 @@ import type { z } from 'zod';
 
 import type { components } from './generated/schema';
 import type {
+  attributionSchema,
   generatedDeckSchema,
   generatedNoteSchema,
   generationJobCreatedSchema,
@@ -36,6 +37,9 @@ type Wire<Name extends keyof components['schemas']> = components['schemas'][Name
 export type AssertProblem = Expect<SameShape<z.infer<typeof problemSchema>, Wire<'Problem'>>>;
 export type AssertQuota = Expect<SameShape<z.infer<typeof quotaSchema>, Wire<'Quota'>>>;
 export type AssertSource = Expect<SameShape<z.infer<typeof sourceSchema>, Wire<'Source'>>>;
+export type AssertAttribution = Expect<
+  SameShape<z.infer<typeof attributionSchema>, Wire<'Attribution'>>
+>;
 export type AssertMedia = Expect<SameShape<z.infer<typeof mediaSchema>, Wire<'Media'>>>;
 export type AssertGeneratedNote = Expect<
   SameShape<z.infer<typeof generatedNoteSchema>, Wire<'GeneratedNote'>>

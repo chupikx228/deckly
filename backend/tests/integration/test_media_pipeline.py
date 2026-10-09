@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deckly.application.pipeline import RunGeneration
 from deckly.domain.job import GenerationJob, Succeeded
-from deckly.domain.media import MediaKind
+from deckly.domain.media import Attribution, MediaKind
 from deckly.domain.notes.basic import BasicFields
 from deckly.domain.notes.note_type import NoteType
 from deckly.infrastructure.card_generator.generator import LlmCardGenerator
@@ -54,7 +54,17 @@ NOTES = [
     },
 ]
 LICENSED = commons_page(1, "File:Stop sign.svg", license_code="pd", description="Red <b>STOP</b> sign")
-UNLICENSED = commons_page(1, "File:Yield.jpg", license_code="cc-by-sa-4.0", attribution_required="true")
+UNLICENSED = commons_page(
+    1, "File:Yield.jpg", license_code="cc-by-sa-3.0-de", attribution_required="true", artist="Jane Doe"
+)
+ATTRIBUTED = commons_page(
+    1,
+    "File:Yield sign.jpg",
+    license_code="cc-by-sa-4.0",
+    attribution_required="true",
+    artist='<a href="//commons.wikimedia.org/wiki/User:Jane">Jane Doe</a>',
+    description="Give way sign",
+)
 
 
 async def run_with(
@@ -120,6 +130,28 @@ async def test_only_images_with_a_derivable_licence_are_stored_against_the_notes
     [image] = [item for note in stored.state.result.notes for item in note.media]
     assert (image.kind, image.license, image.alt) == (MediaKind.IMAGE, "Public-Domain", "Red STOP sign")
     assert image.url.startswith("https://upload.wikimedia.org/")
+    body = GenerationResultBody.from_result(stored.state.result).model_dump(mode="json", by_alias=True)
+    assert spec_errors("GenerationResult", body) == []
+
+
+async def test_attributed_image_is_stored_and_read_back_with_its_attribution(
+    session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
+) -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        page = ATTRIBUTED if request.url.params["gsrsearch"].startswith("yield sign") else UNLICENSED
+        return httpx2.Response(200, json=commons_results(page))
+
+    stored = await run_with(PostgresJobStore(session_factory), cleanup, handler)
+
+    assert isinstance(stored.state, Succeeded)
+    [image] = [item for note in stored.state.result.notes for item in note.media]
+    assert image.license == "CC-BY-SA-4.0"
+    assert image.attribution == Attribution(
+        author="Jane Doe",
+        title="Yield sign",
+        source_url="https://commons.wikimedia.org/wiki/File:Yield_sign.jpg",
+        license_url="https://creativecommons.org/licenses/by-sa/4.0/",
+    )
     body = GenerationResultBody.from_result(stored.state.result).model_dump(mode="json", by_alias=True)
     assert spec_errors("GenerationResult", body) == []
 

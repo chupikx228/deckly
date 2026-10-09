@@ -8,6 +8,7 @@ import pytest
 
 from deckly.application.correlation import JOB_ID as JOB_ID_FIELD
 from deckly.application.correlation import correlated
+from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.pipeline import RunGeneration
 from deckly.application.ports import ImageQuery, NoteMedia
 from deckly.domain.job import STAGE_ORDER, GenerationJob, Succeeded
@@ -20,6 +21,7 @@ from deckly.infrastructure.media.client import (
     MediaUnavailableError,
 )
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
+from deckly.infrastructure.media.judging import Ranking, Shortlist
 from deckly.infrastructure.resilience import CircuitBreaker, CircuitState, ResilientCaller
 from deckly.transport.results import GenerationResultBody
 from tests.domain.builders import basic_note, result_with
@@ -27,6 +29,7 @@ from tests.fakes import (
     ADDRESS,
     MEDIA_LIMITS,
     MEDIA_POLICY,
+    FakeCandidateJudge,
     FakeImageSearchClient,
     Harness,
     ImageOutcome,
@@ -50,6 +53,7 @@ FETCHER_LOGGER = "deckly.infrastructure.media.fetcher"
 PIPELINE_LOGGER = "deckly.application.pipeline"
 JOB = UUID(int=1, version=4)
 WITH_IMAGES = replace(generation_request(), include_images=True)
+RESULT = result_with(*(basic_note(number) for number in range(1, 8)))
 
 
 def query(number: int, text: str | None = None) -> ImageQuery:
@@ -76,7 +80,19 @@ async def hang_search() -> tuple[ImageCandidate, ...]:
 
 
 def unlicensed(title: str) -> ImageCandidate:
-    return replace(candidate(title), license_code="cc-by-sa-4.0", attribution_required="true")
+    return replace(candidate(title), license_code="cc-by-nc-4.0", attribution_required="true")
+
+
+def file_titles(shortlist: Shortlist) -> list[str]:
+    return [image.candidate.file_title for image in shortlist.images]
+
+
+def reversed_rankings(shortlists: tuple[Shortlist, ...]) -> tuple[Ranking, ...]:
+    return tuple(tuple(reversed(shortlist.images)) for shortlist in shortlists)
+
+
+def nothing_accepted(shortlists: tuple[Shortlist, ...]) -> tuple[Ranking, ...]:
+    return tuple(() for _ in shortlists)
 
 
 def fetcher_with(
@@ -84,6 +100,7 @@ def fetcher_with(
     limits: MediaLimits = MEDIA_LIMITS,
     breaker: CircuitBreaker | None = None,
     time: ManualTime | None = None,
+    judge: FakeCandidateJudge | None = None,
 ) -> tuple[CommonsMediaFetcher, FakeImageSearchClient]:
     clock = time or ManualTime()
     client = FakeImageSearchClient(*outcomes)
@@ -92,6 +109,7 @@ def fetcher_with(
         caller=ResilientCaller(
             MEDIA_POLICY, breaker or clock.breaker(), clock.runtime(), probe=fresh_probe()
         ),
+        judge=judge or FakeCandidateJudge(),
         new_id=sequential_job_ids().__next__,
         limits=limits,
     )
@@ -102,13 +120,13 @@ def titles(attachments: tuple[NoteMedia, ...]) -> list[tuple[UUID, str | None]]:
     return [(attachment.client_id, attachment.media.alt) for attachment in attachments]
 
 
-async def test_each_note_gets_the_first_candidate_with_a_derivable_licence() -> None:
+async def test_each_note_gets_the_first_licensed_candidate_the_judge_accepts() -> None:
     fetcher, _ = fetcher_with(
         (unlicensed("File:A.png"), candidate("File:B.png"), candidate("File:C.png")),
         (candidate("File:D.png"),),
     )
 
-    attachments = await fetcher.fetch(JOB, (query(1), query(2)))
+    attachments = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
 
     assert titles(attachments) == [
         (query(1).client_id, "Picture of File:B.png"),
@@ -127,7 +145,7 @@ async def test_note_whose_candidates_have_no_derivable_licence_gets_no_image_and
         (candidate("File:C.png"),),
     )
 
-    attachments = await fetcher.fetch(JOB, (query(1), query(2)))
+    attachments = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
 
     assert [attachment.client_id for attachment in attachments] == [query(2).client_id]
 
@@ -136,7 +154,7 @@ async def test_the_same_file_is_not_attached_to_two_notes() -> None:
     shared = candidate("File:Shared.png")
     fetcher, _ = fetcher_with((shared,), (shared, candidate("File:Other.png")), (shared,))
 
-    attachments = await fetcher.fetch(JOB, (query(1), query(2), query(3)))
+    attachments = await fetcher.fetch(JOB, RESULT, (query(1), query(2), query(3)))
 
     assert titles(attachments) == [
         (query(1).client_id, "Picture of File:Shared.png"),
@@ -144,11 +162,118 @@ async def test_the_same_file_is_not_attached_to_two_notes() -> None:
     ]
 
 
+async def test_judge_sees_each_note_with_its_search_phrase_and_only_its_licensed_candidates() -> None:
+    judge = FakeCandidateJudge()
+    fetcher, _ = fetcher_with(
+        (unlicensed("File:A.png"), candidate("File:B.png"), candidate("File:C.png")),
+        (candidate("File:D.png"),),
+        judge=judge,
+    )
+
+    await fetcher.fetch(JOB, RESULT, (query(1, "stop sign"), query(2)))
+
+    [(deck, shortlists)] = judge.calls
+    assert deck == RESULT.deck
+    assert [(shortlist.note, shortlist.picture) for shortlist in shortlists] == [
+        (basic_note(1), "stop sign"),
+        (basic_note(2), "picture 2"),
+    ]
+    assert [file_titles(shortlist) for shortlist in shortlists] == [
+        ["File:B.png", "File:C.png"],
+        ["File:D.png"],
+    ]
+
+
+async def test_shortlist_stops_at_the_configured_number_of_judged_candidates() -> None:
+    judge = FakeCandidateJudge()
+    fetcher, _ = fetcher_with(
+        tuple(candidate(f"File:{letter}.png") for letter in "ABCDE"),
+        limits=replace(MEDIA_LIMITS, judged_candidates_per_note=2),
+        judge=judge,
+    )
+
+    await fetcher.fetch(JOB, RESULT, (query(1),))
+
+    [(_, [shortlist])] = judge.calls
+    assert file_titles(shortlist) == ["File:A.png", "File:B.png"]
+
+
+async def test_file_repeated_within_one_search_takes_one_shortlist_place() -> None:
+    judge = FakeCandidateJudge()
+    fetcher, _ = fetcher_with(
+        (candidate("File:A.png"), candidate("File:A.png"), candidate("File:B.png")),
+        limits=replace(MEDIA_LIMITS, judged_candidates_per_note=2),
+        judge=judge,
+    )
+
+    await fetcher.fetch(JOB, RESULT, (query(1),))
+
+    [(_, [shortlist])] = judge.calls
+    assert file_titles(shortlist) == ["File:A.png", "File:B.png"]
+
+
+async def test_judge_ranking_wins_over_the_search_rank() -> None:
+    fetcher, _ = fetcher_with(
+        (candidate("File:Top.png"), candidate("File:Relevant.png")),
+        judge=FakeCandidateJudge(reversed_rankings),
+    )
+
+    attachments = await fetcher.fetch(JOB, RESULT, (query(1),))
+
+    assert titles(attachments) == [(query(1).client_id, "Picture of File:Relevant.png")]
+
+
+async def test_note_whose_candidates_the_judge_all_rejects_gets_no_image() -> None:
+    fetcher, _ = fetcher_with((candidate("File:A.png"),), judge=FakeCandidateJudge(nothing_accepted))
+
+    assert await fetcher.fetch(JOB, RESULT, (query(1), query(2))) == ()
+
+
+async def test_file_the_judge_picks_for_two_notes_goes_to_the_first_and_the_second_takes_its_next_pick() -> (
+    None
+):
+    shared = candidate("File:Shared.png")
+    fetcher, _ = fetcher_with((shared, candidate("File:First.png")), (shared, candidate("File:Second.png")))
+
+    attachments = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
+
+    assert titles(attachments) == [
+        (query(1).client_id, "Picture of File:Shared.png"),
+        (query(2).client_id, "Picture of File:Second.png"),
+    ]
+
+
+async def test_judge_is_not_asked_when_no_candidate_survives_the_licence_checks() -> None:
+    judge = FakeCandidateJudge()
+    fetcher, _ = fetcher_with((unlicensed("File:A.png"),), (), judge=judge)
+
+    assert await fetcher.fetch(JOB, RESULT, (query(1), query(2))) == ()
+    assert judge.calls == []
+
+
+async def test_judge_outage_escapes_the_fetcher_so_no_unscreened_image_ships() -> None:
+    fetcher, _ = fetcher_with(
+        (candidate("File:A.png"),), judge=FakeCandidateJudge(UpstreamUnavailableError(5))
+    )
+
+    with pytest.raises(UpstreamUnavailableError):
+        await fetcher.fetch(JOB, RESULT, (query(1),))
+
+
+async def test_query_for_a_note_missing_from_the_result_is_never_searched() -> None:
+    fetcher, client = fetcher_with((candidate("File:A.png"),))
+
+    attachments = await fetcher.fetch(JOB, result_with(basic_note(2)), (query(1, "gone"), query(2, "kept")))
+
+    assert [search.text for search in client.searches] == ["kept"]
+    assert [attachment.client_id for attachment in attachments] == [query(2).client_id]
+
+
 async def test_search_asks_for_the_configured_candidates_and_thumbnail_width() -> None:
     limits = replace(MEDIA_LIMITS, candidates_per_query=7, thumbnail_width=640)
     fetcher, client = fetcher_with((), limits=limits)
 
-    await fetcher.fetch(JOB, (query(1, "stop sign"),))
+    await fetcher.fetch(JOB, RESULT, (query(1, "stop sign"),))
 
     [search] = client.searches
     assert (search.text, search.max_candidates, search.thumbnail_width) == ("stop sign", 7, 640)
@@ -157,7 +282,7 @@ async def test_search_asks_for_the_configured_candidates_and_thumbnail_width() -
 async def test_only_the_first_query_of_a_note_is_searched_and_only_up_to_the_image_cap() -> None:
     fetcher, client = fetcher_with((candidate("File:A.png"),), limits=replace(MEDIA_LIMITS, max_images=2))
 
-    await fetcher.fetch(JOB, (query(1, "first"), query(1, "second"), query(2), query(3)))
+    await fetcher.fetch(JOB, RESULT, (query(1, "first"), query(1, "second"), query(2), query(3)))
 
     assert sorted(search.text for search in client.searches) == ["first", "picture 2"]
 
@@ -165,7 +290,7 @@ async def test_only_the_first_query_of_a_note_is_searched_and_only_up_to_the_ima
 async def test_no_queries_means_no_search() -> None:
     fetcher, client = fetcher_with(())
 
-    assert await fetcher.fetch(JOB, ()) == ()
+    assert await fetcher.fetch(JOB, RESULT, ()) == ()
     assert client.searches == []
 
 
@@ -173,7 +298,7 @@ async def test_transient_failure_is_retried_and_then_attaches() -> None:
     time = ManualTime()
     fetcher, client = fetcher_with(MediaUnavailableError("503"), (candidate("File:A.png"),), time=time)
 
-    attachments = await fetcher.fetch(JOB, (query(1),))
+    attachments = await fetcher.fetch(JOB, RESULT, (query(1),))
 
     assert len(attachments) == 1
     assert len(client.searches) == 2
@@ -195,7 +320,7 @@ async def test_failed_search_leaves_its_note_without_an_image_and_never_raises(
 ) -> None:
     fetcher, client = fetcher_with(error)
 
-    assert await fetcher.fetch(JOB, (query(1),)) == ()
+    assert await fetcher.fetch(JOB, RESULT, (query(1),)) == ()
     assert len(client.searches) == attempts
 
 
@@ -207,7 +332,7 @@ async def test_one_failed_search_does_not_cost_the_other_notes_their_images() ->
         limits=replace(MEDIA_LIMITS, max_concurrency=1),
     )
 
-    attachments = await fetcher.fetch(JOB, (query(1), query(2), query(3)))
+    attachments = await fetcher.fetch(JOB, RESULT, (query(1), query(2), query(3)))
 
     assert [attachment.client_id for attachment in attachments] == [query(1).client_id, query(3).client_id]
 
@@ -218,7 +343,7 @@ async def test_open_circuit_means_no_images_without_calling_the_provider() -> No
     breaker.record_failure()
     fetcher, client = fetcher_with((candidate("File:A.png"),), breaker=breaker, time=time)
 
-    assert await fetcher.fetch(JOB, (query(1), query(2))) == ()
+    assert await fetcher.fetch(JOB, RESULT, (query(1), query(2))) == ()
     assert client.searches == []
 
 
@@ -229,7 +354,7 @@ async def test_repeated_blocks_open_the_circuit_and_the_remaining_searches_fail_
         MediaBlockedError("403"), breaker=breaker, time=time, limits=replace(MEDIA_LIMITS, max_concurrency=1)
     )
 
-    assert await fetcher.fetch(JOB, tuple(query(number) for number in range(1, 6))) == ()
+    assert await fetcher.fetch(JOB, RESULT, tuple(query(number) for number in range(1, 6))) == ()
     assert len(client.searches) == 2
     assert breaker.state is CircuitState.OPEN
 
@@ -242,7 +367,7 @@ async def test_stage_deadline_keeps_the_images_found_in_time_and_abandons_the_re
     )
 
     with caplog.at_level(logging.INFO, logger=FETCHER_LOGGER):
-        attachments = await fetcher.fetch(JOB, (query(1), query(2)))
+        attachments = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
 
     assert [attachment.client_id for attachment in attachments] == [query(1).client_id]
     [record] = [record for record in caplog.records if record.getMessage() == "media_fetched"]
@@ -257,7 +382,7 @@ async def test_abandoned_search_does_not_count_against_the_circuit() -> None:
         hang_search, breaker=breaker, time=time, limits=replace(MEDIA_LIMITS, deadline_seconds=0.05)
     )
 
-    await fetcher.fetch(JOB, (query(1),))
+    await fetcher.fetch(JOB, RESULT, (query(1),))
 
     assert breaker.state is CircuitState.CLOSED
 
@@ -276,7 +401,7 @@ async def test_searches_never_exceed_the_configured_concurrency() -> None:
 
     fetcher, client = fetcher_with(search, limits=replace(MEDIA_LIMITS, max_concurrency=2))
 
-    await fetcher.fetch(JOB, tuple(query(number) for number in range(1, 8)))
+    await fetcher.fetch(JOB, RESULT, tuple(query(number) for number in range(1, 8)))
 
     assert len(client.searches) == 7
     assert peak == 2
@@ -284,7 +409,7 @@ async def test_searches_never_exceed_the_configured_concurrency() -> None:
 
 async def test_worker_cancellation_is_not_swallowed() -> None:
     fetcher, _ = fetcher_with(hang_search)
-    running = asyncio.create_task(fetcher.fetch(JOB, (query(1),)))
+    running = asyncio.create_task(fetcher.fetch(JOB, RESULT, (query(1),)))
     await asyncio.sleep(0.01)
 
     running.cancel()
@@ -297,7 +422,7 @@ async def test_bug_in_the_client_escapes_the_fetcher_for_the_pipeline_bulkhead_t
     fetcher, _ = fetcher_with(RuntimeError("client bug"))
 
     with pytest.raises(ExceptionGroup):
-        await fetcher.fetch(JOB, (query(1),))
+        await fetcher.fetch(JOB, RESULT, (query(1),))
 
 
 async def test_outcome_is_logged_with_counts_and_no_query_text() -> None:
@@ -308,11 +433,11 @@ async def test_outcome_is_logged_with_counts_and_no_query_text() -> None:
     )
 
     with captured_json_logs() as logs, correlated(JOB_ID_FIELD, JOB):
-        await fetcher.fetch(JOB, (query(1, "secret subject"), query(2)))
+        await fetcher.fetch(JOB, RESULT, (query(1, "secret subject"), query(2)))
 
     [line] = logs.named("media_fetched")
     assert line["job_id"] == str(JOB)
-    assert (line["searched"], line["attached"]) == (2, 1)
+    assert (line["searched"], line["shortlisted"], line["attached"]) == (2, 1, 1)
     assert line["failed_searches"] == {"UpstreamUnavailableError": 1}
     assert "secret subject" not in logs.text
 
@@ -359,6 +484,25 @@ async def run_with_commons(
     return await harness.get(job_id), seen
 
 
+async def run_with_judge(judge: FakeCandidateJudge, respond: object) -> tuple[GenerationJob, Harness]:
+    harness = Harness()
+    harness.providers.result = result_with(basic_note(1), basic_note(2))
+    run = RunGeneration(
+        store=harness.store,
+        cache=harness.cache,
+        retriever=harness.providers,
+        parser=harness.providers,
+        generator=harness.providers,
+        moderator=harness.providers,
+        media=commons_fetcher(lambda _: httpx2.Response(200, json=respond), ManualTime(), judge=judge),
+        clock=lambda: harness.now,
+        telemetry=fresh_telemetry(),
+    )
+    job_id = (await harness.create(WITH_IMAGES, scope(), ADDRESS)).job.job_id
+    await run(job_id)
+    return await harness.get(job_id), harness
+
+
 OUTAGES: dict[str, object] = {
     "server error": httpx2.Response(503),
     "rate limited": httpx2.Response(429, headers={"retry-after": "1"}),
@@ -396,10 +540,16 @@ async def test_open_image_circuit_still_yields_a_succeeded_job_without_calling_c
     assert not [record for record in caplog.records if record.getMessage() == "generation_failed"]
 
 
-async def test_image_with_no_derivable_licence_never_reaches_the_result() -> None:
+async def test_image_with_no_derivable_licence_or_attribution_never_reaches_the_result() -> None:
     pages = (
         commons_page(1, "File:By.png", license_code="cc-by-4.0", attribution_required="true"),
-        commons_page(2, "File:Sa.png", license_code="cc-by-sa-3.0", attribution_required="true"),
+        commons_page(
+            2,
+            "File:Ported.png",
+            license_code="cc-by-sa-3.0-de",
+            attribution_required="true",
+            artist="Jane Doe",
+        ),
         commons_page(3, "File:Unknown.png", license_code=None),
         commons_page(4, "File:Person.png", restrictions="personality"),
     )
@@ -430,6 +580,46 @@ async def test_licensed_images_are_attached_with_their_licence_alt_and_a_downloa
     assert len(seen) == 2
     body = GenerationResultBody.from_result(job.state.result).model_dump(mode="json", by_alias=True)
     assert spec_errors("GenerationResult", body) == []
+
+
+async def test_attributed_image_reaches_the_result_with_its_attribution_and_matches_the_contract() -> None:
+    page = commons_page(
+        1,
+        "File:STOP sign.jpg",
+        license_code="cc-by-3.0",
+        attribution_required="true",
+        artist='<a href="//commons.wikimedia.org/wiki/User:Bidgee">Bidgee</a>',
+        description="STOP sign in Australia.",
+    )
+
+    job, _ = await run_with_commons(respond=commons_results(page))
+
+    assert isinstance(job.state, Succeeded)
+    [image] = job.state.result.notes[0].media
+    assert image.license == "CC-BY-3.0"
+    body = GenerationResultBody.from_result(job.state.result).model_dump(mode="json", by_alias=True)
+    assert body["notes"][0]["media"][0]["attribution"] == {
+        "author": "Bidgee",
+        "title": "STOP sign",
+        "sourceUrl": "https://commons.wikimedia.org/wiki/File:STOP_sign.jpg",
+        "licenseUrl": "https://creativecommons.org/licenses/by/3.0/",
+    }
+    assert spec_errors("GenerationResult", body) == []
+
+
+async def test_image_judge_outage_still_yields_a_succeeded_job_with_an_image_free_deck_that_is_not_cached(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    judge = FakeCandidateJudge(UpstreamUnavailableError(5))
+
+    with caplog.at_level(logging.INFO, logger=PIPELINE_LOGGER):
+        job, harness = await run_with_judge(judge, commons_results(commons_page(1)))
+
+    assert isinstance(job.state, Succeeded)
+    assert job.state.result == result_with(basic_note(1), basic_note(2))
+    assert harness.cache.writes == []
+    [record] = [record for record in caplog.records if record.getMessage() == "media_skipped"]
+    assert record.levelno == logging.WARNING
 
 
 async def test_bug_in_the_media_adapter_still_yields_a_succeeded_job(

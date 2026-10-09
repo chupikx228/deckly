@@ -30,6 +30,7 @@ from deckly.infrastructure.llm.client import REDACTED
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher
+from deckly.infrastructure.moderation.image_judge import LlmCandidateJudge
 from deckly.infrastructure.moderation.moderator import LlmContentModerator
 from deckly.infrastructure.observability.runtime import Observability, create_observability
 from deckly.infrastructure.rate_limit import RedisRegenerationLimiter, RegenerationWindow
@@ -195,6 +196,9 @@ async def worker_pipeline(
         caller=resilient_caller(
             FAST_POLICY, worker.probe(ProviderOperation.IMAGE_SEARCH), failure_threshold=5, reset_seconds=30
         ),
+        judge=LlmCandidateJudge(
+            llm=resilient_llm(worker, ProviderOperation.IMAGE_MODERATION, {"notes": {"1": [1], "2": [1]}})
+        ),
         new_id=uuid4,
         limits=MEDIA_LIMITS,
     )
@@ -314,6 +318,8 @@ async def test_one_jobs_whole_lifecycle_is_reconstructable_from_the_lines_carryi
         ("content_screened", None),
         ("generation_stage_entered", JobStage.FETCHING_MEDIA),
         *[("provider_call_finished", ProviderOperation.IMAGE_SEARCH)] * ILLUSTRATED_NOTES,
+        ("provider_call_finished", ProviderOperation.IMAGE_MODERATION),
+        ("images_screened", None),
         ("media_fetched", None),
         ("media_attached", None),
         ("generation_stage_entered", JobStage.FINALIZING),
@@ -356,6 +362,7 @@ async def test_every_metric_the_ticket_lists_is_emitted_by_a_local_run(
         ProviderOperation.CARD_GENERATION: 1,
         ProviderOperation.CONTENT_MODERATION: 1,
         ProviderOperation.IMAGE_SEARCH: ILLUSTRATED_NOTES,
+        ProviderOperation.IMAGE_MODERATION: 1,
     }.items():
         assert (
             sample(worker, "deckly_provider_call_duration_seconds_count", operation=operation, outcome="ok")

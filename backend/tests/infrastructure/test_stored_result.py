@@ -54,6 +54,7 @@ GOLDEN_DOCUMENT: dict[str, object] = {
                     "alt": "Warning sign",
                     "width": 640,
                     "height": 480,
+                    "attribution": None,
                 },
                 {
                     "media_id": "6e5d4c3b-2a19-4f8e-9d7c-6b5a4f3e2d1c",
@@ -63,6 +64,7 @@ GOLDEN_DOCUMENT: dict[str, object] = {
                     "alt": None,
                     "width": None,
                     "height": None,
+                    "attribution": None,
                 },
             ],
             "tags": ["signs"],
@@ -83,6 +85,12 @@ BASIC_NOTE: dict[str, object] = {
     "sources": [SOURCE],
     "media": [],
     "tags": [],
+}
+ATTRIBUTION: dict[str, object] = {
+    "author": "Jane Doe",
+    "title": "Warning sign",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Warning_sign.png",
+    "license_url": "https://creativecommons.org/licenses/by/4.0/",
 }
 UNLICENSED_IMAGE: dict[str, object] = {
     "media_id": "3d2c1b0a-9f8e-4d7c-8b6a-5f4e3d2c1b0a",
@@ -111,6 +119,29 @@ def test_pinned_document_loads_back_into_the_same_result() -> None:
     assert load_result(GOLDEN_DOCUMENT) == GOLDEN_RESULT
 
 
+def test_document_stored_before_media_carried_an_attribution_still_loads() -> None:
+    legacy = json.loads(json.dumps(GOLDEN_DOCUMENT))
+    for note in legacy["notes"]:
+        for item in note["media"]:
+            del item["attribution"]
+
+    assert load_result(legacy) == GOLDEN_RESULT
+
+
+def test_attributed_image_survives_a_trip_through_json_text() -> None:
+    document = json.loads(json.dumps(GOLDEN_DOCUMENT))
+    document["notes"][1]["media"][0]["attribution"] = ATTRIBUTION
+
+    restored = load_result(json.loads(json.dumps(dump_result(load_result(document)))))
+
+    attribution = restored.notes[1].media[0].attribution
+    assert attribution is not None
+    assert (attribution.author, attribution.source_url) == (
+        "Jane Doe",
+        "https://commons.wikimedia.org/wiki/File:Warning_sign.png",
+    )
+
+
 def test_retrieved_at_with_a_sub_minute_utc_offset_keeps_its_instant() -> None:
     retrieved_at = at(20).astimezone(SUB_MINUTE_OFFSET)
     source = Source(title="Traffic code", url="https://example.com/code", retrieved_at=retrieved_at)
@@ -137,6 +168,14 @@ CORRUPT_DOCUMENTS: dict[str, object] = {
     "a cloze without markers": with_notes({**BASIC_NOTE, "note_type": "cloze", "fields": {"text": "Paris"}}),
     "a note without sources": with_notes({**BASIC_NOTE, "sources": []}),
     "an unlicensed image": with_notes({**BASIC_NOTE, "media": [UNLICENSED_IMAGE]}),
+    "an attribution without an author": with_notes(
+        {
+            **BASIC_NOTE,
+            "media": [
+                {**UNLICENSED_IMAGE, "license": "CC-BY-4.0", "attribution": {**ATTRIBUTION, "author": " "}}
+            ],
+        }
+    ),
     "a client id that is not a uuid": with_notes({**BASIC_NOTE, "client_id": "note-1"}),
     "duplicate client ids": with_notes(BASIC_NOTE, BASIC_NOTE),
     "a blank deck title": {"deck": BLANK_TITLE_DECK, "notes": [BASIC_NOTE]},

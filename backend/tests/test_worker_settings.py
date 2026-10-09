@@ -22,6 +22,7 @@ from deckly.infrastructure.llm.gemini_client import GeminiLlmClient
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
+from deckly.infrastructure.moderation.image_judge import LlmCandidateJudge
 from deckly.infrastructure.resilience import ResilientCaller
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
@@ -31,6 +32,7 @@ from deckly.worker.settings import (
     LLM_CLIENT_KEY,
     LLM_CLIENTS,
     MEDIA_FETCHER_KEY,
+    MEDIA_JUDGE_LLM_CLIENT_KEY,
     MODERATION_LLM_CLIENT_KEY,
     SOURCE_RETRIEVER_KEY,
     SWEEP_STALE_JOBS_KEY,
@@ -38,6 +40,7 @@ from deckly.worker.settings import (
     WorkerSettings,
     build_llm_client,
     build_media_fetcher,
+    build_media_judge_llm_client,
     build_moderation_llm_client,
     build_source_retriever,
     housekeeping_cron_jobs,
@@ -49,6 +52,7 @@ from tests.domain.builders import T0
 from tests.fakes import (
     MEDIA_LIMITS,
     SEARCH_POLICY,
+    FakeCandidateJudge,
     FakeImageSearchClient,
     FakeLlmClient,
     FakeSearchClient,
@@ -108,6 +112,10 @@ def provider_settings(provider: ModelProvider) -> ProviderSettings:
         media_candidates_per_query=7,
         media_thumbnail_width=960,
         media_max_concurrency=3,
+        media_judge_timeout_seconds=4,
+        media_judge_deadline_seconds=8,
+        media_judge_max_attempts=2,
+        media_judged_candidates_per_note=3,
         moderation_model_name="moderation-model",
         moderation_max_output_tokens=500,
         moderation_timeout_seconds=2,
@@ -157,15 +165,32 @@ async def test_source_retriever_searches_tavily_behind_the_resilience_layer_with
 async def test_media_fetcher_searches_commons_behind_the_resilience_layer_with_the_configured_limits() -> (
     None
 ):
-    fetcher = build_media_fetcher(provider_settings("anthropic"), probe=fresh_probe())
+    judge_llm = FakeLlmClient()
+    fetcher = build_media_fetcher(provider_settings("anthropic"), fresh_probe(), judge_llm)
 
     assert isinstance(fetcher, CommonsMediaFetcher)
     assert isinstance(fetcher.client, CommonsImageSearchClient)
     assert isinstance(fetcher.caller, ResilientCaller)
+    assert fetcher.judge == LlmCandidateJudge(llm=judge_llm)
     assert fetcher.limits == MediaLimits(
-        max_images=12, candidates_per_query=7, thumbnail_width=960, max_concurrency=3, deadline_seconds=15
+        max_images=12,
+        candidates_per_query=7,
+        thumbnail_width=960,
+        max_concurrency=3,
+        deadline_seconds=15,
+        judged_candidates_per_note=3,
     )
     await fetcher.aclose()
+
+
+@pytest.mark.parametrize("provider", get_args(ModelProvider))
+async def test_media_judge_client_is_built_for_every_provider_behind_its_own_resilience_layer(
+    provider: ModelProvider,
+) -> None:
+    client = build_media_judge_llm_client(provider_settings(provider), probe=fresh_probe())
+
+    assert isinstance(client, ResilientLlmClient)
+    await client.aclose()
 
 
 async def test_worker_cancels_the_task_of_a_job_aborted_through_the_queue() -> None:
@@ -191,7 +216,7 @@ async def test_shutdown_closes_the_search_and_image_clients_even_when_closing_th
         LLM_CLIENT_KEY: ResilientLlmClient(FailingToCloseLlm(), caller, 1000),
         SOURCE_RETRIEVER_KEY: WebSourceRetriever(client=search, caller=caller, clock=utc_now, max_results=6),
         MEDIA_FETCHER_KEY: CommonsMediaFetcher(
-            client=images, caller=caller, new_id=uuid4, limits=MEDIA_LIMITS
+            client=images, caller=caller, judge=FakeCandidateJudge(), new_id=uuid4, limits=MEDIA_LIMITS
         ),
     }
 
@@ -202,19 +227,22 @@ async def test_shutdown_closes_the_search_and_image_clients_even_when_closing_th
     assert images.closed
 
 
-async def test_shutdown_closes_the_moderation_client_even_when_closing_the_model_client_fails() -> None:
+async def test_shutdown_closes_the_moderation_clients_even_when_closing_the_model_client_fails() -> None:
     time = ManualTime()
     caller = ResilientCaller(SEARCH_POLICY, time.breaker(), time.runtime(), probe=fresh_probe())
     moderation = FakeLlmClient()
+    media_judge = FakeLlmClient()
     ctx: WorkerContext = {
         LLM_CLIENT_KEY: ResilientLlmClient(FailingToCloseLlm(), caller, 1000),
         MODERATION_LLM_CLIENT_KEY: ResilientLlmClient(moderation, caller, 1000),
+        MEDIA_JUDGE_LLM_CLIENT_KEY: ResilientLlmClient(media_judge, caller, 1000),
     }
 
     with pytest.raises(RuntimeError):
         await shutdown(ctx)
 
     assert moderation.closed
+    assert media_judge.closed
 
 
 def sweep_settings(interval_minutes: int) -> SweepSettings:

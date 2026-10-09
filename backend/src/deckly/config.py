@@ -24,6 +24,7 @@ MAX_SEARCH_RESULTS = 20
 MAX_MEDIA_IMAGES = 50
 MAX_MEDIA_CANDIDATES = 50
 MAX_MEDIA_CONCURRENCY = 8
+MAX_JUDGED_CANDIDATES = 10
 MAX_MODERATION_TIMEOUT_SECONDS = 10
 REGENERATE_OVERHEAD_SECONDS = 1.5
 MEDIA_URL_MIN_VALIDITY_SECONDS = 24 * 60 * 60
@@ -124,6 +125,10 @@ class ProviderSettings(BaseSettings):
     media_candidates_per_query: Annotated[int, Field(ge=1, le=MAX_MEDIA_CANDIDATES)]
     media_thumbnail_width: Annotated[int, Field(ge=MIN_IMAGE_SIDE)]
     media_max_concurrency: Annotated[int, Field(ge=1, le=MAX_MEDIA_CONCURRENCY)]
+    media_judge_timeout_seconds: PositiveInt
+    media_judge_deadline_seconds: PositiveInt
+    media_judge_max_attempts: PositiveInt
+    media_judged_candidates_per_note: Annotated[int, Field(ge=1, le=MAX_JUDGED_CANDIDATES)]
     moderation_model_name: str
     moderation_max_output_tokens: PositiveInt
     moderation_timeout_seconds: Annotated[
@@ -161,6 +166,13 @@ class ProviderSettings(BaseSettings):
     def require_media_deadline_to_fit_one_attempt(self) -> Self:
         if self.media_deadline_seconds < self.media_timeout_seconds:
             message = "media deadline must be at least the timeout of a single attempt"
+            raise ValueError(message)
+        return self
+
+    @model_validator(mode="after")
+    def require_media_judge_deadline_to_fit_one_attempt(self) -> Self:
+        if self.media_judge_deadline_seconds < self.media_judge_timeout_seconds:
+            message = "media judge deadline must be at least the timeout of a single attempt"
             raise ValueError(message)
         return self
 
@@ -274,12 +286,13 @@ class Settings:
             self.providers.search_deadline_seconds
             + self.providers.model_deadline_seconds
             + self.providers.media_deadline_seconds
+            + self.providers.media_judge_deadline_seconds
             + self.providers.moderation_filter_deadline_seconds
         )
         if provider_deadlines >= self.limits.generation_job_timeout_seconds:
             message = (
-                "the search, model, media and moderation deadlines together must leave room within the "
-                "generation job timeout"
+                "the search, model, media, media judge and moderation deadlines together must leave room "
+                "within the generation job timeout"
             )
             raise ValueError(message)
         if self.regenerate.budgeted_seconds > self.limits.regenerate_note_timeout_seconds:

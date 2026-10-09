@@ -411,7 +411,13 @@ verify a card before saving it.
   "alt": "Warning sign",
   "width": 640,
   "height": 640,
-  "license": "CC-BY-4.0"
+  "license": "CC-BY-4.0",
+  "attribution": {
+    "author": "Jane Doe",
+    "title": "Warning sign",
+    "sourceUrl": "https://commons.wikimedia.org/wiki/File:Warning_sign.jpg",
+    "licenseUrl": "https://creativecommons.org/licenses/by/4.0/"
+  }
 }
 ```
 
@@ -420,10 +426,25 @@ verify a card before saving it.
 - `alt` is mandatory on images. It is the accessibility text and it is also what the client
   falls back to when a download fails.
 - `license` is required. The user is shown it, and content with no known licence must not be
-  returned at all.
+  returned at all. It is an SPDX identifier: `CC0-1.0`, `Public-Domain`, or a generic (unported)
+  `CC-BY-<version>` or `CC-BY-SA-<version>`. Ported variants such as CC BY-SA 3.0 DE, and any
+  NonCommercial or NoDerivatives licence, are not returned.
+- `attribution` is present exactly when the licence requires it (CC BY and CC BY-SA) and absent
+  otherwise. It carries `author` (the credit line as the author asks for it), `title`,
+  `sourceUrl` (the page the work comes from) and `licenseUrl` (the licence deed), all required.
+  The client must show the attribution with the image. An image whose attribution cannot be
+  derived from the provider's metadata is not returned; the backend never guesses an author.
+- Every image is screened before it is returned. A classifier judges each candidate's title,
+  description and categories against the note it would illustrate, for both the content policy
+  and relevance: a picture that only shows the subject in passing, or shows something else, is
+  not attached. The image policy adds to the content policy: photographs showing nudity, sexual
+  activity, graphic injury, gore or a dead body are always blocked; anatomical diagrams,
+  clinical illustrations and artworks are allowed only when the note's own subject calls for
+  them. A note whose candidates are all rejected gets no image.
 - Images are best effort. If no image with a known licence is found for a note, or the image
   provider is unavailable, the note is returned without media and the job still succeeds; an
-  image outage never fails a job with `PROVIDER_UNAVAILABLE`.
+  image outage never fails a job with `PROVIDER_UNAVAILABLE`. The same holds when the image
+  classifier is unavailable: no image ships unscreened, so the job succeeds without images.
 
 ## Errors
 

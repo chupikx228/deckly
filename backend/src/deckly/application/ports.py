@@ -160,7 +160,9 @@ class ContentModerator(Protocol):
 
 
 class MediaFetcher(Protocol):
-    async def fetch(self, job_id: UUID, queries: tuple[ImageQuery, ...]) -> tuple[NoteMedia, ...]: ...
+    async def fetch(
+        self, job_id: UUID, result: GenerationResult, queries: tuple[ImageQuery, ...]
+    ) -> tuple[NoteMedia, ...]: ...
 
 
 class NoteRegenerator(Protocol):

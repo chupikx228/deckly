@@ -71,10 +71,12 @@ async def test_request_searches_files_with_licence_metadata_and_the_configured_l
         "gsrsearch": "stop sign filetype:bitmap|drawing",
         "gsrnamespace": "6",
         "gsrlimit": "10",
-        "prop": "imageinfo",
+        "prop": "imageinfo|categories",
         "iiprop": "url|size|mime|extmetadata",
         "iiurlwidth": "960",
-        "iiextmetadatafilter": "License|AttributionRequired|Restrictions|ImageDescription",
+        "iiextmetadatafilter": "License|AttributionRequired|Restrictions|ImageDescription|Artist|Attribution",
+        "clshow": "!hidden",
+        "cllimit": "max",
     }
 
 
@@ -136,7 +138,46 @@ async def test_each_page_becomes_a_candidate_with_its_thumbnail_and_licence_meta
         attribution_required="false",
         restrictions="",
         description="<b>Stop</b> sign",
+        description_url="https://commons.wikimedia.org/wiki/File:Stop_sign.svg",
     )
+
+
+async def test_attribution_metadata_and_visible_categories_are_carried_on_the_candidate() -> None:
+    page = commons_page(
+        1,
+        "File:STOP sign.jpg",
+        categories=("Photographs of red octagonal stop signs", "Road signs in Australia"),
+        license_code="cc-by-3.0",
+        attribution_required="true",
+        artist='<a href="//commons.wikimedia.org/wiki/User:Bidgee">Bidgee</a>',
+        credit_line="Bidgee / Wikimedia Commons",
+    )
+
+    [candidate] = await search_with(answering(commons_results(page)))
+
+    assert candidate.description_url == "https://commons.wikimedia.org/wiki/File:STOP_sign.jpg"
+    assert candidate.artist == '<a href="//commons.wikimedia.org/wiki/User:Bidgee">Bidgee</a>'
+    assert candidate.credit_line == "Bidgee / Wikimedia Commons"
+    assert candidate.categories == ("Photographs of red octagonal stop signs", "Road signs in Australia")
+
+
+MALFORMED_CATEGORIES: dict[str, object] = {
+    "not a list": {"title": "Category:Stop signs"},
+    "entry not an object": ["Category:Stop signs"],
+    "entry without a title": [{"ns": 14}],
+    "title that is not text": [{"title": 14}],
+    "title outside the category namespace": [{"title": "File:Stop.png"}],
+}
+
+
+@pytest.mark.parametrize("categories", MALFORMED_CATEGORIES.values(), ids=MALFORMED_CATEGORIES.keys())
+async def test_malformed_categories_are_left_out_without_losing_the_candidate(categories: object) -> None:
+    page = commons_page(1, categories=("Stop signs",))
+    page["categories"] = categories
+
+    [candidate] = await search_with(answering(commons_results(page)))
+
+    assert candidate.categories == ()
 
 
 async def test_candidates_come_back_in_search_rank_order_not_in_page_order() -> None:
@@ -150,11 +191,13 @@ async def test_candidates_come_back_in_search_rank_order_not_in_page_order() -> 
 async def test_missing_metadata_is_absent_rather_than_guessed() -> None:
     page = commons_page(
         1,
-        info={"thumbwidth": "960"},
+        info={"thumbwidth": "960", "descriptionurl": None},
         license_code=None,
         attribution_required=None,
         restrictions=None,
         description=None,
+        artist=None,
+        credit_line=None,
     )
 
     [candidate] = await search_with(answering(commons_results(page)))
@@ -165,6 +208,8 @@ async def test_missing_metadata_is_absent_rather_than_guessed() -> None:
         None,
     )
     assert (candidate.description, candidate.thumbnail_width) == (None, None)
+    assert (candidate.description_url, candidate.artist, candidate.credit_line) == (None, None, None)
+    assert candidate.categories == ()
 
 
 @pytest.mark.parametrize("value", [0, -5, True, 9.5, None])

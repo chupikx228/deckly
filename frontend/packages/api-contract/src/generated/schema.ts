@@ -201,8 +201,26 @@ export interface components {
             alt?: string;
             width?: number;
             height?: number;
-            /** @description Required. Content with no known licence must not be returned. */
+            /** @description Required. Content with no known licence must not be returned. An SPDX identifier: CC0-1.0, CC-BY-<version>, CC-BY-SA-<version>, or Public-Domain. */
             license: string;
+            attribution?: components["schemas"]["Attribution"];
+        };
+        /** @description Present exactly when the licence requires attribution (CC BY, CC BY-SA), absent for CC0 and public domain. The client must show it with the image. */
+        Attribution: {
+            /** @description The credit line, as the author asks to be credited. */
+            author: string;
+            /** @description The title of the work. */
+            title: string;
+            /**
+             * Format: uri
+             * @description The page the work comes from, where its full licence details are given.
+             */
+            sourceUrl: string;
+            /**
+             * Format: uri
+             * @description The licence deed.
+             */
+            licenseUrl: string;
         };
         Source: {
             title: string;

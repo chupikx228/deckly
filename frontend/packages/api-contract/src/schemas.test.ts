@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import { JOB_STAGE, JOB_STATUS, NOTE_TYPE, isTerminalJobStatus } from './enums';
-import { generationJobSchema, generationRequestSchema, problemSchema } from './schemas';
+import {
+  generationJobSchema,
+  generationRequestSchema,
+  mediaSchema,
+  problemSchema,
+} from './schemas';
 
 const runningJob = {
   jobId: '3f7c1f7e-5a4d-4a4b-9b3f-3d1c2e5a7b9d',
@@ -61,6 +66,40 @@ describe('generationJobSchema', () => {
 
   it('rejects an unknown job status', () => {
     expect(() => generationJobSchema.parse({ ...runningJob, status: 'paused' })).toThrow();
+  });
+});
+
+const attributedImage = {
+  mediaId: '6c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f',
+  kind: 'image',
+  url: 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Stop.jpg/960px-Stop.jpg',
+  alt: 'A stop sign',
+  license: 'CC-BY-SA-3.0',
+  attribution: {
+    author: 'Jane Doe',
+    title: 'Stop sign',
+    sourceUrl: 'https://commons.wikimedia.org/wiki/File:Stop.jpg',
+    licenseUrl: 'https://creativecommons.org/licenses/by-sa/3.0/',
+  },
+};
+
+describe('mediaSchema', () => {
+  it('parses an image with attribution', () => {
+    expect(mediaSchema.parse(attributedImage).attribution?.author).toBe('Jane Doe');
+  });
+
+  it('parses an image without attribution', () => {
+    const { attribution, ...publicDomain } = attributedImage;
+    expect(attribution).toBeDefined();
+    expect(mediaSchema.parse(publicDomain).attribution).toBeUndefined();
+  });
+
+  it('rejects attribution without a source page', () => {
+    const { sourceUrl, ...incomplete } = attributedImage.attribution;
+    expect(sourceUrl).toBeDefined();
+    expect(mediaSchema.safeParse({ ...attributedImage, attribution: incomplete }).success).toBe(
+      false,
+    );
   });
 });
 
