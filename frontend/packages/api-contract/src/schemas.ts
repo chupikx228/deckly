@@ -33,6 +33,13 @@ export const sourceSchema = z.object({
   retrievedAt: z.iso.datetime().optional(),
 });
 
+export const attributionSchema = z.object({
+  author: z.string(),
+  title: z.string(),
+  sourceUrl: z.url(),
+  licenseUrl: z.url(),
+});
+
 export const mediaSchema = z.object({
   mediaId: z.uuid(),
   kind: mediaKindSchema,
@@ -41,6 +48,7 @@ export const mediaSchema = z.object({
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
   license: z.string(),
+  attribution: attributionSchema.optional(),
 });
 
 export const generatedNoteSchema = z.object({
@@ -116,6 +124,7 @@ export const regenerateNoteRequestSchema = z.object({
 export type Problem = z.infer<typeof problemSchema>;
 export type Quota = z.infer<typeof quotaSchema>;
 export type Source = z.infer<typeof sourceSchema>;
+export type Attribution = z.infer<typeof attributionSchema>;
 export type Media = z.infer<typeof mediaSchema>;
 export type GeneratedNote = z.infer<typeof generatedNoteSchema>;
 export type GeneratedDeck = z.infer<typeof generatedDeckSchema>;

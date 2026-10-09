@@ -4,7 +4,7 @@ from uuid import UUID
 from pydantic import Field
 
 from deckly.domain.deck import Deck, GenerationResult
-from deckly.domain.media import Media, MediaKind
+from deckly.domain.media import Attribution, Media, MediaKind
 from deckly.domain.notes.basic import BasicOptionalReversedFields, FrontBackFields
 from deckly.domain.notes.cloze import ClozeFields
 from deckly.domain.notes.fields import NoteFields
@@ -89,6 +89,22 @@ def fields_body(fields: NoteFields) -> FieldsBody:
     raise TypeError(message)
 
 
+class AttributionBody(ResponseBody):
+    author: str
+    title: str
+    source_url: str = Field(alias="sourceUrl")
+    license_url: str = Field(alias="licenseUrl")
+
+    @classmethod
+    def from_attribution(cls, attribution: Attribution) -> Self:
+        return cls(
+            author=attribution.author,
+            title=attribution.title,
+            source_url=attribution.source_url,
+            license_url=attribution.license_url,
+        )
+
+
 class MediaBody(ResponseBody):
     media_id: UUID = Field(alias="mediaId")
     kind: MediaKind
@@ -97,6 +113,7 @@ class MediaBody(ResponseBody):
     width: int | None = Field(default=None, exclude_if=is_none)
     height: int | None = Field(default=None, exclude_if=is_none)
     license: str
+    attribution: AttributionBody | None = Field(default=None, exclude_if=is_none)
 
     @classmethod
     def from_media(cls, media: Media) -> Self:
@@ -108,6 +125,9 @@ class MediaBody(ResponseBody):
             width=media.width,
             height=media.height,
             license=media.license,
+            attribution=None
+            if media.attribution is None
+            else AttributionBody.from_attribution(media.attribution),
         )
 
 

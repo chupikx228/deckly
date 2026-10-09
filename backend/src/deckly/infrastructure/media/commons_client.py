@@ -22,12 +22,21 @@ API_PATH = "/w/api.php"
 USER_AGENT_HEADER = "User-Agent"
 FILE_NAMESPACE = 6
 FILE_TYPES = "filetype:bitmap|drawing"
+PAGE_PROPERTIES = "imageinfo|categories"
 IMAGE_PROPERTIES = "url|size|mime|extmetadata"
+VISIBLE_CATEGORIES = "!hidden"
+ALL_CATEGORIES = "max"
+CATEGORY_PREFIX = "Category:"
 LICENSE_FIELD = "License"
 ATTRIBUTION_REQUIRED_FIELD = "AttributionRequired"
 RESTRICTIONS_FIELD = "Restrictions"
 DESCRIPTION_FIELD = "ImageDescription"
-METADATA_FILTER = f"{LICENSE_FIELD}|{ATTRIBUTION_REQUIRED_FIELD}|{RESTRICTIONS_FIELD}|{DESCRIPTION_FIELD}"
+ARTIST_FIELD = "Artist"
+CREDIT_LINE_FIELD = "Attribution"
+METADATA_FILTER = (
+    f"{LICENSE_FIELD}|{ATTRIBUTION_REQUIRED_FIELD}|{RESTRICTIONS_FIELD}|{DESCRIPTION_FIELD}|"
+    f"{ARTIST_FIELD}|{CREDIT_LINE_FIELD}"
+)
 TRANSIENT_API_ERRORS = frozenset({"maxlag", "ratelimited", "readonly"})
 INTERNAL_API_ERROR_PREFIX = "internal_api_error"
 SEARCH_TERM_CATEGORIES = frozenset({"L", "M", "N"})
@@ -56,10 +65,12 @@ def search_params(search: ImageSearch, terms: str) -> dict[str, str | int]:
         "gsrsearch": f"{terms} {FILE_TYPES}",
         "gsrnamespace": FILE_NAMESPACE,
         "gsrlimit": search.max_candidates,
-        "prop": "imageinfo",
+        "prop": PAGE_PROPERTIES,
         "iiprop": IMAGE_PROPERTIES,
         "iiurlwidth": search.thumbnail_width,
         "iiextmetadatafilter": METADATA_FILTER,
+        "clshow": VISIBLE_CATEGORIES,
+        "cllimit": ALL_CATEGORIES,
     }
 
 
@@ -78,9 +89,22 @@ def metadata_value(metadata: Mapping[str, object], key: str) -> str | None:
     return None
 
 
+def category_name(entry: object) -> str | None:
+    match entry:
+        case {"title": str() as title} if title.startswith(CATEGORY_PREFIX):
+            return title.removeprefix(CATEGORY_PREFIX)
+    return None
+
+
+def categories_of(entries: object) -> tuple[str, ...]:
+    if not isinstance(entries, list):
+        return ()
+    return tuple(name for name in map(category_name, entries) if name is not None)
+
+
 def candidate_from(page: object) -> RankedCandidate | None:
     match page:
-        case {"title": str() as title, "index": int() as index, "imageinfo": [{**info}, *_]}:
+        case {"title": str() as title, "index": int() as index, "imageinfo": [{**info}, *_], **rest}:
             extmetadata = info.get("extmetadata")
             metadata: Mapping[str, object] = extmetadata if isinstance(extmetadata, dict) else {}
             return index, ImageCandidate(
@@ -93,6 +117,10 @@ def candidate_from(page: object) -> RankedCandidate | None:
                 attribution_required=metadata_value(metadata, ATTRIBUTION_REQUIRED_FIELD),
                 restrictions=metadata_value(metadata, RESTRICTIONS_FIELD),
                 description=metadata_value(metadata, DESCRIPTION_FIELD),
+                description_url=text_or_none(info.get("descriptionurl")),
+                artist=metadata_value(metadata, ARTIST_FIELD),
+                credit_line=metadata_value(metadata, CREDIT_LINE_FIELD),
+                categories=categories_of(rest.get("categories")),
             )
     return None
 

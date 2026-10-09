@@ -26,7 +26,7 @@ from deckly.application.ports import (
     StoredJob,
 )
 from deckly.application.regeneration import RegenerateNote
-from deckly.domain.deck import GenerationResult
+from deckly.domain.deck import Deck, GenerationResult
 from deckly.domain.generation import Difficulty, GenerationFingerprint, GenerationRequest
 from deckly.domain.job import GenerationJob, JobStage, JobStatus
 from deckly.domain.media import Media, MediaKind
@@ -37,6 +37,7 @@ from deckly.infrastructure.llm.client import LlmPrompt, LlmReply, LlmStop
 from deckly.infrastructure.media.client import ImageCandidate, ImageSearch, MediaEndpoint
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
+from deckly.infrastructure.media.judging import CandidateJudge, Ranking, Shortlist
 from deckly.infrastructure.observability.metrics import Metrics
 from deckly.infrastructure.observability.runtime import Observability, create_observability
 from deckly.infrastructure.observability.telemetry import ObservedGeneration
@@ -84,7 +85,12 @@ MEDIA_POLICY = RetryPolicy(
     max_delay_seconds=2,
 )
 MEDIA_LIMITS = MediaLimits(
-    max_images=20, candidates_per_query=10, thumbnail_width=960, max_concurrency=4, deadline_seconds=20
+    max_images=20,
+    candidates_per_query=10,
+    thumbnail_width=960,
+    max_concurrency=4,
+    deadline_seconds=20,
+    judged_candidates_per_note=4,
 )
 SOURCE_MAX_CHARACTERS = 2000
 PAGES = (RetrievedPage(source=SOURCES[0], content="<p>A red triangle warns of danger ahead.</p>"),)
@@ -99,6 +105,7 @@ type SearchOutcome = tuple[SearchHit, ...] | Exception | Callable[[], Awaitable[
 type ImageOutcome = (
     tuple[ImageCandidate, ...] | Exception | Callable[[], Awaitable[tuple[ImageCandidate, ...]]]
 )
+type Judging = Callable[[tuple[Shortlist, ...]], tuple[Ranking, ...]]
 
 
 def fresh_observability() -> Observability:
@@ -184,6 +191,22 @@ class FakeImageSearchClient:
         self.closed = True
 
 
+def accept_in_search_order(shortlists: tuple[Shortlist, ...]) -> tuple[Ranking, ...]:
+    return tuple(shortlist.images for shortlist in shortlists)
+
+
+class FakeCandidateJudge:
+    def __init__(self, judging: Judging | Exception = accept_in_search_order) -> None:
+        self.judging = judging
+        self.calls: list[tuple[Deck, tuple[Shortlist, ...]]] = []
+
+    async def rank(self, deck: Deck, shortlists: tuple[Shortlist, ...]) -> tuple[Ranking, ...]:
+        self.calls.append((deck, shortlists))
+        if isinstance(self.judging, Exception):
+            raise self.judging
+        return self.judging(shortlists)
+
+
 class ManualTime:
     def __init__(self) -> None:
         self.now = 0.0
@@ -233,6 +256,8 @@ COMMONS_METADATA_KEYS = {
     "attribution_required": "AttributionRequired",
     "restrictions": "Restrictions",
     "description": "ImageDescription",
+    "artist": "Artist",
+    "credit_line": "Attribution",
 }
 LICENSED_METADATA: dict[str, str | None] = {
     "license_code": "cc0",
@@ -247,6 +272,7 @@ def commons_page(
     title: str = "File:Stop sign.svg",
     *,
     info: dict[str, object] | None = None,
+    categories: tuple[str, ...] = (),
     **metadata: str | None,
 ) -> dict[str, object]:
     values = {COMMONS_METADATA_KEYS[key]: value for key, value in (LICENSED_METADATA | metadata).items()}
@@ -256,10 +282,20 @@ def commons_page(
         "thumbwidth": 960,
         "thumbheight": 960,
         "thumburl": f"https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/{name}/960px-{name}.png",
+        "descriptionurl": f"https://commons.wikimedia.org/wiki/File:{name}",
         "extmetadata": {key: {"value": value} for key, value in values.items() if value is not None},
         **(info or {}),
     }
-    return {"pageid": index, "ns": 6, "title": title, "index": index, "imageinfo": [image_info]}
+    page: dict[str, object] = {
+        "pageid": index,
+        "ns": 6,
+        "title": title,
+        "index": index,
+        "imageinfo": [image_info],
+    }
+    if categories:
+        page["categories"] = [{"ns": 14, "title": f"Category:{category}"} for category in categories]
+    return page
 
 
 def commons_results(*pages: dict[str, object]) -> dict[str, object]:
@@ -271,14 +307,15 @@ def commons_results(*pages: dict[str, object]) -> dict[str, object]:
 def commons_fetcher(
     handler: Callable[[httpx2.Request], httpx2.Response],
     time: ManualTime,
-    limits: MediaLimits = MEDIA_LIMITS,
     breaker: CircuitBreaker | None = None,
+    judge: CandidateJudge | None = None,
 ) -> CommonsMediaFetcher:
     return CommonsMediaFetcher(
         client=CommonsImageSearchClient(MEDIA_ENDPOINT, httpx2.MockTransport(handler)),
         caller=ResilientCaller(MEDIA_POLICY, breaker or time.breaker(), time.runtime(), probe=fresh_probe()),
+        judge=judge or FakeCandidateJudge(),
         new_id=sequential_job_ids().__next__,
-        limits=limits,
+        limits=MEDIA_LIMITS,
     )
 
 
@@ -559,6 +596,7 @@ class FakeProviders:
         self.parsed_for: list[UUID] = []
         self.generated_for: list[UUID] = []
         self.fetched_for: list[UUID] = []
+        self.illustrated: list[GenerationResult] = []
         self.failures: dict[JobStage, Exception] = {}
         self.during: dict[JobStage, Hook] = {}
 
@@ -595,8 +633,11 @@ class FakeProviders:
             result, notes=tuple(note for note in result.notes if note.client_id not in self.unsafe_notes)
         )
 
-    async def fetch(self, job_id: UUID, queries: tuple[ImageQuery, ...]) -> tuple[NoteMedia, ...]:
+    async def fetch(
+        self, job_id: UUID, result: GenerationResult, queries: tuple[ImageQuery, ...]
+    ) -> tuple[NoteMedia, ...]:
         self.fetched_for.append(job_id)
+        self.illustrated.append(result)
         await self._reach(JobStage.FETCHING_MEDIA, queries)
         return self.attach(queries)
 

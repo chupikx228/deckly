@@ -57,6 +57,7 @@ class ProviderOperation(StrEnum):
     CARD_GENERATION = "card_generation"
     CONTENT_MODERATION = "content_moderation"
     TOPIC_MODERATION = "topic_moderation"
+    IMAGE_MODERATION = "image_moderation"
     WEB_SEARCH = "web_search"
     IMAGE_SEARCH = "image_search"
     NOTE_REGENERATION = "note_regeneration"

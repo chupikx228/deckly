@@ -12,6 +12,24 @@ class MediaKind(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class Attribution:
+    author: str
+    title: str
+    source_url: str
+    license_url: str
+
+    def __post_init__(self) -> None:
+        for name, text in (("author", self.author), ("title", self.title)):
+            if is_blank(text):
+                message = f"attribution {name} must not be blank"
+                raise InvalidMediaError(message)
+        for name, url in (("source url", self.source_url), ("licence url", self.license_url)):
+            if not is_web_url(url):
+                message = f"attribution {name} {url!r} is not an http(s) url"
+                raise InvalidMediaError(message)
+
+
+@dataclass(frozen=True, slots=True)
 class Media:
     media_id: UUID
     kind: MediaKind
@@ -20,6 +38,7 @@ class Media:
     alt: str | None = None
     width: int | None = None
     height: int | None = None
+    attribution: Attribution | None = None
 
     def __post_init__(self) -> None:
         if not is_uuid_v4(self.media_id):

@@ -29,6 +29,10 @@ class ImageCandidate:
     attribution_required: str | None
     restrictions: str | None
     description: str | None
+    description_url: str | None = None
+    artist: str | None = None
+    credit_line: str | None = None
+    categories: tuple[str, ...] = ()
 
 
 class ImageSearchClient(Protocol):

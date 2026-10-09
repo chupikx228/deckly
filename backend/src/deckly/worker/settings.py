@@ -34,6 +34,7 @@ from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.media.client import MediaEndpoint
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
+from deckly.infrastructure.moderation.image_judge import LlmCandidateJudge
 from deckly.infrastructure.moderation.moderator import LlmContentModerator
 from deckly.infrastructure.observability.metrics import Metrics
 from deckly.infrastructure.observability.runtime import Observability
@@ -59,6 +60,7 @@ REDIS_KEY = "redis"
 ENGINE_KEY = "engine"
 LLM_CLIENT_KEY = "llm_client"
 MODERATION_LLM_CLIENT_KEY = "moderation_llm_client"
+MEDIA_JUDGE_LLM_CLIENT_KEY = "media_judge_llm_client"
 SOURCE_RETRIEVER_KEY = "source_retriever"
 MEDIA_FETCHER_KEY = "media_fetcher"
 RUN_GENERATION_KEY = "run_generation_use_case"
@@ -132,22 +134,49 @@ def moderation_llm_client(providers: ProviderSettings, timeout_seconds: float) -
     return LLM_CLIENTS[providers.model_provider](endpoint)
 
 
-def build_moderation_llm_client(providers: ProviderSettings, probe: ProviderProbe) -> ResilientLlmClient:
-    policy = RetryPolicy(
-        max_attempts=providers.moderation_filter_max_attempts,
-        attempt_timeout_seconds=providers.moderation_filter_timeout_seconds,
-        deadline_seconds=providers.moderation_filter_deadline_seconds,
+def moderation_retry_policy(
+    providers: ProviderSettings, *, max_attempts: int, timeout_seconds: int, deadline_seconds: int
+) -> RetryPolicy:
+    return RetryPolicy(
+        max_attempts=max_attempts,
+        attempt_timeout_seconds=timeout_seconds,
+        deadline_seconds=deadline_seconds,
         base_delay_seconds=providers.model_retry_base_delay_seconds,
         max_delay_seconds=providers.model_retry_max_delay_seconds,
     )
+
+
+def resilient_moderation_llm_client(
+    providers: ProviderSettings, probe: ProviderProbe, policy: RetryPolicy
+) -> ResilientLlmClient:
     caller = resilient_caller(
         policy,
         probe,
         failure_threshold=providers.model_circuit_failure_threshold,
         reset_seconds=providers.model_circuit_reset_seconds,
     )
-    client = moderation_llm_client(providers, providers.moderation_filter_timeout_seconds)
+    client = moderation_llm_client(providers, policy.attempt_timeout_seconds)
     return ResilientLlmClient(client, caller, providers.moderation_max_output_tokens)
+
+
+def build_moderation_llm_client(providers: ProviderSettings, probe: ProviderProbe) -> ResilientLlmClient:
+    policy = moderation_retry_policy(
+        providers,
+        max_attempts=providers.moderation_filter_max_attempts,
+        timeout_seconds=providers.moderation_filter_timeout_seconds,
+        deadline_seconds=providers.moderation_filter_deadline_seconds,
+    )
+    return resilient_moderation_llm_client(providers, probe, policy)
+
+
+def build_media_judge_llm_client(providers: ProviderSettings, probe: ProviderProbe) -> ResilientLlmClient:
+    policy = moderation_retry_policy(
+        providers,
+        max_attempts=providers.media_judge_max_attempts,
+        timeout_seconds=providers.media_judge_timeout_seconds,
+        deadline_seconds=providers.media_judge_deadline_seconds,
+    )
+    return resilient_moderation_llm_client(providers, probe, policy)
 
 
 def build_source_retriever(providers: ProviderSettings, probe: ProviderProbe) -> WebSourceRetriever:
@@ -177,7 +206,9 @@ def build_source_retriever(providers: ProviderSettings, probe: ProviderProbe) ->
     )
 
 
-def build_media_fetcher(providers: ProviderSettings, probe: ProviderProbe) -> CommonsMediaFetcher:
+def build_media_fetcher(
+    providers: ProviderSettings, probe: ProviderProbe, judge_llm: LlmClient
+) -> CommonsMediaFetcher:
     endpoint = MediaEndpoint(
         base_url=str(providers.media_base_url),
         user_agent=providers.media_user_agent,
@@ -202,9 +233,14 @@ def build_media_fetcher(providers: ProviderSettings, probe: ProviderProbe) -> Co
         thumbnail_width=providers.media_thumbnail_width,
         max_concurrency=providers.media_max_concurrency,
         deadline_seconds=providers.media_deadline_seconds,
+        judged_candidates_per_note=providers.media_judged_candidates_per_note,
     )
     return CommonsMediaFetcher(
-        client=CommonsImageSearchClient(endpoint), caller=caller, new_id=uuid4, limits=limits
+        client=CommonsImageSearchClient(endpoint),
+        caller=caller,
+        judge=LlmCandidateJudge(llm=judge_llm),
+        new_id=uuid4,
+        limits=limits,
     )
 
 
@@ -294,7 +330,13 @@ async def startup(ctx: WorkerContext) -> None:
     ctx[MODERATION_LLM_CLIENT_KEY] = moderation_llm
     retriever = build_source_retriever(settings.providers, observability.probe(ProviderOperation.WEB_SEARCH))
     ctx[SOURCE_RETRIEVER_KEY] = retriever
-    media = build_media_fetcher(settings.providers, observability.probe(ProviderOperation.IMAGE_SEARCH))
+    media_judge_llm = build_media_judge_llm_client(
+        settings.providers, observability.probe(ProviderOperation.IMAGE_MODERATION)
+    )
+    ctx[MEDIA_JUDGE_LLM_CLIENT_KEY] = media_judge_llm
+    media = build_media_fetcher(
+        settings.providers, observability.probe(ProviderOperation.IMAGE_SEARCH), media_judge_llm
+    )
     ctx[MEDIA_FETCHER_KEY] = media
     session_factory = create_session_factory(engine)
     store = BoundedJobStore(
@@ -320,7 +362,11 @@ async def shutdown(ctx: WorkerContext) -> None:
     engine = ctx.get(ENGINE_KEY)
     media = ctx.get(MEDIA_FETCHER_KEY)
     retriever = ctx.get(SOURCE_RETRIEVER_KEY)
-    llm_clients = (ctx.get(MODERATION_LLM_CLIENT_KEY), ctx.get(LLM_CLIENT_KEY))
+    llm_clients = (
+        ctx.get(MEDIA_JUDGE_LLM_CLIENT_KEY),
+        ctx.get(MODERATION_LLM_CLIENT_KEY),
+        ctx.get(LLM_CLIENT_KEY),
+    )
     async with AsyncExitStack() as closing:
         if isinstance(engine, AsyncEngine):
             closing.push_async_callback(engine.dispose)

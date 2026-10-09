@@ -1,13 +1,16 @@
 import asyncio
 import logging
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.ports import ImageQuery, NoteMedia
+from deckly.domain.deck import GenerationResult
+from deckly.domain.notes.note import Note
 from deckly.infrastructure.media.client import ImageCandidate, ImageSearch, ImageSearchClient, MediaError
+from deckly.infrastructure.media.judging import CandidateJudge, Ranking, Shortlist, ShortlistedImage
 from deckly.infrastructure.media.licensing import licensed_image
 from deckly.infrastructure.resilience import CallSize, ResilientCaller
 
@@ -21,6 +24,7 @@ class MediaLimits:
     thumbnail_width: int
     max_concurrency: int
     deadline_seconds: float
+    judged_candidates_per_note: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +47,18 @@ def one_query_per_note(queries: Iterable[ImageQuery], limit: int) -> tuple[Image
     return tuple(by_note.values())[:limit]
 
 
+def chosen(shortlists: Iterable[Shortlist], rankings: Iterable[Ranking]) -> tuple[NoteMedia, ...]:
+    used: set[str] = set()
+    attachments: list[NoteMedia] = []
+    for shortlist, ranking in zip(shortlists, rankings, strict=True):
+        image = next((image for image in ranking if image.candidate.file_title not in used), None)
+        if image is None:
+            continue
+        used.add(image.candidate.file_title)
+        attachments.append(NoteMedia(client_id=shortlist.note.client_id, media=image.media))
+    return tuple(attachments)
+
+
 def finished_outcome(task: asyncio.Task[SearchOutcome]) -> SearchOutcome | None:
     if not task.done() or task.cancelled() or task.exception() is not None:
         return None
@@ -53,12 +69,19 @@ def finished_outcome(task: asyncio.Task[SearchOutcome]) -> SearchOutcome | None:
 class CommonsMediaFetcher:
     client: ImageSearchClient
     caller: ResilientCaller
+    judge: CandidateJudge
     new_id: Callable[[], UUID]
     limits: MediaLimits
 
-    async def fetch(self, _job_id: UUID, queries: tuple[ImageQuery, ...]) -> tuple[NoteMedia, ...]:
-        searched = await self._search_all(one_query_per_note(queries, self.limits.max_images))
-        attachments = self._choose(searched.outcomes)
+    async def fetch(
+        self, _job_id: UUID, result: GenerationResult, queries: tuple[ImageQuery, ...]
+    ) -> tuple[NoteMedia, ...]:
+        notes = {note.client_id: note for note in result.notes}
+        illustrable = (query for query in queries if query.client_id in notes)
+        searched = await self._search_all(one_query_per_note(illustrable, self.limits.max_images))
+        shortlists = self._shortlist(searched.outcomes, notes)
+        rankings = await self.judge.rank(result.deck, shortlists) if shortlists else ()
+        attachments = chosen(shortlists, rankings)
         failures = Counter(outcome.failure for outcome in searched.outcomes if outcome.failure is not None)
         logger.log(
             logging.WARNING if failures or searched.deadline_reached else logging.INFO,
@@ -66,6 +89,7 @@ class CommonsMediaFetcher:
             extra={
                 "image_queries": len(queries),
                 "searched": len(searched.outcomes),
+                "shortlisted": len(shortlists),
                 "attached": len(attachments),
                 "failed_searches": dict(failures),
                 "deadline_reached": searched.deadline_reached,
@@ -104,17 +128,27 @@ class CommonsMediaFetcher:
                 return SearchOutcome(query=query, failure=type(error).__name__)
         return SearchOutcome(query=query, candidates=candidates)
 
-    def _choose(self, outcomes: Iterable[SearchOutcome]) -> tuple[NoteMedia, ...]:
-        used: set[str] = set()
-        attachments: list[NoteMedia] = []
+    def _shortlist(
+        self, outcomes: Iterable[SearchOutcome], notes: Mapping[UUID, Note]
+    ) -> tuple[Shortlist, ...]:
+        shortlists: list[Shortlist] = []
         for outcome in outcomes:
-            for candidate in outcome.candidates:
-                if candidate.file_title in used:
-                    continue
-                media = licensed_image(candidate, self.new_id)
-                if media is None:
-                    continue
-                used.add(candidate.file_title)
-                attachments.append(NoteMedia(client_id=outcome.query.client_id, media=media))
+            images = self._licensed(outcome.candidates)
+            if images:
+                note = notes[outcome.query.client_id]
+                shortlists.append(Shortlist(note=note, picture=outcome.query.text, images=images))
+        return tuple(shortlists)
+
+    def _licensed(self, candidates: Iterable[ImageCandidate]) -> tuple[ShortlistedImage, ...]:
+        seen: set[str] = set()
+        images: list[ShortlistedImage] = []
+        for candidate in candidates:
+            if len(images) == self.limits.judged_candidates_per_note:
                 break
-        return tuple(attachments)
+            if candidate.file_title in seen:
+                continue
+            media = licensed_image(candidate, self.new_id)
+            if media is not None:
+                seen.add(candidate.file_title)
+                images.append(ShortlistedImage(candidate=candidate, media=media))
+        return tuple(images)

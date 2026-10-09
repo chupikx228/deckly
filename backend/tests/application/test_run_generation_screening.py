@@ -54,6 +54,17 @@ async def test_dropped_note_is_screened_before_any_image_is_searched_for_it() ->
     assert job.state.result.notes == with_images(kept)
 
 
+async def test_images_are_judged_against_the_screened_notes_never_the_dropped_one() -> None:
+    harness = harness_generating(2)
+    job_id = await create(harness, WITH_IMAGES)
+
+    await harness.run(job_id)
+
+    [illustrated] = harness.providers.illustrated
+    assert illustrated.notes == (NOTES[0], NOTES[1], NOTES[3])
+    assert ADVERSARIAL not in illustrated.notes
+
+
 async def test_only_the_screened_result_is_cached() -> None:
     harness = harness_generating(2)
     job_id = await create(harness, WITHOUT_IMAGES)

@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from deckly.config import (
+    MAX_JUDGED_CANDIDATES,
     MAX_MEDIA_CANDIDATES,
     MAX_MEDIA_CONCURRENCY,
     MAX_MEDIA_IMAGES,
@@ -127,6 +128,10 @@ PROVIDER_ENVIRONMENT = {
     "DECKLY_PROVIDER_MEDIA_CANDIDATES_PER_QUERY": "10",
     "DECKLY_PROVIDER_MEDIA_THUMBNAIL_WIDTH": "960",
     "DECKLY_PROVIDER_MEDIA_MAX_CONCURRENCY": "4",
+    "DECKLY_PROVIDER_MEDIA_JUDGE_TIMEOUT_SECONDS": "10",
+    "DECKLY_PROVIDER_MEDIA_JUDGE_DEADLINE_SECONDS": "15",
+    "DECKLY_PROVIDER_MEDIA_JUDGE_MAX_ATTEMPTS": "2",
+    "DECKLY_PROVIDER_MEDIA_JUDGED_CANDIDATES_PER_NOTE": "4",
     "DECKLY_PROVIDER_MODERATION_MODEL_NAME": "moderation-model",
     "DECKLY_PROVIDER_MODERATION_MAX_OUTPUT_TOKENS": "4000",
     "DECKLY_PROVIDER_MODERATION_TIMEOUT_SECONDS": "2",
@@ -142,7 +147,7 @@ LIMIT_ENVIRONMENT = {
     "DECKLY_LIMIT_NOTE_REGENERATIONS_PER_WINDOW": "30",
     "DECKLY_LIMIT_NOTE_REGENERATION_WINDOW_SECONDS": "3600",
 }
-ROOMY_JOB_TIMEOUT_SECONDS = "321"
+ROOMY_JOB_TIMEOUT_SECONDS = "336"
 REGENERATE_ENVIRONMENT = {
     "DECKLY_REGENERATE_RATE_LIMIT_TIMEOUT_SECONDS": "0.5",
     "DECKLY_REGENERATE_SEARCH_TIMEOUT_SECONDS": "2.5",
@@ -364,7 +369,7 @@ def settings_with_job_timeout(monkeypatch: pytest.MonkeyPatch, job_timeout_secon
     )
 
 
-@pytest.mark.parametrize("job_timeout_seconds", [320, 319, 1])
+@pytest.mark.parametrize("job_timeout_seconds", [335, 334, 1])
 def test_provider_deadlines_that_fill_the_job_timeout_are_rejected(
     clean_environment: pytest.MonkeyPatch, job_timeout_seconds: int
 ) -> None:
@@ -372,12 +377,19 @@ def test_provider_deadlines_that_fill_the_job_timeout_are_rejected(
         settings_with_job_timeout(clean_environment, job_timeout_seconds)
 
 
-@pytest.mark.parametrize("job_timeout_seconds", [301, 310])
+@pytest.mark.parametrize("job_timeout_seconds", [316, 325])
 def test_media_deadline_that_pushes_the_total_past_the_job_timeout_is_rejected(
     clean_environment: pytest.MonkeyPatch, job_timeout_seconds: int
 ) -> None:
     with pytest.raises(ValueError, match="moderation deadlines"):
         settings_with_job_timeout(clean_environment, job_timeout_seconds)
+
+
+def test_media_judge_deadline_that_pushes_the_total_past_the_job_timeout_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match="media judge and moderation deadlines"):
+        settings_from_environment(clean_environment, DECKLY_PROVIDER_MEDIA_JUDGE_DEADLINE_SECONDS="16")
 
 
 def test_moderation_deadline_that_pushes_the_total_past_the_job_timeout_is_rejected(
@@ -390,9 +402,9 @@ def test_moderation_deadline_that_pushes_the_total_past_the_job_timeout_is_rejec
 def test_provider_deadlines_that_leave_room_in_the_job_timeout_are_accepted(
     clean_environment: pytest.MonkeyPatch,
 ) -> None:
-    settings = settings_with_job_timeout(clean_environment, 321)
+    settings = settings_with_job_timeout(clean_environment, 336)
 
-    assert settings.limits.generation_job_timeout_seconds == 321
+    assert settings.limits.generation_job_timeout_seconds == 336
 
 
 def test_source_character_limit_too_small_to_keep_any_page_is_rejected(
@@ -427,6 +439,23 @@ def test_media_deadline_equal_to_one_attempt_is_accepted(clean_environment: pyte
     clean_environment.setenv("DECKLY_PROVIDER_MEDIA_DEADLINE_SECONDS", "8")
 
     assert ProviderSettings().media_deadline_seconds == 8
+
+
+def test_media_judge_deadline_shorter_than_one_attempt_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MEDIA_JUDGE_DEADLINE_SECONDS", "9")
+
+    with pytest.raises(ValidationError, match="media judge deadline"):
+        ProviderSettings()
+
+
+def test_media_judge_deadline_equal_to_one_attempt_is_accepted(clean_environment: pytest.MonkeyPatch) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MEDIA_JUDGE_DEADLINE_SECONDS", "10")
+
+    assert ProviderSettings().media_judge_deadline_seconds == 10
 
 
 def test_moderation_filter_deadline_shorter_than_one_attempt_is_rejected(
@@ -482,6 +511,7 @@ MEDIA_BOUNDS: dict[str, tuple[int, int]] = {
     "DECKLY_PROVIDER_MEDIA_MAX_IMAGES": (1, MAX_MEDIA_IMAGES),
     "DECKLY_PROVIDER_MEDIA_CANDIDATES_PER_QUERY": (1, MAX_MEDIA_CANDIDATES),
     "DECKLY_PROVIDER_MEDIA_MAX_CONCURRENCY": (1, MAX_MEDIA_CONCURRENCY),
+    "DECKLY_PROVIDER_MEDIA_JUDGED_CANDIDATES_PER_NOTE": (1, MAX_JUDGED_CANDIDATES),
 }
 OUT_OF_BOUNDS = [
     (variable, value) for variable, (low, high) in MEDIA_BOUNDS.items() for value in (low - 1, high + 1)
