@@ -201,9 +201,17 @@ Defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
   the tests.
 - **API contract** — the OpenAPI spec is linted, and the build fails if the generated types have
   drifted from it.
-- **Backend** — `make check` (Ruff format check, Ruff lint, mypy strict, import-linter layering
-  contracts) and `make test`, run from `backend/`. The rest of the ruleset in
+- **Backend** — run from `backend/`, three jobs:
+  - `backend`: `make check` (a guard that rejects `# type: ignore` / `# noqa` suppressions, Ruff
+    format check, Ruff lint with the complexity budget, mypy strict, import-linter layering
+    contracts, vulture dead-code scan), `make test`, `make test-integration` and
+    `make coverage-gate` (coverage floors). Contract tests against `openapi.yaml` are part of
+    `make test`.
+  - `backend-audit`: `make audit`, a pip-audit of the locked dependencies.
+  - `secrets`: a gitleaks scan of the full git history, configured by `.gitleaks.toml`.
+
+  The reasoning and the exact numbers are in
   [`.claude/backend/engineering-guide.md`](.claude/backend/engineering-guide.md) → "CI
-  enforcement" (complexity budget, contract tests, coverage, audits) is still to be wired.
+  enforcement".
 
 A red CI is never merged.

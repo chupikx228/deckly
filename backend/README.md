@@ -555,12 +555,18 @@ logs). Exporting over OTLP to Jaeger or similar is a follow-up: it needs
 ## Checks
 
 ```bash
-make check          # ruff format --check, ruff check, mypy --strict, import-linter
+make check          # suppression guard, ruff format --check, ruff check (incl. complexity budget),
+                    # mypy --strict, import-linter, vulture
 make fix            # ruff format + ruff check --fix
-make test           # pytest, no infrastructure needed
-make test-integration  # Postgres + Redis tests; needs make up && make migrate
+make test           # pytest with coverage, no infrastructure needed
+make test-integration  # Postgres + Redis tests, appends to the coverage data; needs make up && make migrate
+make coverage-gate  # coverage floors; run after make test and make test-integration
+make audit          # pip-audit over uv.lock; needs network
 make test-live     # calls the model provider configured in .env; needs a real key, costs money
 ```
 
-CI runs `make install`, `make check`, `make test`, then `make migrate` and `make test-integration`
-against Postgres and Redis service containers (`.github/workflows/ci.yml`, `backend` job).
+CI runs `make install`, `make check`, `make test`, then `make migrate`, `make test-integration` and
+`make coverage-gate` against Postgres and Redis service containers (`.github/workflows/ci.yml`,
+`backend` job). `make audit` runs in the `backend-audit` job and a gitleaks scan of the full git
+history runs in the `secrets` job. The numbers and the reasoning are in
+[`.claude/backend/engineering-guide.md`](../.claude/backend/engineering-guide.md) → "CI enforcement".

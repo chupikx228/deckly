@@ -442,10 +442,9 @@ typecheck, ESLint with FSD layering (`eslint-plugin-boundaries`) plus complexity
 Prettier check, tests, a "no JavaScript in source" guard, and an OpenAPI lint of this folder's
 spec that also fails if the generated types drift from it.
 
-The backend does not exist yet, so its job in that workflow is a **placeholder**: it passes
-while there is no backend directory and fails the moment backend code appears without its own
-gate wired up. When you add the service, replace that placeholder with the checks below,
-running in the backend's own toolchain.
+The backend is gated by three jobs in the same workflow: `backend` (points 1–8), `backend-audit`
+and `secrets` (point 9). Every point runs through a `make` target in `backend/`, so a failure
+reproduces locally with the same command CI uses.
 
 **A note on SOLID and CI.** No linter verifies SOLID as a principle — "single responsibility"
 and "dependency inversion" are judgements, enforced in code review, not by a tool. What CI
@@ -453,33 +452,100 @@ _can_ enforce are the measurable proxies that make SOLID violations expensive an
 Treat green CI as necessary, not sufficient; the review still checks the principles
 themselves.
 
-### The gate the backend must add
+### The gate the backend enforces
+
+| #   | Point                | Enforced by                                                                         | CI step / `make` target     |
+| --- | -------------------- | ----------------------------------------------------------------------------------- | --------------------------- |
+| 1   | Formatter            | `ruff format --check`                                                               | `backend` / `check`         |
+| 2   | Linter               | `ruff check` with `select = ["ALL"]`, any finding fails                             | `backend` / `check`         |
+| 3   | Types                | `mypy` strict plus `disallow_any_explicit`; suppression guard                       | `backend` / `check`         |
+| 4   | Layering             | import-linter, four contracts in `pyproject.toml`                                   | `backend` / `check`         |
+| 5   | Complexity budget    | ruff `C901`, `PLR0913`, `PLR0915`, `PLR1702`                                        | `backend` / `check`         |
+| 6   | Dead code            | `vulture` over `src/`, configured in `pyproject.toml`                               | `backend` / `check`         |
+| 7   | Contract tests       | `tests/transport/*_contract.py` and `test_spec_alignment.py` against `openapi.yaml` | `backend` / `test`          |
+| 8   | Coverage floors      | `pytest-cov` over unit and integration tests, `coverage report --fail-under`        | `backend` / `coverage-gate` |
+| 9   | Dependency + secrets | `pip-audit` over the locked dependencies; `gitleaks` over the full history          | `backend-audit`, `secrets`  |
 
 1. **Formatter check** — the language's standard formatter, in check mode. No debate about
    style in review.
 2. **Linter, warnings are errors** — the strictest sensible ruleset for the language, run with
-   zero-tolerance for warnings, same as the frontend's `--max-warnings 0`.
-3. **Static types / strict analysis** — if the language is typed, the strictest mode, no
-   escape hatches (no untyped `any`-equivalent, no ignored errors without a justification).
-4. **Layering / dependency direction** — the SRP + DIP proxy. Enforce that dependencies point
-   inward (transport → application → domain, never the reverse) and that infrastructure is
-   reached only through ports, with an import-boundary tool (an `import-linter`-style contract,
-   the backend equivalent of `eslint-plugin-boundaries`). A domain module importing an HTTP or
-   SDK type is a build failure, not a review nit.
-5. **Complexity budget** — the OCP/SRP proxy. Cap cyclomatic complexity per function, function
-   length, parameter count, and nesting depth (the frontend uses 12 / 80 lines / 4 params / 4
-   deep). A function over budget is where responsibilities pile up; fail the build and make the
-   author split it.
-6. **Dead code / unused exports** — keep the surface honest, but tune it: barrel/public-API
-   files produce false positives, so scope it rather than shipping a noisy gate.
+   zero-tolerance for warnings, same as the frontend's `--max-warnings 0`. Ruff has no warning
+   level: every finding fails the build. The only rule families switched off are `D` (docstrings:
+   the repo carries no comments), `CPY` (copyright headers) and the two rules that conflict with
+   the formatter (`COM812`, `ISC001`). Tests additionally allow `assert` and magic values.
+3. **Static types / strict analysis** — the strictest mode, no escape hatches. mypy runs with
+   `strict`, `disallow_any_explicit` and `disallow_any_unimported`. `make guard` fails, case-insensitively, on any
+   `# type: ignore`, `# mypy: ignore-errors`, `# noqa`, `# ruff: noqa` or `# pragma: no cover`
+   under `src/`, `tests/` and `migrations/`: the repo allows no comments, so a justification for
+   a suppression cannot exist, and the fix goes in the code.
+4. **Layering / dependency direction** — the SRP + DIP proxy. Four import-linter contracts: the
+   layer order (entrypoints → transport | infrastructure → application → domain), domain and
+   application free of I/O, HTTP and SDK packages, a pure domain (no clock, randomness,
+   serialisation or I/O modules), and transport reaching infrastructure only through
+   application ports. A domain module importing an HTTP or SDK type is a build failure.
+5. **Complexity budget** — the OCP/SRP proxy. The frontend budget is 12 cyclomatic / 80 lines /
+   4 params / 4 deep (`frontend/eslint.base.mjs`). The backend mirrors it in ruff:
+
+   | Limit                 | Frontend | Backend         | Rule      |
+   | --------------------- | -------- | --------------- | --------- |
+   | Cyclomatic complexity | 12       | 12              | `C901`    |
+   | Parameters            | 4        | 4               | `PLR0913` |
+   | Nesting depth         | 4        | 4 nested blocks | `PLR1702` |
+   | Function size         | 80 lines | 40 statements   | `PLR0915` |
+
+   Function size is the one deliberate deviation. Ruff has no physical-line cap, and a line count
+   would reward formatter wrapping: the ruff formatter breaks a call over several lines at 110
+   columns, so the same function grows or shrinks with its arguments. Statements are
+   format-independent, and in this codebase a function averages about 1.6 formatted lines per
+   statement, so 40 statements is about 65 lines. The count includes nested functions, as the frontend's does. `PLR1702` is a preview
+   rule, so `pyproject.toml` enables it explicitly with `explicit-preview-rules` instead of
+   turning on preview for the whole rule set. `PLR0911` (returns) and `PLR0912` (branches) stay
+   at their ruff defaults. There is no file-length cap on the backend; the frontend's 300-line
+   cap has no ruff equivalent.
+
+6. **Dead code / unused exports** — `F401`, `F811` and `F841` (via `ALL`) catch unused imports
+   and variables; `vulture` over `src/` catches unused functions, classes, methods and
+   attributes at 60% confidence. Its false positives are all framework wiring, and are listed
+   in `[tool.vulture]` rather than hidden: route handlers (`@router.*`), pydantic validators,
+   `model_config`, the `create_app` factory, `HTMLParser` hooks, the arq `WorkerSettings`
+   attributes, the use cases stored on `app.state` and read back by name, and the `AUDIO` media
+   kind (a domain value used only by tests until audio notes exist). Vulture runs on `src/`
+   only, so code reachable only from tests still fails. A new name goes in the ignore list only
+   when it is called by a framework by name.
 7. **Contract tests against `openapi.yaml`** — every response the service can emit, success and
-   every error `code`, validated against this folder's spec. This is the cheapest insurance
-   that the mobile app will accept the payloads. Non-negotiable.
-8. **Test coverage threshold** — a floor (e.g. 80%) that fails the build when it drops, with
-   the domain and application layers held higher than the adapters. Coverage is a floor, not a
-   goal; do not chase 100%.
-9. **Security / dependency audit** — a vulnerability scan of dependencies and a secret scan, so
-   a leaked key or a known-vulnerable package fails the build.
+   every error `code`, validated against this folder's spec. Each operation has a
+   `tests/transport/test_*_contract.py` that validates every declared status and body against the
+   spec schemas. `tests/transport/test_spec_alignment.py` closes the gaps a per-endpoint test
+   cannot see: the service serves exactly the operations the spec declares, the success status
+   of each route is a declared response, and the `ErrorCode` enum equals the spec's. The
+   cross-cutting `ROUTE_NOT_FOUND`, `METHOD_NOT_ALLOWED` and `INTERNAL_ERROR` problems are
+   tested and validated against the `Problem` schema, but the spec declares them only as codes,
+   not as a response on each operation.
+8. **Test coverage threshold** — branch coverage over the unit and integration tests together
+   (`make test`, then `make test-integration`, then `make coverage-gate`):
+
+   | Scope                                              | Floor | Measured when set |
+   | -------------------------------------------------- | ----- | ----------------- |
+   | Whole package                                      | 95%   | 98.8%             |
+   | `domain` + `application`                           | 98%   | 99.8%             |
+   | `infrastructure`, `transport`, `worker`, `main.py` | 90%   | 98.4%             |
+
+   The floors sit a few points under what the suite measures, so a refactor does not trip them
+   but a skipped test file or an untested module does. The adapters get the lower bar because
+   their remaining lines are defensive branches around real I/O failures that only a live
+   dependency produces. Coverage is a floor, not a goal; do not chase 100%.
+
+9. **Security / dependency audit** — `make audit` exports `uv.lock` with hashes and runs
+   `pip-audit` (version pinned in the Makefile) against the PyPI advisory data, so a known-
+   vulnerable package fails the build. The `secrets` job runs `gitleaks` (version and sha256
+   pinned in the workflow) over the full git history with `.gitleaks.toml`, which extends the
+   default rules and allowlists only the `generic-api-key` rule under `backend/tests/` (random
+   UUIDs and fake keys used as fixtures; provider-specific rules such as AWS or GCP still apply
+   there). `.gitleaksignore` holds the one historical finding, a fake test key since replaced.
+   GitHub's own secret scanning is a separate platform feature and stays on.
+
+Dependencies added for this gate: `pytest-cov` and `vulture` (dev group, locked in `uv.lock`),
+`pip-audit` (run through `uvx`, pinned, not in the lock) and the `gitleaks` binary (CI only).
 
 ### What stays in review, not CI
 
