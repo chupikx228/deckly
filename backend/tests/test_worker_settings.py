@@ -18,6 +18,7 @@ from deckly.domain.job import GenerationJob, JobStatus
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.llm.anthropic_client import AnthropicLlmClient
 from deckly.infrastructure.llm.deepseek_client import DeepSeekLlmClient
+from deckly.infrastructure.llm.gemini_client import GeminiLlmClient
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
@@ -62,9 +63,10 @@ from tests.fakes import (
 
 pytestmark = pytest.mark.anyio
 
-PROVIDER_CLIENTS: dict[ModelProvider, type[AnthropicLlmClient | DeepSeekLlmClient]] = {
+PROVIDER_CLIENTS: dict[ModelProvider, type[AnthropicLlmClient | DeepSeekLlmClient | GeminiLlmClient]] = {
     "anthropic": AnthropicLlmClient,
     "deepseek": DeepSeekLlmClient,
+    "gemini": GeminiLlmClient,
 }
 
 

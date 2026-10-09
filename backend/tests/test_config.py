@@ -165,7 +165,7 @@ def set_provider_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(name, value)
 
 
-@pytest.mark.parametrize("provider", ["anthropic", "deepseek"])
+@pytest.mark.parametrize("provider", ["anthropic", "deepseek", "gemini"])
 def test_complete_provider_settings_are_accepted(
     clean_environment: pytest.MonkeyPatch, provider: str
 ) -> None:
@@ -197,6 +197,63 @@ def test_blank_required_values_are_rejected(
 
     with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_PROVIDER_").lower()):
         ProviderSettings()
+
+
+API_KEY_VARIABLES = ["DECKLY_PROVIDER_MODEL_API_KEY", "DECKLY_PROVIDER_SEARCH_API_KEY"]
+INVISIBLE_IN_KEY: dict[str, str] = {
+    "newline": "\n",
+    "carriage return": "\r",
+    "tab": "\t",
+    "delete": "\x7f",
+    "space": " ",
+    "no-break space": "\u00a0",
+    "zero-width space": "\u200b",
+    "right-to-left override": "\u202e",
+    "accented letter": "\u00e9",
+    "cyrillic homoglyph": "\u0430",
+}
+
+
+@pytest.mark.parametrize("character", INVISIBLE_IN_KEY.values(), ids=INVISIBLE_IN_KEY.keys())
+@pytest.mark.parametrize("variable", API_KEY_VARIABLES)
+def test_api_key_with_a_character_outside_visible_ascii_is_rejected_without_echoing_it(
+    clean_environment: pytest.MonkeyPatch, variable: str, character: str
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv(variable, f"AIzaSecretKey{character}Injected")
+
+    with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_PROVIDER_").lower()) as error:
+        ProviderSettings()
+
+    assert "AIzaSecretKey" not in str(error.value)
+    assert "Injected" not in str(error.value)
+
+
+@pytest.mark.parametrize("variable", API_KEY_VARIABLES)
+def test_api_key_with_a_nul_from_the_env_file_is_rejected_without_echoing_it(
+    clean_environment: pytest.MonkeyPatch, variable: str
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.delenv(variable)
+    Path(".env").write_text(f'{variable}="AIzaSecretKey\x00Injected"\n', encoding="utf-8")
+
+    with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_PROVIDER_").lower()) as error:
+        ProviderSettings()
+
+    assert "AIzaSecretKey" not in str(error.value)
+
+
+@pytest.mark.parametrize("variable", API_KEY_VARIABLES)
+def test_api_key_spanning_the_whole_visible_ascii_range_is_accepted(
+    clean_environment: pytest.MonkeyPatch, variable: str
+) -> None:
+    set_provider_environment(clean_environment)
+    key = "".join(chr(code) for code in range(ord("!"), ord("~") + 1))
+    clean_environment.setenv(variable, key)
+
+    settings = ProviderSettings()
+
+    assert key in {settings.model_api_key.get_secret_value(), settings.search_api_key.get_secret_value()}
 
 
 @pytest.mark.parametrize("provider", ["openai", "Anthropic", ""])

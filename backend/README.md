@@ -13,8 +13,8 @@ src/deckly/
   application/       use cases and the ports they depend on; application errors
   domain/            pure business rules; domain errors
   infrastructure/    adapters: async SQLAlchemy + asyncpg, Arq/Redis, JSON logging, web search and
-                     source parsing (Tavily), the LLM card generator (Anthropic or DeepSeek) and
-                     the retry/circuit-breaker layer
+                     source parsing (Tavily), the LLM card generator (Anthropic, DeepSeek or
+                     Gemini) and the retry/circuit-breaker layer
   worker/            Arq worker entrypoint, WorkerSettings and its composition root
 migrations/          Alembic (async)
 ```
@@ -213,8 +213,22 @@ leave room within `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS`.
 ## Card generation
 
 `infrastructure/card_generator/` implements the `CardGenerator` port with one model call per
-job. `DECKLY_PROVIDER_MODEL_PROVIDER` picks the client: `anthropic` (official SDK) or `deepseek`
-(raw `httpx2` against its OpenAI-compatible `/chat/completions`, JSON output mode). The model
+job. `DECKLY_PROVIDER_MODEL_PROVIDER` picks the client: `anthropic` (official SDK), `deepseek`
+(raw `httpx2` against its OpenAI-compatible `/chat/completions`, JSON output mode) or `gemini`
+(raw `httpx2` against `models/{model}:generateContent`, JSON output mode). The same choice
+drives every model call: card generation, topic and content moderation, and note regeneration.
+
+For Gemini, set `DECKLY_PROVIDER_MODEL_BASE_URL=https://generativelanguage.googleapis.com/v1beta`
+and Gemini 3.x model names in `DECKLY_PROVIDER_MODEL_NAME` and
+`DECKLY_PROVIDER_MODERATION_MODEL_NAME`. The key travels in the `x-goog-api-key` header, never in
+the URL. Every request asks for `thinkingLevel: low`, because Gemini 3 thinks at `high` by
+default and thinking tokens count against `maxOutputTokens` and the attempt timeout; the
+deprecated 2.5 models reject that field. A prompt blocked by Gemini's own filter
+(`promptFeedback.blockReason`) or a candidate stopped for `SAFETY`, `RECITATION`, `LANGUAGE`,
+`OTHER`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, `ESCALATION` or an image-safety reason counts
+as a refusal, so moderation fails closed; `PUP_LIMITED_DISABLED` (a suspended account) is a
+rejected request instead, so it shows up as a failure rather than as every topic being blocked.
+A `429` without a `retry-after` header honours the `google.rpc.RetryInfo` delay in its body. The model
 never gets to invent a source: the prompt numbers each `SourceMaterial`, notes cite those
 numbers, and the adapter maps them back to the material's own `Source`. With no material the
 model is not called.

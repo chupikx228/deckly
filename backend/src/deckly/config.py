@@ -31,8 +31,10 @@ MIN_JOB_RETENTION_SECONDS = 24 * 60 * 60
 MINUTES_PER_HOUR = 60
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-ModelProvider = Literal["anthropic", "deepseek"]
+ModelProvider = Literal["anthropic", "deepseek", "gemini"]
 MAX_PORT = 65535
+FIRST_VISIBLE_ASCII = "!"
+LAST_VISIBLE_ASCII = "~"
 PositiveSeconds = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 
 
@@ -130,6 +132,16 @@ class ProviderSettings(BaseSettings):
     moderation_filter_timeout_seconds: PositiveInt
     moderation_filter_deadline_seconds: PositiveInt
     moderation_filter_max_attempts: PositiveInt
+
+    @field_validator("model_api_key", "search_api_key")
+    @classmethod
+    def require_visible_ascii_key(cls, key: SecretStr) -> SecretStr:
+        if not all(
+            FIRST_VISIBLE_ASCII <= character <= LAST_VISIBLE_ASCII for character in key.get_secret_value()
+        ):
+            message = "api keys may only contain visible ASCII characters"
+            raise ValueError(message)
+        return key
 
     @model_validator(mode="after")
     def require_deadline_to_fit_one_attempt(self) -> Self:
