@@ -36,10 +36,12 @@ dev = [
     "jsonschema>=4.26.0",
     "mypy>=2.3.1",
     "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
     "pyyaml>=6.0.3",
     "ruff>=0.16.8",
     "types-jsonschema>=4.26.0.20260518",
     "types-pyyaml>=6.0.12.20260906",
+    "vulture>=2.16",
 ]
 
 [tool.ruff]
@@ -49,6 +51,9 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["ALL"]
+extend-select = ["PLR1702"]
+preview = true
+explicit-preview-rules = true
 ignore = [
     "D",
     "CPY",
@@ -175,6 +180,38 @@ forbidden_modules = [
     "prometheus_client",
     "opentelemetry",
 ]
+
+[tool.vulture]
+paths = ["src"]
+min_confidence = 60
+ignore_decorators = ["@router.*", "@field_validator", "@model_validator"]
+ignore_names = [
+    "model_config",
+    "create_app",
+    "handle_starttag",
+    "handle_endtag",
+    "handle_data",
+    "check_health",
+    "get_generation",
+    "cancel_generation",
+    "create_generation",
+    "regenerate_note",
+    "functions",
+    "cron_jobs",
+    "on_startup",
+    "on_shutdown",
+    "allow_abort_jobs",
+    "AUDIO",
+]
+
+[tool.coverage.run]
+source = ["deckly"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+precision = 2
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

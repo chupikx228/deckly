@@ -1,0 +1,9 @@
+title = "Deckly secret scan"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Random UUIDs and fake provider keys used as backend test fixtures"
+targetRules = ["generic-api-key"]
+paths = ['''^backend/tests/''']

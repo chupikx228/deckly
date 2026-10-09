@@ -9,6 +9,7 @@ from referencing.jsonschema import DRAFT202012, Schema
 
 SPEC_PATH = Path(__file__).resolve().parents[3] / ".claude" / "backend" / "openapi.yaml"
 SPEC_URI = "urn:deckly:openapi"
+HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
 RFC3339_TIME_SEPARATORS = ("T", "t")
 
 format_checker = FormatChecker(["uuid"])
@@ -56,3 +57,25 @@ def declared_responses(path: str, method: str) -> dict[str, object]:
         node = node[key]
     assert isinstance(node, dict)
     return {str(status): response for status, response in node.items()}
+
+
+def declared_operations() -> set[tuple[str, str]]:
+    node = spec_contents()
+    assert isinstance(node, dict)
+    paths = node["paths"]
+    assert isinstance(paths, dict)
+    return {
+        (str(path), str(method))
+        for path, operations in paths.items()
+        for method in operations
+        if method in HTTP_METHODS
+    }
+
+
+def declared_error_codes() -> set[str]:
+    node = spec_contents()
+    for key in ("components", "schemas", "ErrorCode", "enum"):
+        assert isinstance(node, dict)
+        node = node[key]
+    assert isinstance(node, list)
+    return {str(code) for code in node}
