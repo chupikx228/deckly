@@ -272,9 +272,11 @@ components:
       required: [topic, language, cardCount]
       additionalProperties: false
       description: >
-        A request whose noteTypes contains image_occlusion must also send includeImages: true,
-        because an image-occlusion note is built on an image the server fetches. Leaving
-        includeImages out counts as false. Such a request is rejected with VALIDATION_FAILED.
+        image_occlusion is not generated yet, so a request whose noteTypes contains it is
+        rejected with VALIDATION_FAILED whatever includeImages says. Once it is generated, it
+        will also need includeImages: true, because an image-occlusion note is built on an image
+        the server fetches; the if/then below already rejects it without images, and leaving
+        includeImages out counts as false.
       if:
         required: [noteTypes]
         properties:
@@ -321,8 +323,7 @@ components:
           default: [basic]
           description: >
             A note type the server cannot generate yet is rejected with VALIDATION_FAILED,
-            even though it is in the enum. image_occlusion is only accepted together with
-            includeImages: true.
+            even though it is in the enum. image_occlusion is currently such a type.
           items:
             $ref: '#/components/schemas/NoteType'
         includeImages:

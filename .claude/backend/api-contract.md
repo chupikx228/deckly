@@ -77,11 +77,13 @@ Request:
 | `includeImages` | no       | Defaults to `false`. Images add significant latency and cost.           |
 | `instructions`  | no       | Free-form user steering, up to 500 characters.                          |
 
-**`image_occlusion` needs `includeImages: true`.** An image-occlusion note is built on an image
-the server fetches, so a request that asks for that type without images could never produce
-one. A request whose `noteTypes` contains `image_occlusion` while `includeImages` is `false` —
-or left out, since it defaults to `false` — is rejected up front with `400 VALIDATION_FAILED`.
-The schema expresses this rule with `if`/`then` on `GenerationRequest`.
+**`image_occlusion` is not generated yet.** A request whose `noteTypes` contains
+`image_occlusion` is rejected up front with `400 VALIDATION_FAILED`, whatever `includeImages`
+says, and no job is created. The design is decided and the implementation deferred; see
+"Resolved decisions", item 5. Once it is generated, it will also need `includeImages: true`,
+because the note is built on an image the server fetches. The schema already expresses that
+part with `if`/`then` on `GenerationRequest`, so a request without images is rejected by the
+schema and a request with images by the server.
 
 The server also enforces these rules, which the schema cannot express. Each one fails with
 `400 VALIDATION_FAILED`:
@@ -108,7 +110,8 @@ The server also enforces these rules, which the schema cannot express. Each one 
 - **`topic` and `instructions` must not contain NUL (`\u0000`).**
 - **Every entry in `noteTypes` must be a type the server can generate.** The enum lists every
   type the contract knows about. A type the generator does not support yet is rejected, even
-  though it is in the enum. Every type in the enum is currently supported.
+  though it is in the enum. Every type in the enum is currently supported except
+  `image_occlusion` (see above).
 
 Headers:
 
@@ -131,6 +134,10 @@ without colliding.
   a second one.
 - Reusing a key with a different request returns `409 IDEMPOTENCY_KEY_CONFLICT` and leaves
   the original job untouched. Replaying the original request with that key still works.
+- A request the server no longer accepts cannot be replayed. Sending it again fails validation
+  (`400 VALIDATION_FAILED`) before the key is looked up. Reusing its key for a valid request is
+  `409 IDEMPOTENCY_KEY_CONFLICT`, because the two requests cannot be the same. A request that
+  named `image_occlusion` before it was withdrawn is the case this covers.
 - A key is honoured for 24 hours after the original request
   (`DECKLY_CACHE_IDEMPOTENCY_KEY_TTL_SECONDS`). After that the same key starts a new job, as if
   it had never been used. The original job is not affected and can still be polled until it is
@@ -386,6 +393,9 @@ Rules the backend must uphold:
 - Every image-occlusion region lies entirely inside the image: `x`, `y`, `width` and `height`
   are each within 0–1, `x + width ≤ 1`, `y + height ≤ 1`, and neither `width` nor `height` is
   zero.
+- No result carries an `image_occlusion` note while its generation is deferred (see "Resolved
+  decisions", item 5). The rules above stay fixed for when it ships, which also adds an optional
+  `label` to each region.
 - `clientId` is unique within a result and is what the client uses to track edits and
   regenerations in the preview screen.
 
@@ -552,7 +562,59 @@ carry an `Allow` header listing the methods the path does accept.
    shows all cards together, and every card is editable before the deck is saved. The current
    contract (`GenerationJob.result` populated on `succeeded`) already covers this; no change
    needed.
-5. **No streaming — batch result.** The job returns its full result at once; the preview screen
-   shows all cards together, and every card is editable before the deck is saved. The current
-   contract (`GenerationJob.result` populated on `succeeded`) already covers this; no change
-   needed.
+5. **Image occlusion — decided, not generated in v1.** The full implementation is DEC-59, and
+   it waits for DEC-58, the app's renderer and region editor for these notes. Until then every
+   request that names `image_occlusion` is rejected with `400 VALIDATION_FAILED` (see
+   `POST /v1/generations`), and `POST /v1/notes/regenerate` keeps rejecting it as well. It is
+   deferred because nothing could use it yet. The app cannot show or edit an image-occlusion
+   note, and generated content must be editable before it is saved. Generating it now could not
+   be tested end to end, and it would cost a second provider key and a longer job timeout with
+   no benefit to users.
+
+   The design DEC-59 implements:
+
+   - **What is hidden.** Each region covers a **text label printed on a labelled diagram**. A
+     region carries no answer text, so the answer is whatever the mask hides. Masking a
+     structure instead of its label would reveal the structure, not its name.
+   - **Stage order is unchanged.** In `generating_cards` the text model (whichever
+     `DECKLY_PROVIDER_MODEL_PROVIDER` selects) writes an _occlusion draft_, not a note. A draft
+     holds a search phrase for a labelled diagram, the label terms worth hiding, its cited
+     sources and an optional `extra`. The generated-content filter screens the draft's text like
+     any note. In `fetching_media` the draft's phrase is searched on Commons under the existing
+     licence, attribution and image-judge rules. The chosen thumbnail is downloaded and sent to
+     the vision provider together with the label terms. The returned boxes are padded, clamped
+     to 0–1, merged where they overlap and dropped when too small. The note is then built
+     through the same domain validation as every other note: `imageId` is one of its own
+     images, regions lie inside the image and ordinals are unique. A draft that does not end as
+     a valid note is dropped. The other note types are unaffected.
+   - **Vision provider: Gemini, fixed.** It does not depend on `DECKLY_PROVIDER_MODEL_PROVIDER`,
+     just as Tavily (search) and Wikimedia Commons (media) do not. Gemini returns boxes natively
+     as `[ymin, xmin, ymax, xmax]` normalised to 0–1000, which convert directly to the 0–1
+     regions. Claude's coordinates are approximate pixel positions on its own resized copy of
+     the image, and DeepSeek has no vision at all. The text-only `LlmPrompt` stays text-only, and
+     vision gets its own narrow port, so no text provider needs an "unsupported" branch. A
+     server with no vision provider configured keeps rejecting `image_occlusion` with `400`.
+   - **The vision call also decides whether the picture is usable.** It returns no regions, and
+     the draft is dropped, for an image whose labels are not legible, are numbers keyed to a
+     legend, or are not in the card language. This is the check on the pixels themselves that
+     the text-only image judge cannot make. Most Commons diagrams are labelled in English, so
+     decks in other languages will get few image-occlusion notes.
+   - **Contract change.** Each region gains an optional `label`: the term its mask hides.
+   - **Failure.** A request for only `image_occlusion` whose drafts all fail ends
+     `NO_VALID_CONTENT`, or `PROVIDER_UNAVAILABLE` when an outage of the vision provider caused
+     it.
+   - **Configuration.** The vision call gets its own `DECKLY_PROVIDER_VISION_*` timeout,
+     deadline and circuit breaker. Its deadline joins the sum that must fit within
+     `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS`, which rises to make room.
+   - **Regeneration** of an image-occlusion note stays rejected.
+
+   Alternatives rejected:
+
+   - **Regions from metadata.** Image dimensions say nothing about where the labels are.
+     Commons' "relative position within image" qualifiers mark depicted objects, not labels,
+     and are sparse. Parsing SVG `<text>` elements only works for a fragile subset of files.
+   - **Parity across the three text providers.** DeepSeek cannot see images, so the type would
+     exist on some deployments and silently not on others.
+   - **OCR plus a text model.** This also needs a new provider, and it cannot tell a usable
+     diagram from a photo or a numbered legend. It remains the fallback if Gemini's boxes prove
+     too loose.

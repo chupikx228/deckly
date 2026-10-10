@@ -248,8 +248,10 @@ question, answer and set of distractors, in any order, for multiple choice. `add
 cloze's `extra` do not make two notes different, and a `basic_reversed` note with its sides
 swapped is not a duplicate. At most `cardCount` notes are returned, never padded. A reply that
 yields no note ends the job `NO_VALID_CONTENT`; a reply is never retried for its content.
-`image_occlusion` is not generated here, because a valid note needs a licensed image the media
-stage has to supply, and a request for it without `includeImages` is rejected up front.
+`image_occlusion` is not generated at all yet: `GenerationRequest` rejects any request that names
+it, so it never reaches the generator. The decided design, a fixed Gemini vision step that places
+the regions during the media stage, is recorded in `.claude/backend/api-contract.md` ("Resolved
+decisions", item 5) and is implemented in DEC-59.
 
 Duplicates, and a distractor that repeats the answer or another distractor, are found with one
 comparison (`domain/text.py`, `normalise_for_comparison`). It ignores case, fullwidth and
