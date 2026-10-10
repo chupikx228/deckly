@@ -189,6 +189,19 @@ async def test_conflicting_reuse_of_a_key_does_not_use_the_quota() -> None:
     assert harness.quota.used_by_client[scope().client_id] == 1
 
 
+async def test_key_first_used_for_a_request_that_no_longer_validates_is_a_conflict() -> None:
+    harness = Harness()
+    first = await harness.create(generation_request(), scope(), ADDRESS)
+    harness.store.unreadable.add(first.job.job_id)
+
+    with pytest.raises(IdempotencyKeyConflictError):
+        await harness.create(generation_request("Something else"), scope(), ADDRESS)
+
+    assert harness.quota.used_by_client[scope().client_id] == 1
+    assert len(harness.moderator.screened) == 1
+    assert harness.queue.enqueued == [first.job.job_id]
+
+
 class RacingJobStore(InMemoryJobStore):
     async def find(self, scope: IdempotencyScope) -> StoredJob | None:
         del scope

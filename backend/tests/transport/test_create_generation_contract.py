@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from deckly.application.exceptions import UpstreamUnavailableError
+from deckly.domain.generation import UNGENERATABLE_NOTE_TYPES
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE
 from deckly.main import API_PREFIX
@@ -27,6 +28,9 @@ VALID_HEADERS = {"Idempotency-Key": IDEMPOTENCY_KEY, "X-Client-Id": CLIENT_ID}
 MINIMAL = {"topic": "Road signs", "language": "ru", "cardCount": 40}
 TEST_CLIENT_ADDRESS = "testclient"
 REGISTERED_NOTE_TYPES = [str(note_type) for note_type in NOTE_FIELDS_BY_TYPE]
+GENERATABLE_NOTE_TYPES = [
+    str(note_type) for note_type in NOTE_FIELDS_BY_TYPE if note_type not in UNGENERATABLE_NOTE_TYPES
+]
 
 
 def build_client(harness: Harness) -> TestClient:
@@ -93,12 +97,10 @@ ACCEPTED_PAYLOADS: dict[str, dict[str, object]] = {
     },
     "difficulty beginner": with_(difficulty="beginner"),
     "difficulty intermediate": with_(difficulty="intermediate"),
-    "every registered note type with images": with_(noteTypes=REGISTERED_NOTE_TYPES, includeImages=True),
-    "every note type but image_occlusion without images": with_(
-        noteTypes=[note_type for note_type in REGISTERED_NOTE_TYPES if note_type != "image_occlusion"],
-        includeImages=False,
+    "every generatable note type with images": with_(noteTypes=GENERATABLE_NOTE_TYPES, includeImages=True),
+    "every generatable note type without images": with_(
+        noteTypes=GENERATABLE_NOTE_TYPES, includeImages=False
     ),
-    "image_occlusion alone with images": with_(noteTypes=["image_occlusion"], includeImages=True),
     "includeImages false": with_(includeImages=False),
     "instructions empty": with_(instructions=""),
     "instructions at 500": with_(instructions="x" * 500),
@@ -196,6 +198,8 @@ SERVER_ONLY_REJECT: dict[str, dict[str, object]] = {
     "topic of two letters around a space": with_(topic="a b"),
     "topic with NUL": with_(topic="Road\x00signs"),
     "instructions with NUL": with_(instructions="Focus\x00"),
+    "image_occlusion alone with images": with_(noteTypes=["image_occlusion"], includeImages=True),
+    "every registered note type with images": with_(noteTypes=REGISTERED_NOTE_TYPES, includeImages=True),
 }
 
 ADVERSARIAL_LANGUAGE_TAGS = {
@@ -275,10 +279,11 @@ def test_rejected_request_creates_and_enqueues_nothing(monkeypatch: pytest.Monke
     assert harness.queue.enqueued == []
 
 
-def test_image_occlusion_without_images_creates_and_enqueues_nothing() -> None:
+@pytest.mark.parametrize("include_images", [False, True], ids=["without images", "with images"])
+def test_image_occlusion_creates_and_enqueues_nothing(*, include_images: bool) -> None:
     harness = Harness()
 
-    response = post(build_client(harness), with_(noteTypes=["image_occlusion"]))
+    response = post(build_client(harness), with_(noteTypes=["image_occlusion"], includeImages=include_images))
 
     assert_validation_failed(response)
     assert harness.store.jobs == {}
@@ -498,6 +503,18 @@ def test_replaying_the_key_with_a_different_body_is_a_conflict(
     assert_problem(response, HTTPStatus.CONFLICT, "IDEMPOTENCY_KEY_CONFLICT")
     assert list(harness.store.jobs) == [UUID(first.json()["jobId"])]
     assert harness.queue.enqueued == [UUID(first.json()["jobId"])]
+
+
+def test_reusing_a_key_whose_saved_request_no_longer_validates_is_a_conflict_not_a_500() -> None:
+    harness = Harness()
+    client = build_client(harness)
+    first = UUID(post(client, MINIMAL).json()["jobId"])
+    harness.store.unreadable.add(first)
+
+    response = post(client, with_(topic="Something else"))
+
+    assert_problem(response, HTTPStatus.CONFLICT, "IDEMPOTENCY_KEY_CONFLICT")
+    assert harness.queue.enqueued == [first]
 
 
 def test_original_body_still_replays_after_a_conflict() -> None:

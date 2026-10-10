@@ -414,6 +414,9 @@ class InMemoryJobStore:
 
     async def find(self, scope: IdempotencyScope) -> StoredJob | None:
         existing = self.job_ids_by_scope.get(scope)
+        if existing in self.unreadable:
+            message = f"the saved request of job {existing} no longer validates"
+            raise UnreadableJobRequestError(message)
         return (
             None if existing is None else StoredJob(job=self.jobs[existing], request=self.requests[existing])
         )

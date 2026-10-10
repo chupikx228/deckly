@@ -105,7 +105,7 @@ def request(*note_types: NoteType, card_count: int = 10) -> GenerationRequest:
         card_count=card_count,
         difficulty=Difficulty.INTERMEDIATE,
         note_types=tuple(dict.fromkeys(note_types)),
-        include_images=NoteType.IMAGE_OCCLUSION in note_types,
+        include_images=False,
         instructions=None,
     )
 
@@ -425,26 +425,6 @@ async def test_note_of_a_type_the_request_did_not_ask_for_never_reaches_the_resu
 
     assert [note.note_type for note in result.notes] == [requested]
     assert_valid_for(result, job_request)
-
-
-async def test_image_occlusion_is_neither_offered_to_the_model_nor_accepted_from_it() -> None:
-    job_request = request(NoteType.IMAGE_OCCLUSION, NoteType.BASIC)
-    llm = FakeLlmClient(model_reply(document(valid_note(NoteType.IMAGE_OCCLUSION), basic(1))))
-
-    result = await generate(llm, job_request)
-
-    assert fronts(result) == ["front 1"]
-    [prompt] = llm.prompts
-    assert NoteType.IMAGE_OCCLUSION not in prompt.system + prompt.user
-
-
-async def test_request_for_only_image_occlusion_yields_no_notes_without_calling_the_model() -> None:
-    llm = FakeLlmClient(model_reply(document(valid_note(NoteType.IMAGE_OCCLUSION))))
-
-    result = await generate(llm, request(NoteType.IMAGE_OCCLUSION))
-
-    assert result.notes == ()
-    assert llm.prompts == []
 
 
 def test_every_note_type_except_image_occlusion_has_a_handler_registered_under_its_own_type() -> None:

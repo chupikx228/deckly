@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from deckly.application.exceptions import IdempotencyKeyConflictError, RateLimitedError
+from deckly.application.exceptions import (
+    IdempotencyKeyConflictError,
+    RateLimitedError,
+    UnreadableJobRequestError,
+)
 from deckly.application.ports import (
     AdmissionOutcome,
     GenerationQuota,
@@ -51,19 +55,19 @@ class CreateGeneration:
 
     async def __call__(self, request: GenerationRequest, scope: IdempotencyScope, address: str) -> JobCreated:
         now = self.clock()
-        existing = await self.store.find(scope)
+        existing = await self._find(scope)
         if existing is not None:
             return await self._replay(existing, request, scope, now)
         requester = Requester(client_id=scope.client_id, address=address)
         try:
             quota = await self.quota.reserve(requester, now)
         except RateLimitedError:
-            twin = await self.store.find(scope)
+            twin = await self._find(scope)
             if twin is None:
                 raise
             return await self._replay(twin, request, scope, now)
         if not await self._screen(request, requester, now):
-            twin = await self.store.find(scope)
+            twin = await self._find(scope)
             if twin is None:
                 logger.info("topic_rejected")
                 self.telemetry.admitted(AdmissionOutcome.TOPIC_REJECTED)
@@ -83,6 +87,13 @@ class CreateGeneration:
         await self.queue.enqueue(job.job_id)
         self._admit(job, AdmissionOutcome.QUEUED)
         return JobCreated(job=job, quota=quota)
+
+    async def _find(self, scope: IdempotencyScope) -> StoredJob | None:
+        try:
+            return await self.store.find(scope)
+        except UnreadableJobRequestError as error:
+            message = f"{scope} was first used for a request that no longer validates"
+            raise IdempotencyKeyConflictError(message) from error
 
     async def _screen(self, request: GenerationRequest, requester: Requester, now: datetime) -> bool:
         try:

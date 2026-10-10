@@ -4,7 +4,12 @@ from typing import Unpack
 import pytest
 
 from deckly.domain.exceptions import InvalidGenerationRequestError
-from deckly.domain.generation import Difficulty, GenerationFingerprint, GenerationRequest
+from deckly.domain.generation import (
+    UNGENERATABLE_NOTE_TYPES,
+    Difficulty,
+    GenerationFingerprint,
+    GenerationRequest,
+)
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE
 from tests.domain.builders import RequestChanges, unregister
@@ -24,8 +29,10 @@ def request_with(
     )
 
 
-def test_every_registered_note_type_can_be_requested_together_with_images() -> None:
-    note_types = tuple(NOTE_FIELDS_BY_TYPE)
+def test_every_generatable_note_type_can_be_requested_together_with_images() -> None:
+    note_types = tuple(
+        note_type for note_type in NOTE_FIELDS_BY_TYPE if note_type not in UNGENERATABLE_NOTE_TYPES
+    )
 
     assert request_with(*note_types, include_images=True).note_types == note_types
 
@@ -40,10 +47,16 @@ def test_image_occlusion_without_images_is_rejected(note_types: tuple[NoteType, 
         request_with(*note_types, include_images=False)
 
 
-def test_image_occlusion_with_images_is_accepted() -> None:
-    request = request_with(NoteType.IMAGE_OCCLUSION, include_images=True)
-
-    assert request.note_types == (NoteType.IMAGE_OCCLUSION,)
+@pytest.mark.parametrize(
+    "note_types",
+    [(NoteType.IMAGE_OCCLUSION,), (NoteType.BASIC, NoteType.IMAGE_OCCLUSION)],
+    ids=["alone", "among other types"],
+)
+def test_image_occlusion_with_images_is_rejected_as_not_generated_yet(
+    note_types: tuple[NoteType, ...],
+) -> None:
+    with pytest.raises(InvalidGenerationRequestError, match="not generated yet"):
+        request_with(*note_types, include_images=True)
 
 
 def test_every_other_note_type_can_be_requested_without_images() -> None:

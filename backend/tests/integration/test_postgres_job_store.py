@@ -5,10 +5,11 @@ from dataclasses import replace
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deckly.application.exceptions import UnreadableJobRequestError
 from deckly.application.ports import IdempotencyScope, JobTransition, StoredJob
 from deckly.config import Settings
 from deckly.domain.exceptions import InvalidJobTransitionError, JobAlreadyTerminalError
@@ -356,6 +357,24 @@ async def test_find_does_not_cross_clients_or_keys(
 
     assert await store.find(replace(cleanup.scope(), idempotency_key=scope.idempotency_key)) is None
     assert await store.find(replace(scope, idempotency_key=uuid4())) is None
+
+
+async def test_find_of_a_request_saved_before_its_note_type_was_withdrawn_is_unreadable(
+    session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
+) -> None:
+    store = PostgresJobStore(session_factory)
+    scope = cleanup.scope()
+    job = new_job()
+    await store.add(job, generation_request(), scope)
+    async with session_factory.begin() as session:
+        await session.execute(
+            update(GenerationJobRow)
+            .where(GenerationJobRow.job_id == job.job_id)
+            .values(note_types=[NoteType.IMAGE_OCCLUSION], include_images=True)
+        )
+
+    with pytest.raises(UnreadableJobRequestError):
+        await store.find(scope)
 
 
 async def test_get_stored_of_an_unknown_job_is_none(

@@ -6,6 +6,8 @@ from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import fields_type_for
 from deckly.domain.text import collapse_whitespace, is_blank
 
+UNGENERATABLE_NOTE_TYPES = frozenset({NoteType.IMAGE_OCCLUSION})
+
 
 class Difficulty(StrEnum):
     BEGINNER = "beginner"
@@ -52,6 +54,12 @@ class GenerationRequest:
                 raise InvalidGenerationRequestError(message) from error
         if NoteType.IMAGE_OCCLUSION in self.note_types and not self.include_images:
             message = f"note type {NoteType.IMAGE_OCCLUSION} is only generated with includeImages"
+            raise InvalidGenerationRequestError(message)
+        ungeneratable = [
+            str(note_type) for note_type in self.note_types if note_type in UNGENERATABLE_NOTE_TYPES
+        ]
+        if ungeneratable:
+            message = f"note types {ungeneratable} are not generated yet"
             raise InvalidGenerationRequestError(message)
 
     def fingerprint(self) -> GenerationFingerprint:
