@@ -66,7 +66,7 @@ export interface paths {
         put?: never;
         /**
          * Regenerate a single rejected note
-         * @description Synchronous and cheap. Must respond within 10 seconds. Runs its own small source search, so the replacement note is sourced like any generated note. Rate limited per X-Client-Id separately from the generation job quota (429 RATE_LIMITED). A 503 is UPSTREAM_UNAVAILABLE when a provider is down, slow, rejects the request or answers with malformed data, or NO_VALID_CONTENT when no note that passes validation could be produced.
+         * @description Synchronous and cheap. Must respond within 10 seconds. Runs its own small source search, so the replacement note is sourced like any generated note. Rate limited per X-Client-Id separately from the generation job quota (429 RATE_LIMITED). The topic and the rejected note are screened together against the content policy, and a request that violates it is 422 TOPIC_REJECTED. A 503 is UPSTREAM_UNAVAILABLE when a provider or the content check is down, slow, rejects the request or answers with malformed data, or NO_VALID_CONTENT when no note that passes validation and the content check could be produced.
          */
         post: operations["regenerateNote"];
         delete?: never;
@@ -410,6 +410,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
             429: components["responses"]["Problem"];
             503: components["responses"]["Problem"];
         };

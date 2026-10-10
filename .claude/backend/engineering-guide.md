@@ -333,6 +333,10 @@ The model and search providers _will_ be slow, rate-limited or down. Design for 
   effort, so this check fails closed without failing the job: a refusal means no images, and an
   outage or an unreadable reply means no images and a result that is not cached. The image
   classifier has its own circuit breaker, so its outages never trip the text filter's.
+- `POST /notes/regenerate` gets both text checks. The topic and the rejected note are screened
+  together (`422 TOPIC_REJECTED`), alongside the search so the check costs no extra wall time, and
+  the replacement note is screened before it is returned. With only one note there is nothing to
+  drop and continue with, so a note that is not allowed is `503 NO_VALID_CONTENT`.
 - Nothing unscreened is ever shipped, text or image.
 - All three checks fail closed. A classifier refusal counts as a block, and a reply that cannot
   be read is an outage, never a pass.

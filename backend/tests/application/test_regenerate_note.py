@@ -6,6 +6,7 @@ import pytest
 
 from deckly.application.exceptions import NoValidContentError, RateLimitedError, UpstreamUnavailableError
 from deckly.application.regeneration import TIMED_OUT_RETRY_AFTER_SECONDS
+from deckly.domain.exceptions import TopicRejectedError
 from deckly.domain.generation import Difficulty
 from deckly.domain.notes.note_type import NoteType
 from tests.fakes import (
@@ -23,6 +24,13 @@ CLIENT_ID = job_id(42)
 GUARD_SECONDS = 0.05
 PROMPT_RETURN_SECONDS = 1.0
 REGENERATION_LOGGER = "deckly.application.regeneration"
+ALONGSIDE = (RegenerationStep.SEARCH, RegenerationStep.SCREEN_REQUEST)
+ORDER = list(RegenerationStep)
+
+
+def reached_through(step: RegenerationStep) -> list[RegenerationStep]:
+    last = max(ORDER.index(other) for other in ALONGSIDE) if step in ALONGSIDE else ORDER.index(step)
+    return ORDER[: last + 1]
 
 
 async def hang() -> None:
@@ -48,6 +56,8 @@ async def test_note_is_regenerated_from_freshly_searched_material() -> None:
     )
     assert providers.parsed == [(request_id, PAGES)]
     assert providers.regenerated == [(request_id, request, MATERIAL)]
+    assert providers.screened_requests == [request]
+    assert providers.screened_notes == [(request_id, search, providers.note)]
 
 
 async def test_each_call_gets_its_own_request_id() -> None:
@@ -106,7 +116,7 @@ async def test_step_that_hangs_is_cut_off_by_the_overall_guard_and_cancelled(
     assert time.monotonic() - started < PROMPT_RETURN_SECONDS
     assert raised.value.retry_after_seconds == TIMED_OUT_RETRY_AFTER_SECONDS
     assert harness.providers.cancelled == [step]
-    assert harness.providers.steps[-1] is step
+    assert harness.providers.steps == reached_through(step)
     assert [record.message for record in caplog.records] == ["note_regeneration_timed_out"]
 
 
@@ -143,3 +153,85 @@ async def test_caller_cancellation_is_not_turned_into_an_error() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert harness.providers.cancelled == [RegenerationStep.GENERATE]
+
+
+async def test_rejected_request_is_refused_before_any_material_is_parsed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = RegenerationHarness()
+    harness.providers.request_allowed = False
+
+    with (
+        caplog.at_level(logging.INFO, logger=REGENERATION_LOGGER),
+        pytest.raises(TopicRejectedError),
+    ):
+        await harness.regenerate(regeneration_request(), CLIENT_ID)
+
+    assert harness.providers.steps == [
+        RegenerationStep.LIMIT,
+        RegenerationStep.SEARCH,
+        RegenerationStep.SCREEN_REQUEST,
+    ]
+    assert harness.providers.regenerated == []
+    assert [record.message for record in caplog.records] == ["regeneration_request_rejected"]
+
+
+async def test_rejected_request_does_not_wait_for_a_slow_search() -> None:
+    harness = RegenerationHarness()
+    harness.providers.request_allowed = False
+    harness.providers.during[RegenerationStep.SEARCH] = hang
+    started = time.monotonic()
+
+    with pytest.raises(TopicRejectedError):
+        await harness.regenerate(regeneration_request(), CLIENT_ID)
+
+    assert time.monotonic() - started < PROMPT_RETURN_SECONDS
+    assert harness.providers.cancelled == [RegenerationStep.SEARCH]
+
+
+async def test_failed_search_does_not_wait_for_a_slow_request_check() -> None:
+    harness = RegenerationHarness()
+    harness.providers.failures[RegenerationStep.SEARCH] = UpstreamUnavailableError(3)
+    harness.providers.during[RegenerationStep.SCREEN_REQUEST] = hang
+    started = time.monotonic()
+
+    with pytest.raises(UpstreamUnavailableError) as raised:
+        await harness.regenerate(regeneration_request(), CLIENT_ID)
+
+    assert time.monotonic() - started < PROMPT_RETURN_SECONDS
+    assert raised.value.retry_after_seconds == 3
+    assert harness.providers.cancelled == [RegenerationStep.SCREEN_REQUEST]
+
+
+async def test_request_check_runs_while_the_search_is_still_waiting() -> None:
+    harness = RegenerationHarness()
+    screened = asyncio.Event()
+
+    async def wait_for_the_check() -> None:
+        await screened.wait()
+
+    async def signal_screened() -> None:
+        screened.set()
+
+    harness.providers.during[RegenerationStep.SEARCH] = wait_for_the_check
+    harness.providers.during[RegenerationStep.SCREEN_REQUEST] = signal_screened
+
+    note = await asyncio.wait_for(
+        harness.regenerate(regeneration_request(), CLIENT_ID), PROMPT_RETURN_SECONDS
+    )
+
+    assert note is harness.providers.note
+
+
+async def test_blocked_note_is_no_valid_content_and_never_returned(caplog: pytest.LogCaptureFixture) -> None:
+    harness = RegenerationHarness()
+    harness.providers.note_allowed = False
+
+    with (
+        caplog.at_level(logging.WARNING, logger=REGENERATION_LOGGER),
+        pytest.raises(NoValidContentError),
+    ):
+        await harness.regenerate(regeneration_request(), CLIENT_ID)
+
+    assert harness.providers.steps == ORDER
+    assert [record.message for record in caplog.records] == ["regenerated_note_blocked"]

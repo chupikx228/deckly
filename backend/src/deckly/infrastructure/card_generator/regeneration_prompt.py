@@ -50,9 +50,13 @@ MAX_REJECTED_CARD_CHARACTERS = 2000
 MARKUP_ESCAPES = str.maketrans({"<": "\\u003c", ">": "\\u003e"})
 
 
-def rejected_card(fields: Mapping[str, object]) -> str:
+def shown_rejected_card(fields: Mapping[str, object]) -> str:
     rendered = json.dumps(dict(fields), ensure_ascii=False, default=str).translate(MARKUP_ESCAPES)
-    return f"<rejected_card>\n{rendered[:MAX_REJECTED_CARD_CHARACTERS]}\n</rejected_card>"
+    return rendered[:MAX_REJECTED_CARD_CHARACTERS]
+
+
+def rejected_card(fields: Mapping[str, object]) -> str:
+    return f"<rejected_card>\n{shown_rejected_card(fields)}\n</rejected_card>"
 
 
 def system_prompt(handler: NoteTypeHandler) -> str:

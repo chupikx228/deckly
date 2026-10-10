@@ -280,18 +280,27 @@ generation job; the regenerated note may therefore cite different pages than the
 A replacement that asks the same thing as the rejected note is discarded. Nothing is cached,
 stored or queued: no job is created.
 
+The content policy applies here as it does to a job, at both ends. The topic and the rejected
+note's fields (its first 2000 characters, exactly what the model is shown) are screened together,
+because the rejected note steers the model the way `instructions` do in a job. The replacement
+note is screened again before it is returned. Both checks fail closed: a classifier refusal
+counts as a block.
+
 - `noteType: image_occlusion` is rejected with `400 VALIDATION_FAILED`, because the note is built
   on an image the request does not carry.
 - `rejectedNote.fields` is treated as untrusted data. It is not validated against `noteType`, and
   only its first 2000 characters are shown to the model.
+- `422 TOPIC_REJECTED` when the topic or the rejected note violates the content policy. The call
+  still counts against the regeneration budget.
 - `429 RATE_LIMITED` when the client has used up its regeneration budget (see "Quota"), with
   `retryAfterSeconds` set to when the window resets.
-- `503 UPSTREAM_UNAVAILABLE` when the search or model provider fails, rejects the request (for
-  example a bad API key), answers with malformed data, is too slow for the 10-second budget, or its
-  circuit breaker is open; `retryAfterSeconds` is set. A provider problem is never a `500`: that
-  status is reserved for a bug in this service.
-- `503 NO_VALID_CONTENT` when the search found nothing usable or the model produced no note that
-  passes validation. Tapping regenerate again may succeed.
+- `503 UPSTREAM_UNAVAILABLE` when the search, model or content-check provider fails, rejects the
+  request (for example a bad API key), answers with malformed data, is too slow for the 10-second
+  budget, or its circuit breaker is open; `retryAfterSeconds` is set. A provider problem is never a
+  `500`: that status is reserved for a bug in this service.
+- `503 NO_VALID_CONTENT` when the search found nothing usable, the model produced no note that
+  passes validation, or the content check did not allow the note it produced. The note is never
+  returned. Tapping regenerate again may succeed.
 
 ### `GET /v1/health`
 
@@ -476,7 +485,7 @@ localised and is for logs.
 | Code                       | Status              | Meaning                                           |
 | -------------------------- | ------------------- | ------------------------------------------------- |
 | `VALIDATION_FAILED`        | 400                 | Request body failed validation                    |
-| `TOPIC_REJECTED`           | 422                 | Topic violates the content policy                 |
+| `TOPIC_REJECTED`           | 422                 | Topic (or rejected note) violates content policy  |
 | `RATE_LIMITED`             | 429                 | A job or regeneration budget is used up; "Quota"  |
 | `JOB_NOT_FOUND`            | 404                 | Unknown job id                                    |
 | `JOB_ALREADY_TERMINAL`     | 409                 | Cancel on a finished job                          |
@@ -539,7 +548,7 @@ carry an `Allow` header listing the methods the path does accept.
    least one source the user can check its claims against, and a note the backend cannot
    source is dropped (see "Sources" below). The content policy still applies: a topic that
    violates it is rejected with `TOPIC_REJECTED`, and generated content is filtered before it
-   reaches the client.
+   reaches the client. Both hold for `POST /notes/regenerate` too.
 2. **Images — found by the model / image search.** `includeImages` triggers the model to source
    images. The contract's media rules are the hard constraint on this: every returned image
    carries a real `license` and `alt`, and an image whose licence cannot be established is not

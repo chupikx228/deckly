@@ -696,8 +696,10 @@ class Harness:
 class RegenerationStep(StrEnum):
     LIMIT = "limit"
     SEARCH = "search"
+    SCREEN_REQUEST = "screen_request"
     PARSE = "parse"
     GENERATE = "generate"
+    SCREEN_NOTE = "screen_note"
 
 
 def regeneration_request(
@@ -720,6 +722,10 @@ class FakeRegeneration:
         self.searched: list[tuple[UUID, GenerationRequest]] = []
         self.parsed: list[tuple[UUID, tuple[RetrievedPage, ...]]] = []
         self.regenerated: list[tuple[UUID, RegenerationRequest, tuple[SourceMaterial, ...]]] = []
+        self.request_allowed = True
+        self.note_allowed = True
+        self.screened_requests: list[RegenerationRequest] = []
+        self.screened_notes: list[tuple[UUID, GenerationRequest, Note]] = []
         self.cancelled: list[RegenerationStep] = []
         self.failures: dict[RegenerationStep, Exception] = {}
         self.during: dict[RegenerationStep, Hook] = {}
@@ -748,6 +754,16 @@ class FakeRegeneration:
         await self._reach(RegenerationStep.GENERATE)
         return self.note
 
+    async def allows_request(self, request: RegenerationRequest) -> bool:
+        self.screened_requests.append(request)
+        await self._reach(RegenerationStep.SCREEN_REQUEST)
+        return self.request_allowed
+
+    async def allows_note(self, request_id: UUID, request: GenerationRequest, note: Note) -> bool:
+        self.screened_notes.append((request_id, request, note))
+        await self._reach(RegenerationStep.SCREEN_NOTE)
+        return self.note_allowed
+
     async def _reach(self, step: RegenerationStep) -> None:
         self.steps.append(step)
         hook = self.during.get(step)
@@ -772,6 +788,7 @@ class RegenerationHarness:
             retriever=self.providers,
             parser=self.providers,
             regenerator=self.providers,
+            moderator=self.providers,
             clock=lambda: self.now,
             new_request_id=lambda: next(ids),
             timeout_seconds=timeout_seconds,

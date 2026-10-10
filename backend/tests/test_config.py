@@ -153,8 +153,10 @@ REGENERATE_ENVIRONMENT = {
     "DECKLY_REGENERATE_SEARCH_TIMEOUT_SECONDS": "2.5",
     "DECKLY_REGENERATE_SEARCH_MAX_RESULTS": "3",
     "DECKLY_REGENERATE_SEARCH_MAX_SOURCE_CHARACTERS": "4000",
-    "DECKLY_REGENERATE_MODEL_TIMEOUT_SECONDS": "5.5",
+    "DECKLY_REGENERATE_MODEL_TIMEOUT_SECONDS": "4.5",
     "DECKLY_REGENERATE_MODEL_MAX_OUTPUT_TOKENS": "1000",
+    "DECKLY_REGENERATE_REQUEST_MODERATION_TIMEOUT_SECONDS": "2.5",
+    "DECKLY_REGENERATE_NOTE_MODERATION_TIMEOUT_SECONDS": "1.5",
 }
 SWEEP_ENVIRONMENT = {
     "DECKLY_SWEEP_INTERVAL_MINUTES": "5",
@@ -581,6 +583,8 @@ def test_every_regenerate_setting_is_required(clean_environment: pytest.MonkeyPa
         "DECKLY_REGENERATE_RATE_LIMIT_TIMEOUT_SECONDS",
         "DECKLY_REGENERATE_SEARCH_TIMEOUT_SECONDS",
         "DECKLY_REGENERATE_MODEL_TIMEOUT_SECONDS",
+        "DECKLY_REGENERATE_REQUEST_MODERATION_TIMEOUT_SECONDS",
+        "DECKLY_REGENERATE_NOTE_MODERATION_TIMEOUT_SECONDS",
     ],
 )
 @pytest.mark.parametrize("value", ["0", "-0.5", "nan", "inf"])
@@ -637,12 +641,46 @@ def test_regenerate_budget_that_exactly_fills_the_note_timeout_with_the_margin_i
     assert settings.regenerate.budgeted_seconds == settings.limits.regenerate_note_timeout_seconds
 
 
+def test_regenerate_budget_that_fills_the_note_timeout_only_after_float_rounding_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_from_environment(
+        clean_environment,
+        DECKLY_REGENERATE_RATE_LIMIT_TIMEOUT_SECONDS="0.2",
+        DECKLY_REGENERATE_SEARCH_TIMEOUT_SECONDS="2.6",
+        DECKLY_REGENERATE_REQUEST_MODERATION_TIMEOUT_SECONDS="2.6",
+        DECKLY_REGENERATE_MODEL_TIMEOUT_SECONDS="4.9",
+        DECKLY_REGENERATE_NOTE_MODERATION_TIMEOUT_SECONDS="1.3",
+    )
+
+    assert settings.regenerate.budgeted_seconds == settings.limits.regenerate_note_timeout_seconds
+
+
+def test_request_check_shares_its_slot_with_the_search_instead_of_adding_to_it(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_from_environment(
+        clean_environment,
+        DECKLY_REGENERATE_SEARCH_TIMEOUT_SECONDS="0.5",
+        DECKLY_REGENERATE_REQUEST_MODERATION_TIMEOUT_SECONDS="0.5",
+        DECKLY_REGENERATE_MODEL_TIMEOUT_SECONDS="6.5",
+    )
+
+    assert settings.regenerate.budgeted_seconds == settings.limits.regenerate_note_timeout_seconds
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"DECKLY_REGENERATE_MODEL_TIMEOUT_SECONDS": "5.6"},
+        {"DECKLY_REGENERATE_MODEL_TIMEOUT_SECONDS": "4.6"},
         {"DECKLY_REGENERATE_SEARCH_TIMEOUT_SECONDS": "2.6"},
         {"DECKLY_REGENERATE_RATE_LIMIT_TIMEOUT_SECONDS": "0.6"},
+        {"DECKLY_REGENERATE_NOTE_MODERATION_TIMEOUT_SECONDS": "1.6"},
+        {"DECKLY_REGENERATE_REQUEST_MODERATION_TIMEOUT_SECONDS": "2.6"},
+        {
+            "DECKLY_REGENERATE_SEARCH_TIMEOUT_SECONDS": "0.5",
+            "DECKLY_REGENERATE_REQUEST_MODERATION_TIMEOUT_SECONDS": "3.5",
+        },
         {"DECKLY_LIMIT_REGENERATE_NOTE_TIMEOUT_SECONDS": "9"},
         {"DECKLY_REGENERATE_MODEL_TIMEOUT_SECONDS": "10"},
     ],

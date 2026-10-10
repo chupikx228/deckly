@@ -62,6 +62,8 @@ class ProviderOperation(StrEnum):
     IMAGE_SEARCH = "image_search"
     NOTE_REGENERATION = "note_regeneration"
     REGENERATION_SEARCH = "regeneration_search"
+    REGENERATION_REQUEST_MODERATION = "regeneration_request_moderation"
+    REGENERATION_NOTE_MODERATION = "regeneration_note_moderation"
 
 
 class AttemptOutcome(StrEnum):

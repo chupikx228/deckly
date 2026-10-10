@@ -241,7 +241,16 @@ def test_rate_limited_client_gets_a_429_with_when_to_retry() -> None:
     assert response.headers[RETRY_AFTER_HEADER] == "600"
 
 
-@pytest.mark.parametrize("step", [RegenerationStep.LIMIT, RegenerationStep.SEARCH, RegenerationStep.GENERATE])
+@pytest.mark.parametrize(
+    "step",
+    [
+        RegenerationStep.LIMIT,
+        RegenerationStep.SEARCH,
+        RegenerationStep.SCREEN_REQUEST,
+        RegenerationStep.GENERATE,
+        RegenerationStep.SCREEN_NOTE,
+    ],
+)
 def test_provider_outage_is_a_503_with_when_to_retry(step: RegenerationStep) -> None:
     harness = RegenerationHarness()
     harness.providers.failures[step] = UpstreamUnavailableError(4)
@@ -265,6 +274,30 @@ def test_model_output_with_no_usable_note_is_a_503_no_valid_content() -> None:
     assert "retryAfterSeconds" not in body
 
 
+def test_rejected_topic_or_rejected_card_is_a_422_topic_rejected() -> None:
+    harness = RegenerationHarness()
+    harness.providers.request_allowed = False
+
+    response = post(build_client(harness), MINIMAL)
+
+    body = assert_problem(response, HTTPStatus.UNPROCESSABLE_ENTITY, "TOPIC_REJECTED")
+    assert_declared(response)
+    assert "retryAfterSeconds" not in body
+    assert harness.providers.regenerated == []
+
+
+def test_regenerated_note_the_content_check_blocks_is_a_503_no_valid_content() -> None:
+    harness = RegenerationHarness()
+    harness.providers.note_allowed = False
+
+    response = post(build_client(harness), MINIMAL)
+
+    body = assert_problem(response, HTTPStatus.SERVICE_UNAVAILABLE, "NO_VALID_CONTENT")
+    assert_declared(response)
+    assert "retryAfterSeconds" not in body
+    assert "fields" not in body
+
+
 def test_unexpected_failure_is_a_clean_internal_error_problem() -> None:
     harness = RegenerationHarness()
     harness.providers.failures[RegenerationStep.PARSE] = RuntimeError("bug")
@@ -279,7 +312,7 @@ def test_other_methods_are_not_allowed() -> None:
 
 
 def test_spec_declares_every_status_this_endpoint_can_answer_with_a_problem() -> None:
-    assert {"200", "400", "429", "503"} <= set(declared_responses(SPEC_PATH, SPEC_METHOD))
+    assert {"200", "400", "422", "429", "503"} <= set(declared_responses(SPEC_PATH, SPEC_METHOD))
 
 
 def test_rejected_fields_with_nul_and_lone_surrogates_are_accepted_as_data() -> None:
@@ -296,6 +329,21 @@ def test_rejected_fields_with_nul_and_lone_surrogates_are_accepted_as_data() -> 
     assert_regenerated(response)
     [(_, request, _)] = harness.providers.regenerated
     assert request.rejected_fields == {"front": "a\x00b", "back": "\ud800x\udfff"}
+
+
+def test_topic_of_lone_surrogates_that_would_leave_no_deck_title_is_validation_failed() -> None:
+    harness = RegenerationHarness()
+    content = (
+        '{"topic": "\\ud800\\ud800\\ud800", "language": "ru", "noteType": "basic", "reason": "incorrect", '
+        '"rejectedNote": {"fields": {"front": "a", "back": "b"}}}'
+    )
+
+    response = build_client(harness).post(
+        ENDPOINT, content=content, headers={**VALID_HEADERS, "content-type": "application/json"}
+    )
+
+    assert_validation_failed(response)
+    assert harness.providers.steps == []
 
 
 UNPARSEABLE_BODIES: dict[str, str | bytes] = {
