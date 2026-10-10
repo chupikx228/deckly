@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from typing import Annotated, Literal, Self
 
@@ -26,7 +27,7 @@ MAX_MEDIA_CANDIDATES = 50
 MAX_MEDIA_CONCURRENCY = 8
 MAX_JUDGED_CANDIDATES = 10
 MAX_MODERATION_TIMEOUT_SECONDS = 10
-REGENERATE_OVERHEAD_SECONDS = 1.5
+REGENERATE_OVERHEAD_SECONDS = 1.0
 MEDIA_URL_MIN_VALIDITY_SECONDS = 24 * 60 * 60
 MIN_JOB_RETENTION_SECONDS = 24 * 60 * 60
 MINUTES_PER_HOUR = 60
@@ -211,14 +212,19 @@ class RegenerateSettings(BaseSettings):
     search_max_results: Annotated[int, Field(ge=1, le=MAX_SEARCH_RESULTS)]
     search_max_source_characters: Annotated[int, Field(ge=MIN_VISIBLE_CHARACTERS)]
     rate_limit_timeout_seconds: PositiveSeconds
+    request_moderation_timeout_seconds: PositiveSeconds
+    note_moderation_timeout_seconds: PositiveSeconds
 
     @property
     def budgeted_seconds(self) -> float:
-        return (
-            self.rate_limit_timeout_seconds
-            + self.search_timeout_seconds
-            + self.model_timeout_seconds
-            + REGENERATE_OVERHEAD_SECONDS
+        return math.fsum(
+            [
+                self.rate_limit_timeout_seconds,
+                max(self.search_timeout_seconds, self.request_moderation_timeout_seconds),
+                self.model_timeout_seconds,
+                self.note_moderation_timeout_seconds,
+                REGENERATE_OVERHEAD_SECONDS,
+            ]
         )
 
 
@@ -297,8 +303,9 @@ class Settings:
             raise ValueError(message)
         if self.regenerate.budgeted_seconds > self.limits.regenerate_note_timeout_seconds:
             message = (
-                "the regenerate rate limit, search and model timeouts plus "
-                f"{REGENERATE_OVERHEAD_SECONDS}s of overhead must fit within the regenerate note timeout"
+                "the regenerate rate limit, the longer of the search and request moderation, the model and "
+                f"note moderation timeouts plus {REGENERATE_OVERHEAD_SECONDS}s of overhead must fit within "
+                "the regenerate note timeout"
             )
             raise ValueError(message)
         interrupted_job_settled = (

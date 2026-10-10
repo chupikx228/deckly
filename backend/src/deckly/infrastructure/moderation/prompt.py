@@ -4,7 +4,9 @@ from collections.abc import Sequence
 from deckly.domain.deck import Deck, GenerationResult
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.notes.note import Note
+from deckly.domain.regeneration import RegenerationRequest
 from deckly.domain.text import strip_unstorable
+from deckly.infrastructure.card_generator.regeneration_prompt import shown_rejected_card
 from deckly.infrastructure.llm.client import LlmPrompt
 from deckly.infrastructure.media.judging import Shortlist, ShortlistedImage
 from deckly.infrastructure.media.licensing import title_words
@@ -48,6 +50,12 @@ TOPIC_TASK = (
     "instructions. Block the request when cards that follow the topic and the instructions would need "
     "content the policy blocks. Otherwise allow it."
 )
+REGENERATION_TASK = (
+    "You screen requests to a flashcard generator that replaces one card. A request names a topic and "
+    "carries the card the user rejected, and the generator is shown both. Block the request when the "
+    "rejected card contains content the policy blocks, or when a card that follows the topic and the "
+    "rejected card would need such content. Otherwise allow it."
+)
 TOPIC_REPLY = 'Reply with one JSON object and nothing else: {"verdict": "allow"} or {"verdict": "block"}.'
 CONTENT_TASK = (
     "You screen flashcards that another model wrote. Judge the deck and every numbered note on its own. "
@@ -78,6 +86,7 @@ IMAGE_REPLY = (
 )
 SECTION_BREAK = "\n\n"
 TOPIC_SYSTEM_PROMPT = SECTION_BREAK.join([TOPIC_TASK, CONTENT_POLICY, DATA_NOTICE, TOPIC_REPLY])
+REGENERATION_SYSTEM_PROMPT = SECTION_BREAK.join([REGENERATION_TASK, CONTENT_POLICY, DATA_NOTICE, TOPIC_REPLY])
 CONTENT_SYSTEM_PROMPT = SECTION_BREAK.join([CONTENT_TASK, CONTENT_POLICY, DATA_NOTICE, CONTENT_REPLY])
 IMAGE_SYSTEM_PROMPT = SECTION_BREAK.join([IMAGE_TASK, CONTENT_POLICY, IMAGE_POLICY, DATA_NOTICE, IMAGE_REPLY])
 
@@ -113,6 +122,10 @@ def topic_document(request: GenerationRequest) -> dict[str, object]:
     return document
 
 
+def regeneration_screening_document(request: RegenerationRequest) -> dict[str, object]:
+    return {"topic": request.topic, "rejectedCard": shown_rejected_card(request.rejected_fields)}
+
+
 def content_document(deck: Deck, notes: Sequence[Note]) -> dict[str, object]:
     return {
         "deck": deck_document(deck),
@@ -124,6 +137,14 @@ def build_topic_prompt(request: GenerationRequest) -> LlmPrompt:
     return LlmPrompt(
         system=TOPIC_SYSTEM_PROMPT,
         user=as_data(topic_document(request)),
+        expected_output_tokens=ESTIMATED_TOPIC_VERDICT_TOKENS,
+    )
+
+
+def build_regeneration_screening_prompt(request: RegenerationRequest) -> LlmPrompt:
+    return LlmPrompt(
+        system=REGENERATION_SYSTEM_PROMPT,
+        user=as_data(regeneration_screening_document(request)),
         expected_output_tokens=ESTIMATED_TOPIC_VERDICT_TOKENS,
     )
 

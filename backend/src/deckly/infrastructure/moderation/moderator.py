@@ -8,13 +8,21 @@ from types import MappingProxyType
 from uuid import UUID
 
 from deckly.application.exceptions import UpstreamUnavailableError
+from deckly.application.ports import ContentModerator
 from deckly.domain.deck import GenerationResult
 from deckly.domain.generation import GenerationRequest
+from deckly.domain.notes.note import Note
+from deckly.domain.regeneration import RegenerationRequest
 from deckly.infrastructure.card_generator.deck import repair_deck
 from deckly.infrastructure.card_generator.extraction import first_opening
 from deckly.infrastructure.card_generator.untrusted import JsonObject, as_object
 from deckly.infrastructure.llm.client import LlmClient, LlmError, LlmReply, LlmStop
-from deckly.infrastructure.moderation.prompt import build_content_prompt, build_topic_prompt, note_number
+from deckly.infrastructure.moderation.prompt import (
+    build_content_prompt,
+    build_regeneration_screening_prompt,
+    build_topic_prompt,
+    note_number,
+)
 from deckly.infrastructure.provider_faults import PROVIDER_FAULT_RETRY_AFTER_SECONDS
 
 logger = logging.getLogger(__name__)
@@ -156,3 +164,21 @@ class LlmContentModerator:
         )
         deck = result.deck if deck_allowed else repair_deck(NO_DECK_REPLACEMENT, request.topic)
         return GenerationResult(deck=deck, notes=kept)
+
+
+@dataclass(frozen=True, slots=True)
+class LlmRegenerationModerator:
+    llm: LlmClient
+    content: ContentModerator
+
+    async def allows_request(self, request: RegenerationRequest) -> bool:
+        with moderation_faults_as_upstream({"subject": "regeneration_request"}):
+            reply = await self.llm.complete(build_regeneration_screening_prompt(request))
+            verdict = topic_verdict(reply)
+        logger.info("regeneration_request_screened", extra={"verdict": verdict, "reply_stop": reply.stop})
+        return verdict is Verdict.ALLOW
+
+    async def allows_note(self, request_id: UUID, request: GenerationRequest, note: Note) -> bool:
+        result = GenerationResult(deck=repair_deck(NO_DECK_REPLACEMENT, request.topic), notes=(note,))
+        screened = await self.content.screen(request_id, request, result)
+        return note in screened.notes

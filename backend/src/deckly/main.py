@@ -10,7 +10,7 @@ from deckly.application.generations import CancelGeneration, CreateGeneration, G
 from deckly.application.health import CheckHealth
 from deckly.application.ports import RegenerationLimiter
 from deckly.application.regeneration import RegenerateNote
-from deckly.config import Settings, load_settings
+from deckly.config import ProviderSettings, Settings, load_settings
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.card_generator.regenerator import LlmNoteRegenerator
 from deckly.infrastructure.clock import utc_now
@@ -20,7 +20,11 @@ from deckly.infrastructure.job_store import BoundedJobStore, PostgresJobStore
 from deckly.infrastructure.llm.client import LlmClient, LlmEndpoint
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.logging import configure_logging
-from deckly.infrastructure.moderation.moderator import LlmTopicModerator
+from deckly.infrastructure.moderation.moderator import (
+    LlmContentModerator,
+    LlmRegenerationModerator,
+    LlmTopicModerator,
+)
 from deckly.infrastructure.observability.exposition import (
     METRICS_CONTENT_TYPE,
     METRICS_PATH,
@@ -32,7 +36,7 @@ from deckly.infrastructure.provider_faults import UpstreamFaultRegenerator, Upst
 from deckly.infrastructure.queue import ArqJobQueue, create_queue_pool, create_redis_settings
 from deckly.infrastructure.quota import QuotaLimits, RedisGenerationQuota
 from deckly.infrastructure.rate_limit import RedisRegenerationLimiter, RegenerationWindow
-from deckly.infrastructure.resilience import ProviderOperation, RetryPolicy
+from deckly.infrastructure.resilience import ProviderOperation, ProviderProbe, RetryPolicy
 from deckly.infrastructure.search.client import SearchClient, SearchEndpoint
 from deckly.infrastructure.search.parser import CleaningSourceParser
 from deckly.infrastructure.search.retriever import WebSourceRetriever
@@ -62,6 +66,7 @@ Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
 class RegenerationClients:
     llm: LlmClient
     search: SearchClient
+    moderation_llm: LlmClient
     limiter: RegenerationLimiter
     observability: Observability
 
@@ -87,21 +92,65 @@ def regeneration_llm_client(settings: Settings) -> LlmClient:
     return LLM_CLIENTS[settings.providers.model_provider](endpoint)
 
 
+def single_attempt_moderation(
+    providers: ProviderSettings, llm: LlmClient, timeout_seconds: float, probe: ProviderProbe
+) -> ResilientLlmClient:
+    caller = resilient_caller(
+        single_attempt(
+            timeout_seconds,
+            base_delay_seconds=providers.model_retry_base_delay_seconds,
+            max_delay_seconds=providers.model_retry_max_delay_seconds,
+        ),
+        probe,
+        failure_threshold=providers.model_circuit_failure_threshold,
+        reset_seconds=providers.model_circuit_reset_seconds,
+    )
+    return ResilientLlmClient(llm, caller, providers.moderation_max_output_tokens)
+
+
 def build_topic_moderator(
     settings: Settings, llm: LlmClient, observability: Observability
 ) -> LlmTopicModerator:
     providers = settings.providers
-    caller = resilient_caller(
-        single_attempt(
+    return LlmTopicModerator(
+        llm=single_attempt_moderation(
+            providers,
+            llm,
             providers.moderation_timeout_seconds,
-            base_delay_seconds=providers.model_retry_base_delay_seconds,
-            max_delay_seconds=providers.model_retry_max_delay_seconds,
-        ),
-        observability.probe(ProviderOperation.TOPIC_MODERATION),
-        failure_threshold=providers.model_circuit_failure_threshold,
-        reset_seconds=providers.model_circuit_reset_seconds,
+            observability.probe(ProviderOperation.TOPIC_MODERATION),
+        )
     )
-    return LlmTopicModerator(llm=ResilientLlmClient(llm, caller, providers.moderation_max_output_tokens))
+
+
+def build_regeneration_moderator(
+    settings: Settings, clients: RegenerationClients
+) -> LlmRegenerationModerator:
+    regenerate = settings.regenerate
+    probe = clients.observability.probe
+    return LlmRegenerationModerator(
+        llm=single_attempt_moderation(
+            settings.providers,
+            clients.moderation_llm,
+            regenerate.request_moderation_timeout_seconds,
+            probe(ProviderOperation.REGENERATION_REQUEST_MODERATION),
+        ),
+        content=LlmContentModerator(
+            llm=single_attempt_moderation(
+                settings.providers,
+                clients.moderation_llm,
+                regenerate.note_moderation_timeout_seconds,
+                probe(ProviderOperation.REGENERATION_NOTE_MODERATION),
+            )
+        ),
+    )
+
+
+def regeneration_moderation_llm_client(settings: Settings) -> LlmClient:
+    regenerate = settings.regenerate
+    return moderation_llm_client(
+        settings.providers,
+        max(regenerate.request_moderation_timeout_seconds, regenerate.note_moderation_timeout_seconds),
+    )
 
 
 def regeneration_search_client(settings: Settings) -> SearchClient:
@@ -155,6 +204,7 @@ def build_regenerate_note(settings: Settings, clients: RegenerationClients) -> R
                 handlers=NOTE_TYPE_HANDLERS,
             )
         ),
+        moderator=build_regeneration_moderator(settings, clients),
         clock=utc_now,
         new_request_id=uuid4,
         timeout_seconds=settings.limits.regenerate_note_timeout_seconds,
@@ -241,6 +291,8 @@ def build_lifespan(settings: Settings, observability: Observability) -> Lifespan
                         settings.providers, settings.providers.moderation_timeout_seconds
                     )
                     clients.push_async_callback(moderation_llm.aclose)
+                    regeneration_moderation_llm = regeneration_moderation_llm_client(settings)
+                    clients.push_async_callback(regeneration_moderation_llm.aclose)
                     setattr(
                         app.state,
                         CREATE_GENERATION_STATE,
@@ -267,6 +319,7 @@ def build_lifespan(settings: Settings, observability: Observability) -> Lifespan
                             RegenerationClients(
                                 llm=llm,
                                 search=search,
+                                moderation_llm=regeneration_moderation_llm,
                                 limiter=RedisRegenerationLimiter(queue, window, observability.metrics),
                                 observability=observability,
                             ),

@@ -318,18 +318,40 @@ through the same extraction and the same per-note validation as a job (`NoteDraf
 type, mismatched fields, no citable source or a repeat of the rejected note are dropped, and the
 first note that survives is returned. None surviving is `503 NO_VALID_CONTENT`.
 
+Both content checks from "Content safety" run here (`LlmRegenerationModerator`). The request
+check judges the topic together with the rejected card, cut where the model sees it, the same way
+the job's topic check judges the topic with the instructions; a block is `422 TOPIC_REJECTED`. It
+runs alongside the search, and whichever of the two fails first cancels the other. The note check
+hands the one note to the job's `LlmContentModerator` unchanged; a note without an explicit allow
+is `503 NO_VALID_CONTENT` and is never returned.
+
 The call must answer within `DECKLY_LIMIT_REGENERATE_NOTE_TIMEOUT_SECONDS` (10). Each step has its
 own `DECKLY_REGENERATE_*` timeout, separate from the job settings: the rate-limit check in Redis
-(0.5 s), the search (2.5 s) and the model (5.5 s). Settings refuse to load unless those three
-plus 1.5 s for parsing, validation and the response fit within the total. Search and model get
-**one attempt each, no retry**: a second attempt after a timeout cannot fit in what is left, and
-one that follows an instant `429`/`5xx` is better left to the user tapping again, told when by
-`retryAfterSeconds`. Timeouts, transient errors and an open circuit are `503
-UPSTREAM_UNAVAILABLE`. Each step already has its own timeout; on top of that, the whole use
-case runs under `asyncio.timeout` of the total, which cancels whatever is still running and
-answers 503. Search and model calls go through their own circuit breakers in the API process,
-configured with the job's `DECKLY_PROVIDER_*_CIRCUIT_*` values; breaker state is per process, so
-it is not shared with the worker's. The model's output is capped at
+(0.5 s), the search (2.5 s), the request check (`REQUEST_MODERATION_TIMEOUT_SECONDS`, 2.5 s), the
+model (4.5 s) and the note check (`NOTE_MODERATION_TIMEOUT_SECONDS`, 1.5 s). Settings refuse to
+load unless the rate limit, the longer of the search and the request check, the model, the note
+check and 1.0 s for parsing, validation and the response fit within the total:
+0.5 + 2.5 + 4.5 + 1.5 + 1.0 = 10. The request check runs alongside the search, so it may take as
+long as the search does at no cost to the total.
+
+The split is not measured for every provider. On deepseek-flash (October 2026, through this
+wiring, cold connections included) the search took 0.2–1.6 s, the request check 0.8–1.6 s, the
+note check 0.9–1.2 s and the model 1.5–3.6 s for most replies, with one useful reply at 4.9 s.
+About one call in four ran into the 1000-token output cap at about 5.1 s with no content at all,
+which no timeout rescues. The model went from 5.5 s to 4.5 s, taking the 1.0 s from the overhead,
+which parsing three short pages does not need, rather than from the model, whose latency varies
+most between providers. `tests/live/test_regeneration_live.py` (`make test-live`) times every step
+against the configured provider and fails when one does not fit its timeout: run it after
+switching provider or model.
+
+Search, model and both checks get **one attempt each, no retry**: a second attempt after a timeout
+cannot fit in what is left, and one that follows an instant `429`/`5xx` is better left to the
+user tapping again, told when by `retryAfterSeconds`. Timeouts, transient errors and an open
+circuit are `503 UPSTREAM_UNAVAILABLE`. Each step already has its own timeout; on top of that, the
+whole use case runs under `asyncio.timeout` of the total, which cancels whatever is still running
+and answers 503. Search, model and each check go through their own circuit breakers in the API
+process, configured with the job's `DECKLY_PROVIDER_*_CIRCUIT_*` values (the checks use the
+model's); breaker state is per process, so it is not shared with the worker's. The model's output is capped at
 `DECKLY_REGENERATE_MODEL_MAX_OUTPUT_TOKENS`, and the search keeps at most
 `DECKLY_REGENERATE_SEARCH_MAX_RESULTS` pages of `DECKLY_REGENERATE_SEARCH_MAX_SOURCE_CHARACTERS`,
 so the prompt stays small enough for a quick reply.
@@ -435,7 +457,7 @@ MAX_ATTEMPTS}`, and the deadline counts towards the generation job timeout. The 
 All three checks fail closed: a refusal from the classifier counts as a block (for images: no
 images). Circuit-breaker and retry-delay settings are shared with `DECKLY_PROVIDER_MODEL_*`, but
 each check has its own breaker, so an image classifier outage never fails a job at the content
-filter. `POST /v1/notes/regenerate` is not screened yet (DEC-47).
+filter. `POST /v1/notes/regenerate` runs the topic and content checks too; see "Note regeneration".
 
 ## Observability
 
@@ -546,6 +568,11 @@ OpenTelemetry API and SDK, with spans created by hand rather than by instrumenta
 ```
 POST /v1/generations                        (API, one per request)
 └── provider.call topic_moderation
+POST /v1/notes/regenerate                   (API, one per request)
+├── provider.call regeneration_search       (concurrent with the request check)
+├── provider.call regeneration_request_moderation
+├── provider.call note_regeneration
+└── provider.call regeneration_note_moderation
 generation.run                              (worker, child of the POST through the queued job)
 ├── generation.stage.planning             (the cache lookup)
 ├── generation.stage.retrieving_sources

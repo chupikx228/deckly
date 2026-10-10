@@ -1,13 +1,20 @@
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from uuid import UUID
 
 from deckly.application.correlation import REQUEST_ID, correlated
-from deckly.application.exceptions import UpstreamUnavailableError
+from deckly.application.exceptions import NoValidContentError, UpstreamUnavailableError
 from deckly.application.generations import Clock
-from deckly.application.ports import NoteRegenerator, RegenerationLimiter, SourceParser, SourceRetriever
+from deckly.application.ports import (
+    NoteRegenerator,
+    RegenerationLimiter,
+    RegenerationModerator,
+    SourceParser,
+    SourceRetriever,
+)
+from deckly.domain.exceptions import TopicRejectedError
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.notes.note import Note
 from deckly.domain.regeneration import RegenerationRequest
@@ -32,12 +39,23 @@ def retrieval_request(request: RegenerationRequest) -> GenerationRequest:
     )
 
 
+async def alongside[T](work: Coroutine[object, object, T], check: Coroutine[object, object, None]) -> T:
+    try:
+        async with asyncio.TaskGroup() as group:
+            result = group.create_task(work)
+            group.create_task(check)
+    except BaseExceptionGroup as failures:
+        raise failures.exceptions[0] from None
+    return result.result()
+
+
 @dataclass(frozen=True, slots=True)
 class RegenerateNote:
     limiter: RegenerationLimiter
     retriever: SourceRetriever
     parser: SourceParser
     regenerator: NoteRegenerator
+    moderator: RegenerationModerator
     clock: Clock
     new_request_id: RequestIdFactory
     timeout_seconds: float
@@ -58,6 +76,19 @@ class RegenerateNote:
     async def _regenerate(self, request_id: UUID, request: RegenerationRequest, client_id: UUID) -> Note:
         await self.limiter.acquire(client_id, self.clock())
         search = retrieval_request(request)
-        pages = await self.retriever.retrieve(request_id, search)
+        pages = await alongside(
+            self.retriever.retrieve(request_id, search), self._screen_request(request_id, request)
+        )
         material = await self.parser.parse(request_id, search, pages)
-        return await self.regenerator.regenerate(request_id, request, material)
+        note = await self.regenerator.regenerate(request_id, request, material)
+        if not await self.moderator.allows_note(request_id, search, note):
+            logger.warning("regenerated_note_blocked", extra={"request_id": str(request_id)})
+            message = "the regenerated note violates the content policy"
+            raise NoValidContentError(message)
+        return note
+
+    async def _screen_request(self, request_id: UUID, request: RegenerationRequest) -> None:
+        if not await self.moderator.allows_request(request):
+            logger.info("regeneration_request_rejected", extra={"request_id": str(request_id)})
+            message = "the topic or the rejected note violates the content policy"
+            raise TopicRejectedError(message)
