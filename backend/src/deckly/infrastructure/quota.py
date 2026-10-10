@@ -23,7 +23,7 @@ QUOTA_WINDOW = timedelta(days=1)
 QUOTA_WINDOW_SECONDS = int(QUOTA_WINDOW.total_seconds())
 CLIENT_KEY_PREFIX = "deckly:generation-quota:client"
 ADDRESS_KEY_PREFIX = "deckly:generation-quota:address"
-IPV6_BUCKET_PREFIX_LENGTH = 64
+IPV6_BUCKET_PREFIX_LENGTH = 56
 
 ADMITTED = 0
 CLIENT_LIMIT_REACHED = 1

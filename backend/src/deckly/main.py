@@ -38,6 +38,13 @@ from deckly.infrastructure.search.parser import CleaningSourceParser
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
 from deckly.transport import generations, health, notes
+from deckly.transport.dependencies import (
+    CANCEL_GENERATION_STATE,
+    CHECK_HEALTH_STATE,
+    CREATE_GENERATION_STATE,
+    GET_GENERATION_STATE,
+    REGENERATE_NOTE_STATE,
+)
 from deckly.transport.error_handlers import register_error_handlers
 from deckly.worker.settings import LLM_CLIENTS, moderation_llm_client, resilient_caller
 
@@ -204,20 +211,26 @@ def build_lifespan(settings: Settings, observability: Observability) -> Lifespan
                     app.state, METRICS_EXPOSITION_STATE, MetricsExposition(observability.metrics, jobs.depth)
                 )
                 telemetry = observability.generation()
-                app.state.check_health = CheckHealth(
-                    probes=(
-                        postgres_probe(
-                            engine, timeout_seconds=settings.database.health_check_timeout_seconds
+                setattr(
+                    app.state,
+                    CHECK_HEALTH_STATE,
+                    CheckHealth(
+                        probes=(
+                            postgres_probe(
+                                engine, timeout_seconds=settings.database.health_check_timeout_seconds
+                            ),
+                            redis_probe(queue, timeout_seconds=settings.redis.connect_timeout_seconds),
                         ),
-                        redis_probe(queue, timeout_seconds=settings.redis.connect_timeout_seconds),
+                        quota=quota,
+                        clock=utc_now,
+                        version=settings.app.version,
                     ),
-                    quota=quota,
-                    clock=utc_now,
-                    version=settings.app.version,
                 )
-                app.state.get_generation = GetGeneration(store=store)
-                app.state.cancel_generation = CancelGeneration(
-                    store=store, queue=jobs, clock=utc_now, telemetry=telemetry
+                setattr(app.state, GET_GENERATION_STATE, GetGeneration(store=store))
+                setattr(
+                    app.state,
+                    CANCEL_GENERATION_STATE,
+                    CancelGeneration(store=store, queue=jobs, clock=utc_now, telemetry=telemetry),
                 )
                 async with AsyncExitStack() as clients:
                     llm = regeneration_llm_client(settings)
@@ -228,27 +241,35 @@ def build_lifespan(settings: Settings, observability: Observability) -> Lifespan
                         settings.providers, settings.providers.moderation_timeout_seconds
                     )
                     clients.push_async_callback(moderation_llm.aclose)
-                    app.state.create_generation = CreateGeneration(
-                        store=store,
-                        queue=jobs,
-                        quota=quota,
-                        moderator=build_topic_moderator(settings, moderation_llm, observability),
-                        clock=utc_now,
-                        new_job_id=uuid4,
-                        telemetry=telemetry,
+                    setattr(
+                        app.state,
+                        CREATE_GENERATION_STATE,
+                        CreateGeneration(
+                            store=store,
+                            queue=jobs,
+                            quota=quota,
+                            moderator=build_topic_moderator(settings, moderation_llm, observability),
+                            clock=utc_now,
+                            new_job_id=uuid4,
+                            telemetry=telemetry,
+                        ),
                     )
                     window = RegenerationWindow(
                         limit=settings.limits.note_regenerations_per_window,
                         window_seconds=settings.limits.note_regeneration_window_seconds,
                         command_timeout_seconds=settings.regenerate.rate_limit_timeout_seconds,
                     )
-                    app.state.regenerate_note = build_regenerate_note(
-                        settings,
-                        RegenerationClients(
-                            llm=llm,
-                            search=search,
-                            limiter=RedisRegenerationLimiter(queue, window, observability.metrics),
-                            observability=observability,
+                    setattr(
+                        app.state,
+                        REGENERATE_NOTE_STATE,
+                        build_regenerate_note(
+                            settings,
+                            RegenerationClients(
+                                llm=llm,
+                                search=search,
+                                limiter=RedisRegenerationLimiter(queue, window, observability.metrics),
+                                observability=observability,
+                            ),
                         ),
                     )
                     yield
