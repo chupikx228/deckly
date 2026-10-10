@@ -23,10 +23,17 @@ LIMIT = 20
     [
         ("2001:db8:1:2::1", "2001:db8:1:2:ffff:ffff:ffff:ffff"),
         ("2001:db8:1:2::1", "2001:0db8:0001:0002:0000:0000:0000:0009"),
+        ("2001:db8:1::1", "2001:db8:1:ff:ffff:ffff:ffff:ffff"),
         ("::ffff:203.0.113.9", "203.0.113.9"),
         ("fe80::1%eth0", "fe80::2"),
     ],
-    ids=["one /64", "differently written", "ipv4-mapped", "scoped link-local"],
+    ids=[
+        "one /64",
+        "differently written",
+        "first and last /64 of one /56",
+        "ipv4-mapped",
+        "scoped link-local",
+    ],
 )
 def test_addresses_one_host_can_rotate_through_share_a_bucket(first: str, second: str) -> None:
     assert address_bucket(first) == address_bucket(second)
@@ -35,18 +42,19 @@ def test_addresses_one_host_can_rotate_through_share_a_bucket(first: str, second
 @pytest.mark.parametrize(
     ("first", "second"),
     [
-        ("2001:db8:1:2::1", "2001:db8:1:3::1"),
+        ("2001:db8:1:ff::1", "2001:db8:1:100::1"),
+        ("2001:db8:1::1", "2001:db8:0:ff:ffff:ffff:ffff:ffff"),
         ("203.0.113.9", "203.0.113.10"),
         ("::ffff:203.0.113.9", "203.0.113.10"),
     ],
-    ids=["neighbouring /64", "neighbouring ipv4", "ipv4-mapped neighbour"],
+    ids=["neighbouring /56 above", "neighbouring /56 below", "neighbouring ipv4", "ipv4-mapped neighbour"],
 )
 def test_distinct_hosts_get_distinct_buckets(first: str, second: str) -> None:
     assert address_bucket(first) != address_bucket(second)
 
 
-def test_ipv6_bucket_is_the_canonical_64_network() -> None:
-    assert address_bucket("2001:DB8:1:2:3:4:5:6") == "2001:db8:1:2::/64"
+def test_ipv6_bucket_is_the_canonical_56_network() -> None:
+    assert address_bucket("2001:DB8:1:2:3:4:5:6") == "2001:db8:1::/56"
 
 
 @pytest.mark.parametrize("address", ["unknown", "testclient", ""])

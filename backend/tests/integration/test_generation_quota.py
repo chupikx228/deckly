@@ -49,9 +49,13 @@ def unique_ipv4() -> str:
     return f"10.{host % 256}.{host // 256 % 256}.{host // 65536 % 256}"
 
 
-def unique_ipv6_network() -> str:
-    host = uuid4().int
-    return f"2001:db8:{host % 65536:x}:{host // 65536 % 65536:x}"
+def unique_ipv6_delegation() -> int:
+    return uuid4().int % (2**24 - 1)
+
+
+def delegated_address(delegation: int, subnet: int, host: int = 1) -> str:
+    third_group, top_of_fourth_group = divmod(delegation, 256)
+    return f"2001:db8:{third_group:x}:{top_of_fourth_group * 256 + subnet:x}::{host:x}"
 
 
 class Requesters:
@@ -168,15 +172,28 @@ async def test_rotating_client_ids_from_one_address_is_stopped_by_the_backstop(
     ] * PER_ADDRESS
 
 
-async def test_rotating_addresses_within_one_ipv6_64_is_stopped_by_the_backstop(
+async def test_rotating_through_the_64s_of_one_ipv6_56_delegation_is_stopped_by_the_backstop(
     quota: RedisGenerationQuota, requesters: Requesters
 ) -> None:
-    network = unique_ipv6_network()
-    for host in range(1, PER_ADDRESS + 1):
-        await quota.reserve(requesters.new(f"{network}::{host:x}"), NOON)
+    delegation = unique_ipv6_delegation()
+    for subnet in range(PER_ADDRESS):
+        await quota.reserve(requesters.new(delegated_address(delegation, subnet)), NOON)
 
     with pytest.raises(RateLimitedError):
-        await quota.reserve(requesters.new(f"{network}:ffff:ffff:ffff:ffff"), NOON)
+        await quota.reserve(requesters.new(delegated_address(delegation, subnet=255)), NOON)
+
+
+async def test_the_next_ipv6_56_delegation_has_its_own_backstop(
+    quota: RedisGenerationQuota, requesters: Requesters
+) -> None:
+    delegation = unique_ipv6_delegation()
+    for subnet in range(PER_ADDRESS):
+        await quota.reserve(requesters.new(delegated_address(delegation, subnet)), NOON)
+
+    neighbour = delegation + 1
+    assert (await quota.reserve(requesters.new(delegated_address(neighbour, subnet=0)), NOON)).remaining == (
+        PER_CLIENT - 1
+    )
 
 
 async def test_concurrent_reservations_never_exceed_the_client_limit(

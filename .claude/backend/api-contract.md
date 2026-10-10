@@ -349,7 +349,7 @@ that fails before its job is stored do not.
 `X-Client-Id` is chosen by the client, so a client that rotates it gets a fresh budget each time.
 As a backstop, jobs are also counted per network address per UTC day, with a coarser limit
 (`DECKLY_LIMIT_GENERATION_JOBS_PER_ADDRESS_PER_DAY`, at least the per-client limit). Every IPv6
-address in one /64 counts as the same address. Going over it is the same `429 RATE_LIMITED`, even
+address in one /56 counts as the same address. Going over it is the same `429 RATE_LIMITED`, even
 when `quota.remaining` is above `0`; this budget is not reported in `quota`. When the budget cannot
 be checked because Redis does not answer in time, `POST /generations` is refused with
 `503 UPSTREAM_UNAVAILABLE` rather than accepted unmetered.

@@ -508,10 +508,24 @@ themselves.
    attributes at 60% confidence. Its false positives are all framework wiring, and are listed
    in `[tool.vulture]` rather than hidden: route handlers (`@router.*`), pydantic validators,
    `model_config`, the `create_app` factory, `HTMLParser` hooks, the arq `WorkerSettings`
-   attributes, the use cases stored on `app.state` and read back by name, and the `AUDIO` media
-   kind (a domain value used only by tests until audio notes exist). Vulture runs on `src/`
-   only, so code reachable only from tests still fails. A new name goes in the ignore list only
-   when it is called by a framework by name.
+   attributes, and the `AUDIO` media kind (a domain value used only by tests until audio notes
+   exist). Vulture runs on `src/` only, so code reachable only from tests still fails.
+
+   **Known limitation:** `ignore_names` is global. Vulture has no per-file suppression, and
+   inline `noqa` is banned by `make guard`, so a real dead function, method or variable that
+   shares one of those names is not reported. The use cases stored on `app.state` used to be on
+   the list under their own names (`create_generation`, `get_generation` and so on, the same
+   names as the route handlers). They are now stored and read back through the `*_STATE`
+   constants in `transport/dependencies.py`, so vulture sees the use and the names are no longer
+   suppressed. The remaining entries are names a framework or a base class calls and that nothing
+   in `src/` would plausibly define twice: `model_config`, `create_app`, `handle_starttag`,
+   `handle_endtag`, `handle_data`, `functions`, `cron_jobs`, `on_startup`, `on_shutdown`,
+   `allow_abort_jobs` and `AUDIO`. Each was checked by removing it: it hides exactly its
+   framework false positives and nothing else. A new name goes in the ignore list only when it is
+   called by a framework by name and cannot be made visible to vulture by passing it through a
+   constant, and the audit above is repeated when it does. Revisit `AUDIO` once audio notes
+   exist and `src/` uses it.
+
 7. **Contract tests against `openapi.yaml`** — every response the service can emit, success and
    every error `code`, validated against this folder's spec. Each operation has a
    `tests/transport/test_*_contract.py` that validates every declared status and body against the

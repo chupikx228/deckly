@@ -60,7 +60,13 @@ and shares nothing with it but Postgres and Redis.
 Arq's Redis pool has no read timeout of its own, so the API builds its pool itself
 (`infrastructure/queue.py`, `create_queue_pool`) with the same connection settings Arq would use
 plus a read timeout, and gives every command it sends through the queue that long to finish,
-both from `DECKLY_REDIS_CONNECT_TIMEOUT_SECONDS`. The startup check pings Redis through that same
+both from `DECKLY_REDIS_CONNECT_TIMEOUT_SECONDS`. The worker builds its pool the same way
+(`worker/main.py`) and hands it to Arq's `Worker` as `redis_pool`, instead of letting `Worker`
+create its own, which would have no read timeout. A Redis that accepts connections and then
+freezes makes the worker's next poll fail after that timeout and the process exit with the Redis
+timeout error, as it already does when Redis refuses connections, so run it under a supervisor.
+Without the timeout the poll would wait forever, and a cancel's abort marker would never be
+delivered. The startup check pings Redis through that same
 pool and retries `DECKLY_REDIS_CONNECT_RETRIES` times, one second apart, as Arq does, so a Redis
 that accepts connections but never answers makes the API fail to start instead of hanging it.
 The read timeout also matters for the enqueue, which runs a `WATCH` transaction: if Redis
@@ -163,9 +169,17 @@ was already given back, so that one job is free.
 `X-Forwarded-For` itself: uvicorn rewrites the peer from that header only for connections from
 `--forwarded-allow-ips`, which defaults to `127.0.0.1`. There is no reverse proxy in this
 deployment yet. If one is added, pass its address in `--forwarded-allow-ips`; otherwise every
-request is counted against the proxy's address. IPv6 peers are counted per /64, since one host
-usually holds the whole prefix and could otherwise use a new address for every request.
-IPv4-mapped IPv6 addresses count as the IPv4 address. A connection with no peer address, which
+request is counted against the proxy's address. IPv6 peers are counted per /56
+(`IPV6_BUCKET_PREFIX_LENGTH` in `infrastructure/quota.py`). A /64 is one host's subnet, but home
+ISPs commonly delegate a /56 (RIPE-690's recommendation for residential service) or a /60 to a
+household, which hands it 256 or 16 /64s to rotate through, each with its own budget. A /56 puts
+the whole delegation in one bucket, the same way one IPv4 address covers a household behind NAT.
+It is not a /48 because mobile carriers hand each device a /64 out of a shared pool, so a /48
+could cover up to 65,536 unrelated subscribers where a /56 covers at most 256, and IPv4 CGNAT
+already lumps users together under the same limit. A household with a /48 delegation can still
+use 256 buckets; widen the prefix if that shows up in real traffic, together with
+`DECKLY_LIMIT_GENERATION_JOBS_PER_ADDRESS_PER_DAY`, which stays at its IPv4 meaning of one
+household. IPv4-mapped IPv6 addresses count as the IPv4 address. A connection with no peer address, which
 uvicorn never produces over TCP, is counted under one shared `unknown` address rather than not
 at all.
 
@@ -522,7 +536,8 @@ takes a fixed set of values.
 `make observability` starts Prometheus on `:9090` (compose profile `observability`, config in
 `observability/prometheus.yml`), scraping `host.docker.internal:8000` and `:9464`. `make up` does not
 start it. On Linux, run uvicorn with `--host 0.0.0.0` and set the worker metrics host to `0.0.0.0`
-so the container can reach them.
+so the container can reach them. Neither port is meant to be public: see "Production deployment"
+below.
 
 ### Traces
 
@@ -554,6 +569,77 @@ outcome and error type, never exception messages.
 nothing is exported) or `console` (one compact JSON line per finished span on stdout, next to the
 logs). Exporting over OTLP to Jaeger or similar is a follow-up: it needs
 `opentelemetry-exporter-otlp-proto-http`, which there is no deployment target for yet.
+
+## Production deployment
+
+Nothing in this repository deploys the service yet; these are the decisions a deployment has to
+honour. Local `docker-compose.yml` is not a production configuration.
+
+### Redis memory and eviction
+
+One Redis holds three kinds of data with different loss tolerance: the Arq queue (jobs and abort
+markers), the quota counters (`deckly:generation-quota:*`) and the generation result cache
+(`deckly:generation-result:*`, only the worker reads and writes it). Losing a cache entry costs one
+regeneration. Losing a queued job or a counter loses a job or a budget silently.
+
+**Decision: the result cache gets its own Redis instance in production.**
+
+| Instance     | Holds                    | `maxmemory`                     | `maxmemory-policy` | When full                               |
+| ------------ | ------------------------ | ------------------------------- | ------------------ | --------------------------------------- |
+| queue, quota | Arq keys, quota counters | explicit, sized for the backlog | `noeviction`       | writes fail loudly: `503`, alertable    |
+| cache        | `generation-result:v2:*` | explicit, its own budget        | `allkeys-lru`      | oldest entries go; a miss costs one run |
+
+Alternatives that were rejected:
+
+- **A separate database on the same instance.** `maxmemory` and the eviction policy belong to the
+  instance, not the database number, so this isolates nothing.
+- **One instance with `volatile-lru`.** Arq's job keys, abort markers and the quota counters all
+  carry a TTL, which is what `volatile-*` evicts. Cache pressure would drop queued jobs and
+  counters without an error. `allkeys-lru` is worse.
+- **One instance with `noeviction`.** A full cache then makes the enqueue and the quota
+  reservation fail with `503 UPSTREAM_UNAVAILABLE`, which turns an optimisation into an outage.
+  The cache cannot be bounded from inside the application: its size is the number of distinct
+  requests inside `DECKLY_CACHE_GENERATION_RESULT_TTL_SECONDS`, which a client controls.
+
+Sizing the queue and quota instance: a quota counter is about 120 bytes and every admitted job
+writes two, expiring after a day, so it grows with jobs per day, not with the cache. Measure the
+job keys on the target (`MEMORY USAGE arq:job:<id>`), multiply by the longest backlog the queue
+should hold, add the counters, and double it. Cache entries are 6 to 8 KB in a local run with a
+few cards each and grow with deck size, so size the cache instance from the number of distinct
+topics worth keeping for the TTL. Alert on `used_memory` against `maxmemory` on both.
+
+The cache already fails open: a timeout, an out-of-memory reply or a corrupt entry is a miss
+(`infrastructure/result_cache.py`), so the cache instance needs no special handling when full.
+
+**Not implemented yet:** the application reads one `DECKLY_REDIS_URL`, so the cache cannot be
+pointed at its own instance. Until a cache URL setting exists (a follow-up, only the worker
+needs it), a production deployment must not run on a single instance with a memory limit. Local
+`docker-compose.yml` runs the shared instance with `--maxmemory 256mb --maxmemory-policy noeviction`,
+which is the queue and quota row, so a full Redis fails the way it would in production.
+
+### Metrics access
+
+`/metrics` exposes throughput, provider latency and error rates and the queue depth, with no
+authentication. It must not be reachable from the internet.
+
+**Decision: network placement, not endpoint authentication.**
+
+- **API.** `GET /metrics` shares the API's port. The TLS-terminating reverse proxy that fronts the
+  API answers `/metrics` with `404` and forwards only `/v1/` (and nothing else the service does not
+  need to publish). uvicorn listens on a loopback or private address, never on a public
+  interface, and Prometheus scrapes uvicorn directly on that private address, not through the
+  proxy. The proxy rule is the second line; the listen address is the first.
+- **Worker.** It has no public API, and `DECKLY_OBSERVABILITY_WORKER_METRICS_HOST` is
+  `127.0.0.1` by default, so a scraper on the same host reaches it and nothing else does. When
+  Prometheus runs elsewhere, set it to the host's private address and let only the scraper reach
+  port `9464` (security group or firewall). `0.0.0.0` on a host with a public interface exposes
+  it. The `observability` compose profile needs `0.0.0.0` on Linux, which is a local-only setting.
+
+Alternatives that were rejected: a second listener for the API's metrics (another HTTP server in
+the API process, and it still needs the same network rule), and authenticating the endpoint
+(Prometheus then needs a secret distributed to it, and an unauthenticated internet-facing
+`/metrics` still gets probed). Check a deployment with `curl -i https://<public host>/metrics`
+(expect `404`) and `curl http://<public address>:9464/metrics` (expect a refused connection).
 
 ## Checks
 
