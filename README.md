@@ -46,7 +46,7 @@ frontend/             pnpm workspace — everything JavaScript/TypeScript
 backend/              FastAPI + PostgreSQL + Arq — generation service (see backend/README.md)
 .claude/
   docs/               Frontend guides — FSD, code style, state, i18n, data model
-  backend/            API contract + engineering, testing & handoff guides
+  backend/            API contract + engineering & testing guides
   skills/             Repo skills (edge-case-bug-hunting)
 ```
 
@@ -88,5 +88,5 @@ All documentation lives under [`.claude/`](.claude): the product overview, locke
 hard rules in [CLAUDE.md](CLAUDE.md) (which is also the index the AI assistant reads); the
 frontend guides in [`.claude/docs/`](.claude/docs); and the backend contract, engineering and
 testing guides in [`.claude/backend/`](.claude/backend). A developer picking up the backend
-starts at [`.claude/backend/handoff.md`](.claude/backend/handoff.md). Keep these in sync with the
-code.
+starts at [`api-contract.md`](.claude/backend/api-contract.md), then
+[`engineering-guide.md`](.claude/backend/engineering-guide.md). Keep these in sync with the code.
