@@ -1,7 +1,8 @@
 # Deckly generation service
 
 FastAPI service that turns a topic into reviewable notes. The contract, architecture and testing
-rules live in [`../.claude/backend/`](../.claude/backend/) — read `handoff.md` first.
+rules live in [`../.claude/backend/`](../.claude/backend/) — read `api-contract.md` first, then
+`engineering-guide.md`.
 
 ## Layout
 
@@ -448,19 +449,19 @@ searches) inherits it.
 
 The events that make up one job, in order:
 
-| Event                                                                                                                    | Where                  | Carries                                           |
-| ------------------------------------------------------------------------------------------------------------------------ | ---------------------- | ------------------------------------------------- |
-| `http_request_finished`                                                                                                  | API, every request     | method, route template, status, `duration_ms`     |
-| `generation_admitted`                                                                                                    | API                    | `admission` (`queued` or `replayed`), status      |
-| `topic_rejected`, `rate_limit_rejected`                                                                                  | API                    | `limit` for the rate limit                        |
-| `generation_started`                                                                                                     | worker                 | status, stage                                     |
-| `generation_cache_checked`                                                                                               | worker                 | `result` (`hit`, `miss`, `corrupt`, `error`)      |
-| `generation_stage_entered`                                                                                               | worker, every stage    | stage, progress                                   |
-| `provider_call_finished`                                                                                                 | every provider attempt | `operation`, `attempt`, `outcome`, `duration_ms`  |
-| `provider_call_retrying`, `provider_call_refused`, `circuit_opened`, `circuit_closed`                                    | resilience layer       | `operation`                                       |
-| `sources_retrieved`, `sources_parsed`, `card_generation_finished`, `content_screened`, `media_fetched`, `media_attached` | adapters               | counts only                                       |
-| `generation_succeeded` / `generation_failed` / `generation_stopped`                                                      | worker                 | `duration_ms`, failure code, traceback on failure |
-| `generation_cancelled`                                                                                                   | API                    | stage and progress at the time                    |
+| Event                                                                                                                                       | Where                  | Carries                                           |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | ------------------------------------------------- |
+| `http_request_finished`                                                                                                                     | API, every request     | method, route template, status, `duration_ms`     |
+| `generation_admitted`                                                                                                                       | API                    | `admission` (`queued` or `replayed`), status      |
+| `topic_rejected`, `rate_limit_rejected`                                                                                                     | API                    | `limit` for the rate limit                        |
+| `generation_started`                                                                                                                        | worker                 | status, stage                                     |
+| `generation_cache_checked`                                                                                                                  | worker                 | `result` (`hit`, `miss`, `corrupt`, `error`)      |
+| `generation_stage_entered`                                                                                                                  | worker, every stage    | stage, progress                                   |
+| `provider_call_finished`                                                                                                                    | every provider attempt | `operation`, `attempt`, `outcome`, `duration_ms`  |
+| `provider_call_retrying`, `provider_call_refused`, `circuit_opened`, `circuit_closed`                                                       | resilience layer       | `operation`                                       |
+| `sources_retrieved`, `sources_parsed`, `card_generation_finished`, `content_screened`, `images_screened`, `media_fetched`, `media_attached` | adapters               | counts only                                       |
+| `generation_succeeded` / `generation_failed` / `generation_stopped`                                                                         | worker                 | `duration_ms`, failure code, traceback on failure |
+| `generation_cancelled`                                                                                                                      | API                    | stage and progress at the time                    |
 
 To follow one job locally:
 
