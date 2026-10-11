@@ -711,3 +711,29 @@ CI runs `make install`, `make check`, `make test`, then `make migrate`, `make te
 `backend` job). `make audit` runs in the `backend-audit` job and a gitleaks scan of the full git
 history runs in the `secrets` job. The numbers and the reasoning are in
 [`.claude/backend/engineering-guide.md`](../.claude/backend/engineering-guide.md) → "CI enforcement".
+
+### Integration tests leave no rows behind
+
+`make test-integration` writes to whatever `DECKLY_DATABASE_URL` and `DECKLY_REDIS_URL` name, which
+is the compose stack from `make up` unless you override them. Every test removes the
+`generation_jobs` rows it created in its teardown (`Cleanup` in `tests/integration/conftest.py`),
+so a completed run, passing or failing, leaves the table as it found it. A run that is killed
+before teardown (`kill -9`, a closed terminal, a CI timeout) does not, and its rows stay.
+
+To prove a change keeps that property, run the suite against a scratch stack on other ports
+instead of the development one:
+
+```bash
+docker run -d --name deckly-scratch-pg -e POSTGRES_USER=deckly -e POSTGRES_PASSWORD=deckly \
+  -e POSTGRES_DB=deckly -p 5543:5432 postgres:17-alpine
+docker run -d --name deckly-scratch-redis -p 6390:6379 redis:7-alpine
+export DECKLY_DATABASE_URL=postgresql+asyncpg://deckly:deckly@localhost:5543/deckly
+export DECKLY_REDIS_URL=redis://localhost:6390/0
+make migrate
+make test-integration && make test-integration
+docker exec deckly-scratch-pg psql -U deckly -d deckly -tAc 'select count(*) from generation_jobs'
+docker rm -f deckly-scratch-pg deckly-scratch-redis
+```
+
+The count must be `0` after both runs. Against the development database the same query only
+makes sense as a before/after pair, because jobs created through a running API are rows too.
