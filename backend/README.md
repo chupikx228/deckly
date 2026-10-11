@@ -433,12 +433,29 @@ reaches the classifier as a JSON document, so it cannot break out of its delimit
   provider error or unreadable verdict is `503 UPSTREAM_UNAVAILABLE` and gives the unit back.
   Published latency for Haiku 4.5 is roughly 0.6–0.8 s to the first token, so the request
   normally takes about 1 s rather than the 500 ms it took before this check.
-- **Generated-content filter** (`LlmContentModerator`, wired in the worker): one batched call
-  per job after `generating_cards`, before media. A note is kept only on an explicit `"allow"`;
-  a missing or unreadable verdict drops it. A deck title that is not allowed is replaced with the
-  topic. Retries follow `DECKLY_PROVIDER_MODERATION_FILTER_{TIMEOUT_SECONDS,DEADLINE_SECONDS,
-MAX_ATTEMPTS}`; the deadline counts towards the generation job timeout. Results are cached after
+- **Generated-content filter** (`LlmContentModerator`, wired in the worker): runs after
+  `generating_cards`, before media. Notes go to the classifier in chunks of
+  `NOTES_PER_CONTENT_CHECK` (50), each chunk with the deck and its notes numbered from 1, and
+  every chunk runs at once: at most four calls at the 200-card maximum, one call at 50 cards or
+  fewer. A note is kept only on an explicit `"allow"`; a missing or unreadable verdict drops it.
+  A deck title that is not allowed by every chunk is replaced with the topic. A refused chunk drops
+  its own notes and the deck title. If any chunk fails, the whole filter fails like a single call
+  would (`provider_unavailable`), and the other chunks are cancelled, so no partial deck ships.
+  Retries follow `DECKLY_PROVIDER_MODERATION_FILTER_{TIMEOUT_SECONDS,DEADLINE_SECONDS,
+MAX_ATTEMPTS}` per chunk. Because the chunks run concurrently, the filter's wall time stays within
+  one deadline, which is what counts towards the generation job timeout. Results are cached after
   filtering, and a cache hit is not screened again.
+
+  Chunk size, measured on deepseek-flash (October 2026), with the 15 s attempt timeout, 20 s
+  deadline and 4000-token output cap: one 200-note call took 4.3–5.4 s and about 1,300 output
+  tokens, reasoning included, whether the notes were short (17k input tokens) or three times
+  longer than the generator's 16k-token output cap allows (54k). Latency follows the reply, not
+  the input. 50-note chunks took 1.7–3.4 s and 330–610 output tokens. Ten 200-card runs of four
+  concurrent chunks took 2.1–3.0 s wall time. The single call already fit its timeout, so chunking
+  buys two things: a retry that fits (a second attempt only fits when the first fails within about
+  5 s, minus backoff), and replies about 6× under the output cap instead of 3×, which matters
+  because of DeepSeek's empty replies at the cap.
+
 - **Image screening** (`LlmCandidateJudge`, wired in the worker): images are found after the
   content filter has run, and Commons titles and descriptions are third-party wiki text, so one
   batched call per job judges every shortlisted candidate's file name, description and (up to
