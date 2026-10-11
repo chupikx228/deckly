@@ -20,13 +20,21 @@ from deckly.application.housekeeping import (
     SweepStaleJobs,
 )
 from deckly.application.pipeline import RunGeneration
-from deckly.config import MINUTES_PER_HOUR, ModelProvider, ProviderSettings, Settings, SweepSettings
+from deckly.config import (
+    MINUTES_PER_HOUR,
+    WORKER_MAX_JOBS,
+    ModelProvider,
+    ProviderSettings,
+    Settings,
+    SweepSettings,
+)
 from deckly.infrastructure.card_generator.generator import LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.database import create_engine, create_session_factory, verify_connection
 from deckly.infrastructure.job_store import BoundedJobStore, PostgresJobHousekeeping, PostgresJobStore
 from deckly.infrastructure.llm.anthropic_client import AnthropicLlmClient
+from deckly.infrastructure.llm.bounded import BoundedLlmClient
 from deckly.infrastructure.llm.client import LlmClient, LlmEndpoint
 from deckly.infrastructure.llm.deepseek_client import DeepSeekLlmClient
 from deckly.infrastructure.llm.gemini_client import GeminiLlmClient
@@ -345,8 +353,11 @@ async def startup(ctx: WorkerContext) -> None:
         settings.providers, observability.probe(ProviderOperation.IMAGE_MODERATION)
     )
     ctx[MEDIA_JUDGE_LLM_CLIENT_KEY] = media_judge_llm
+    moderation_gate = asyncio.Semaphore(settings.providers.moderation_max_concurrency)
     media = build_media_fetcher(
-        settings.providers, observability.probe(ProviderOperation.IMAGE_SEARCH), media_judge_llm
+        settings.providers,
+        observability.probe(ProviderOperation.IMAGE_SEARCH),
+        BoundedLlmClient(media_judge_llm, moderation_gate),
     )
     ctx[MEDIA_FETCHER_KEY] = media
     session_factory = create_session_factory(engine)
@@ -364,7 +375,7 @@ async def startup(ctx: WorkerContext) -> None:
         retriever=retriever,
         parser=CleaningSourceParser(max_characters=settings.providers.search_max_source_characters),
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),
-        moderator=LlmContentModerator(llm=moderation_llm),
+        moderator=LlmContentModerator(llm=BoundedLlmClient(moderation_llm, moderation_gate)),
         media=media,
         clock=utc_now,
         telemetry=observability.generation(),
@@ -403,3 +414,4 @@ class WorkerSettings:
     on_startup: StartupShutdown | None = startup
     on_shutdown: StartupShutdown | None = shutdown
     allow_abort_jobs = True
+    max_jobs = WORKER_MAX_JOBS

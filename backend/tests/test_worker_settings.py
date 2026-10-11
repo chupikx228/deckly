@@ -1,4 +1,5 @@
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import get_args, override
 from uuid import UUID, uuid4
@@ -14,7 +15,14 @@ from deckly.application.housekeeping import (
     StalenessPolicy,
     SweepStaleJobs,
 )
-from deckly.config import ModelProvider, ProviderSettings, SweepSettings
+from deckly.config import (
+    DEFAULT_MODERATION_MAX_CONCURRENCY,
+    MAX_MODERATION_CONCURRENCY,
+    WORKER_MAX_JOBS,
+    ModelProvider,
+    ProviderSettings,
+    SweepSettings,
+)
 from deckly.domain.job import GenerationJob, JobStatus
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.llm.anthropic_client import AnthropicLlmClient
@@ -24,9 +32,11 @@ from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
 from deckly.infrastructure.moderation.image_judge import LlmCandidateJudge
+from deckly.infrastructure.moderation.moderator import NOTES_PER_CONTENT_CHECK
 from deckly.infrastructure.resilience import ResilientCaller
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
+from deckly.transport.generations import MAX_CARD_COUNT
 from deckly.worker.settings import (
     CACHE_REDIS_KEY,
     ENFORCE_JOB_RETENTION_KEY,
@@ -295,6 +305,22 @@ def test_housekeeping_runs_on_every_interval_boundary_of_the_hour_and_never_over
     assert job.timeout_s == interval_minutes * 60
     assert job.unique is True
     assert job.run_at_startup is False
+
+
+async def test_arq_worker_runs_the_pinned_number_of_jobs_at_once() -> None:
+    worker = create_worker(WorkerSettings, handle_signals=False)
+
+    assert worker.max_jobs == WORKER_MAX_JOBS
+
+
+def test_moderation_concurrency_default_tracks_the_number_of_jobs_a_worker_runs() -> None:
+    assert DEFAULT_MODERATION_MAX_CONCURRENCY == WORKER_MAX_JOBS
+
+
+def test_moderation_concurrency_ceiling_is_every_chunk_of_every_job_a_worker_can_run() -> None:
+    chunks_per_job = math.ceil(MAX_CARD_COUNT / NOTES_PER_CONTENT_CHECK)
+
+    assert WORKER_MAX_JOBS * chunks_per_job == MAX_MODERATION_CONCURRENCY
 
 
 async def test_housekeeping_is_registered_with_the_arq_worker_next_to_the_generation_task() -> None:

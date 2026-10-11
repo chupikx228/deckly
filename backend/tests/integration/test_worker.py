@@ -25,8 +25,11 @@ from deckly.infrastructure.card_generator.generator import LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.job_store import PostgresJobStore
+from deckly.infrastructure.llm.bounded import BoundedLlmClient
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher
+from deckly.infrastructure.moderation.image_judge import LlmCandidateJudge
+from deckly.infrastructure.moderation.moderator import LlmContentModerator
 from deckly.infrastructure.resilience import (
     CircuitBreaker,
     CircuitState,
@@ -41,6 +44,8 @@ from deckly.worker.settings import (
     ENFORCE_JOB_RETENTION_KEY,
     LLM_CLIENT_KEY,
     MEDIA_FETCHER_KEY,
+    MEDIA_JUDGE_LLM_CLIENT_KEY,
+    MODERATION_LLM_CLIENT_KEY,
     OBSERVABILITY_KEY,
     RUN_GENERATION_KEY,
     SETTINGS_KEY,
@@ -197,6 +202,39 @@ async def test_worker_startup_wires_the_commons_media_fetcher_in_place_of_any_st
     assert run.media is media
     assert media.limits.max_images == settings.providers.media_max_images
     assert media.limits.deadline_seconds == settings.providers.media_deadline_seconds
+
+
+async def test_worker_startup_bounds_content_and_image_moderation_by_one_shared_gate(
+    settings: Settings,
+) -> None:
+    ctx: WorkerContext = {
+        SETTINGS_KEY: settings,
+        OBSERVABILITY_KEY: fresh_observability(),
+    }
+
+    await startup(ctx)
+    try:
+        run = from_context(ctx, RUN_GENERATION_KEY, RunGeneration)
+        media = from_context(ctx, MEDIA_FETCHER_KEY, CommonsMediaFetcher)
+        moderation_llm = from_context(ctx, MODERATION_LLM_CLIENT_KEY, ResilientLlmClient)
+        media_judge_llm = from_context(ctx, MEDIA_JUDGE_LLM_CLIENT_KEY, ResilientLlmClient)
+    finally:
+        await shutdown(ctx)
+
+    assert isinstance(run.moderator, LlmContentModerator)
+    assert isinstance(run.moderator.llm, BoundedLlmClient)
+    assert isinstance(media.judge, LlmCandidateJudge)
+    assert isinstance(media.judge.llm, BoundedLlmClient)
+    assert run.moderator.llm.inner is moderation_llm
+    assert media.judge.llm.inner is media_judge_llm
+    gate = run.moderator.llm.gate
+    assert media.judge.llm.gate is gate
+    limit = settings.providers.moderation_max_concurrency
+    for _ in range(limit - 1):
+        await gate.acquire()
+    assert not gate.locked()
+    await gate.acquire()
+    assert gate.locked()
 
 
 async def test_worker_startup_wires_the_llm_card_generator_behind_the_resilience_layer(
