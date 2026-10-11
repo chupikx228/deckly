@@ -169,7 +169,7 @@ def timed_post(client: TestClient) -> tuple[httpx2.Response, float]:
 def test_budget_under_test_is_the_one_shipped(settings: Settings) -> None:
     assert settings.limits.regenerate_note_timeout_seconds == 10
     assert settings.regenerate.rate_limit_timeout_seconds == 0.5
-    assert settings.regenerate.search_timeout_seconds == 2.5
+    assert settings.regenerate.search_timeout_seconds == 3.0
     assert settings.regenerate.model_timeout_seconds == 4.5
     assert settings.regenerate.request_moderation_timeout_seconds == 2.5
     assert settings.regenerate.note_moderation_timeout_seconds == 1.5

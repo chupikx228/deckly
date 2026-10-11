@@ -327,22 +327,48 @@ is `503 NO_VALID_CONTENT` and is never returned.
 
 The call must answer within `DECKLY_LIMIT_REGENERATE_NOTE_TIMEOUT_SECONDS` (10). Each step has its
 own `DECKLY_REGENERATE_*` timeout, separate from the job settings: the rate-limit check in Redis
-(0.5 s), the search (2.5 s), the request check (`REQUEST_MODERATION_TIMEOUT_SECONDS`, 2.5 s), the
+(0.5 s), the search (3.0 s), the request check (`REQUEST_MODERATION_TIMEOUT_SECONDS`, 2.5 s), the
 model (4.5 s) and the note check (`NOTE_MODERATION_TIMEOUT_SECONDS`, 1.5 s). Settings refuse to
 load unless the rate limit, the longer of the search and the request check, the model, the note
-check and 1.0 s for parsing, validation and the response fit within the total:
-0.5 + 2.5 + 4.5 + 1.5 + 1.0 = 10. The request check runs alongside the search, so it may take as
+check and 0.5 s for parsing, validation and the response fit within the total:
+0.5 + 3.0 + 4.5 + 1.5 + 0.5 = 10. The request check runs alongside the search, so it may take as
 long as the search does at no cost to the total.
 
-The split is not measured for every provider. On deepseek-flash (October 2026, through this
-wiring, cold connections included) the search took 0.2–1.6 s, the request check 0.8–1.6 s, the
-note check 0.9–1.2 s and the model 1.5–3.6 s for most replies, with one useful reply at 4.9 s.
-About one call in four ran into the 1000-token output cap at about 5.1 s with no content at all,
-which no timeout rescues. The model went from 5.5 s to 4.5 s, taking the 1.0 s from the overhead,
-which parsing three short pages does not need, rather than from the model, whose latency varies
-most between providers. `tests/live/test_regeneration_live.py` (`make test-live`) times every step
-against the configured provider and fails when one does not fit its timeout: run it after
-switching provider or model.
+The split is not measured for every provider. Measured on deepseek-flash and Tavily (October 2026,
+from a development machine in Moscow, 36 regenerations through this wiring and 144 searches with
+the regenerate request shape, spread over two and a half hours of one afternoon):
+
+| Step                                  | p50    | p90    | max    | Over its timeout        |
+| ------------------------------------- | ------ | ------ | ------ | ----------------------- |
+| Search, query Tavily has not cached   | 2.0 s  | 2.9 s  | 4.3 s  | 8 % at 3.0 s            |
+| Search, same, on a new connection     | 2.4 s  | 2.9 s  | 4.3 s  | 10 % at 3.0 s           |
+| Search, query repeated within minutes | 0.5 s  | 1.1 s  | 4.8 s  | (cached by Tavily)      |
+| Request check                         | 1.0 s  | 1.5 s  | 1.7 s  | none                    |
+| Model, useful replies                 | 3.0 s  | 4.2 s  | 4.5 s  | 25 % timed out at 4.5 s |
+| Note check                            | 1.0 s  | 1.3 s  | 1.4 s  | none                    |
+| Parsing, validation and the response  | 0.07 s | 0.07 s | 0.37 s | none                    |
+
+A regenerate searches the deck's topic, usually long after the job searched it, so the uncached
+rows are the ones that count, and on a quiet API process the connection is usually new as well
+(the client keeps idle connections for 5 s). At the earlier 2.5 s search timeout 27 % of uncached
+searches timed out, 40 % on a new connection, and per-round medians drifted between 1.5 s and 2.9 s
+across the afternoon. Connecting to Tavily takes about 0.35 s, and leaving out the raw page content
+saves about 0.3 s, so neither explains the latency. The search went from 2.5 s to 3.0 s, taking
+the 0.5 s from the overhead, which used at most 0.37 s. The model and the note check already
+reach close to their timeouts, and the rate limit has not been measured, so neither gives time.
+A wider search would cut timeouts only from 8 % to 3 % at 3.5 s, small next to the model's 25 %:
+about one call in four runs into the 1000-token output cap at about 5.1 s with no content at all,
+which no timeout rescues. Earlier measurements put the search at 0.2–1.6 s because the live test
+then searched the same topic every run and Tavily answered from its cache.
+
+`tests/live/test_regeneration_live.py` (`make test-live`) times every step against the configured
+provider and fails when one does not fit its timeout: run it after switching provider or model.
+Each sample searches its own topic, drawn at random from 160 road-sign topics (20 countries × 8
+kinds of sign), so the search leg measures a query Tavily has not cached. Two back-to-back runs
+repeat a topic about one time in twenty. The topics stay on road signs so the rejected card the
+test sends still belongs to the deck. With the measured rates above, a run fails on a slow search
+about one time in five and on the model's empty replies more often than that, so read a failure
+from the `regeneration_latency_measured` line it logs, not as a regression on its own.
 
 Search, model and both checks get **one attempt each, no retry**: a second attempt after a timeout
 cannot fit in what is left, and one that follows an instant `429`/`5xx` is better left to the
