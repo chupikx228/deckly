@@ -36,7 +36,12 @@ PROMPT = LlmPrompt(system="system instructions", user="user request", expected_o
 type Handler = Callable[[httpx2.Request], httpx2.Response]
 
 
-def completion(content: object = "{}", finish_reason: object = "stop") -> dict[str, object]:
+def completion(
+    content: object = "{}", finish_reason: object = "stop", reasoning: object = None
+) -> dict[str, object]:
+    message: dict[str, object] = {"role": "assistant", "content": content}
+    if reasoning is not None:
+        message["reasoning_content"] = reasoning
     return {
         "id": "completion-1",
         "object": "chat.completion",
@@ -44,7 +49,7 @@ def completion(content: object = "{}", finish_reason: object = "stop") -> dict[s
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": content},
+                "message": message,
                 "finish_reason": finish_reason,
             }
         ],
@@ -72,7 +77,7 @@ async def complete_with(handler: Handler, endpoint: LlmEndpoint = ENDPOINT) -> L
         await client.aclose()
 
 
-async def test_request_asks_for_json_output_with_the_prompt_model_and_token_cap() -> None:
+async def test_request_asks_for_json_output_without_thinking_with_the_prompt_model_and_token_cap() -> None:
     seen: list[httpx2.Request] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
@@ -92,6 +97,7 @@ async def test_request_asks_for_json_output_with_the_prompt_model_and_token_cap(
         ],
         "max_tokens": 4321,
         "response_format": {"type": "json_object"},
+        "thinking": {"type": "disabled"},
         "stream": False,
     }
 
@@ -156,6 +162,22 @@ async def test_empty_content_is_an_empty_reply_not_an_error() -> None:
     reply = await complete_with(answering(completion(content=None)))
 
     assert reply == LlmReply(text="", stop=LlmStop.COMPLETE)
+
+
+async def test_reasoning_is_never_part_of_the_reply_text() -> None:
+    body = completion(content='{"notes": []}', reasoning='{"notes": [{"draft": true}]} but wait')
+
+    reply = await complete_with(answering(body))
+
+    assert reply == LlmReply(text='{"notes": []}', stop=LlmStop.COMPLETE)
+
+
+async def test_reasoning_that_spends_the_whole_token_cap_is_an_empty_truncated_reply() -> None:
+    body = completion(content="", finish_reason="length", reasoning="Let me think. But wait")
+
+    reply = await complete_with(answering(body))
+
+    assert reply == LlmReply(text="", stop=LlmStop.TRUNCATED)
 
 
 @pytest.mark.parametrize("status", [408, 409, 429, 500, 502, 503])

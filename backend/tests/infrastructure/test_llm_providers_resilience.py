@@ -47,6 +47,7 @@ class Provider:
     build: Callable[[httpx2.MockTransport], LlmClient]
     reply: dict[str, object]
     refusal: dict[str, object]
+    spent: dict[str, object]
 
 
 PROVIDERS: dict[str, Provider] = {
@@ -72,16 +73,36 @@ PROVIDERS: dict[str, Provider] = {
             "stop_sequence": None,
             "usage": {"input_tokens": 1, "output_tokens": 0},
         },
+        spent={
+            "id": "msg_3",
+            "type": "message",
+            "role": "assistant",
+            "model": "model-test",
+            "content": [],
+            "stop_reason": "max_tokens",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 1000},
+        },
     ),
     "deepseek": Provider(
         build=lambda transport: DeepSeekLlmClient(ENDPOINT, transport),
         reply={"choices": [{"finish_reason": "stop", "message": {"content": REPLY_TEXT}}]},
         refusal={"choices": [{"finish_reason": "content_filter", "message": {"content": None}}]},
+        spent={
+            "choices": [
+                {"finish_reason": "length", "message": {"content": "", "reasoning_content": "But wait"}}
+            ]
+        },
     ),
     "gemini": Provider(
         build=lambda transport: GeminiLlmClient(ENDPOINT, transport),
         reply={"candidates": [{"content": {"parts": [{"text": REPLY_TEXT}]}, "finishReason": "STOP"}]},
         refusal={"promptFeedback": {"blockReason": "SAFETY"}},
+        spent={
+            "candidates": [
+                {"content": {"parts": [{"text": "But wait", "thought": True}]}, "finishReason": "MAX_TOKENS"}
+            ]
+        },
     ),
 }
 
@@ -177,6 +198,24 @@ async def test_refusal_is_an_answer_that_is_neither_retried_nor_counted_as_a_fai
         await client.aclose()
 
     assert reply.stop is LlmStop.REFUSED
+    assert scripted.calls == 1
+    assert breaker.state is CircuitState.CLOSED
+
+
+@parametrized
+async def test_empty_reply_cut_at_the_token_cap_is_neither_retried_nor_counted_as_a_failure(
+    provider: Provider,
+) -> None:
+    time = ManualTime()
+    breaker = time.breaker(failure_threshold=1)
+    scripted = ScriptedProvider(httpx2.Response(200, json=provider.spent))
+    client = resilient(provider, scripted, time, breaker)
+    try:
+        reply = await client.complete(PROMPT)
+    finally:
+        await client.aclose()
+
+    assert (reply.text, reply.stop) == ("", LlmStop.TRUNCATED)
     assert scripted.calls == 1
     assert breaker.state is CircuitState.CLOSED
 
