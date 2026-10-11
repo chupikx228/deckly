@@ -6,7 +6,7 @@ from types import MappingProxyType
 from deckly.domain.deck import Deck
 from deckly.infrastructure.card_generator.untrusted import as_object
 from deckly.infrastructure.llm.client import LlmClient, LlmReply, LlmStop
-from deckly.infrastructure.media.judging import Ranking, Shortlist
+from deckly.infrastructure.media.judging import OMITTED, Omitted, Shortlist, Verdict
 from deckly.infrastructure.moderation.moderator import (
     UnusableVerdictError,
     moderation_faults_as_upstream,
@@ -46,29 +46,37 @@ def candidate_position(value: object, count: int) -> int | None:
     return position if 0 <= position < count else None
 
 
-def ranking_of(shortlist: Shortlist, value: object) -> Ranking:
+def verdict_of(shortlist: Shortlist, value: object) -> Verdict:
     if not isinstance(value, list):
-        return ()
+        return OMITTED
     count = len(shortlist.images)
     positions = (candidate_position(item, count) for item in value)
     unique = dict.fromkeys(position for position in positions if position is not None)
     return tuple(shortlist.images[position] for position in unique)
 
 
+def verdicts_of(
+    shortlists: tuple[Shortlist, ...], rankings: Mapping[str, object], *, refused: bool
+) -> tuple[Verdict, ...]:
+    if refused:
+        return tuple(() for _ in shortlists)
+    return tuple(
+        verdict_of(shortlist, rankings.get(note_number(index))) for index, shortlist in enumerate(shortlists)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class LlmCandidateJudge:
     llm: LlmClient
 
-    async def rank(self, deck: Deck, shortlists: tuple[Shortlist, ...]) -> tuple[Ranking, ...]:
+    async def rank(self, deck: Deck, shortlists: tuple[Shortlist, ...]) -> tuple[Verdict, ...]:
         with moderation_faults_as_upstream({"subject": "images"}):
             reply = await self.llm.complete(build_image_prompt(deck, shortlists))
             rankings = image_rankings(reply)
-        ranked = tuple(
-            ranking_of(shortlist, rankings.get(note_number(index)))
-            for index, shortlist in enumerate(shortlists)
-        )
+        ranked = verdicts_of(shortlists, rankings, refused=reply.stop is LlmStop.REFUSED)
+        explicit = tuple(verdict for verdict in ranked if not isinstance(verdict, Omitted))
         candidates = sum(len(shortlist.images) for shortlist in shortlists)
-        accepted = sum(len(ranking) for ranking in ranked)
+        accepted = sum(len(ranking) for ranking in explicit)
         logger.log(
             logging.WARNING if reply.stop is LlmStop.REFUSED else logging.INFO,
             "images_screened",
@@ -77,7 +85,8 @@ class LlmCandidateJudge:
                 "screened_notes": len(shortlists),
                 "screened_candidates": candidates,
                 "accepted_candidates": accepted,
-                "notes_without_image": sum(1 for ranking in ranked if not ranking),
+                "notes_without_image": len(ranked) - sum(1 for ranking in explicit if ranking),
+                "omitted_notes": len(ranked) - len(explicit),
             },
         )
         return ranked

@@ -23,5 +23,15 @@ class Shortlist:
 type Ranking = tuple[ShortlistedImage, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class Omitted:
+    pass
+
+
+OMITTED = Omitted()
+
+type Verdict = Ranking | Omitted
+
+
 class CandidateJudge(Protocol):
-    async def rank(self, deck: Deck, shortlists: tuple[Shortlist, ...]) -> tuple[Ranking, ...]: ...
+    async def rank(self, deck: Deck, shortlists: tuple[Shortlist, ...]) -> tuple[Verdict, ...]: ...

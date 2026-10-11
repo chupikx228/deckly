@@ -8,12 +8,12 @@ import pytest
 from deckly.application.correlation import JOB_ID as JOB_ID_FIELD
 from deckly.application.correlation import correlated
 from deckly.application.exceptions import UpstreamUnavailableError
-from deckly.application.ports import ImageQuery, NoteMedia
+from deckly.application.ports import FetchedMedia, ImageQuery, MissingImage, MissingImageReason, NoteMedia
 from deckly.domain.deck import Deck
 from deckly.domain.media import Media, MediaKind
 from deckly.infrastructure.llm.client import LlmPrompt, LlmReply, LlmStop, LlmUnavailableError
 from deckly.infrastructure.media.client import ImageCandidate
-from deckly.infrastructure.media.judging import Ranking, Shortlist, ShortlistedImage
+from deckly.infrastructure.media.judging import OMITTED, Ranking, Shortlist, ShortlistedImage, Verdict
 from deckly.infrastructure.moderation.image_judge import LlmCandidateJudge
 from deckly.infrastructure.moderation.prompt import CONTENT_POLICY, IMAGE_POLICY, MAX_CATEGORIES_PER_CANDIDATE
 from tests.commons_recordings import (
@@ -71,7 +71,7 @@ SHORTLISTS = (
 
 async def rank(
     reply: LlmReply | Exception, shortlists: tuple[Shortlist, ...] = SHORTLISTS
-) -> tuple[Ranking, ...]:
+) -> tuple[Verdict, ...]:
     return await LlmCandidateJudge(llm=FakeLlmClient(reply)).rank(DECK, shortlists)
 
 
@@ -156,10 +156,7 @@ RANKINGS: dict[str, tuple[object, Ranking]] = {
     "word": (["first", 2], (B,)),
     "nested list": ([[1], 2], (B,)),
     "empty list": ([], ()),
-    "single number instead of a list": (1, ()),
-    "text instead of a list": ("1, 2", ()),
-    "object instead of a list": ({"1": 1}, ()),
-    "null": (None, ()),
+    "list of nothing usable": (["first", None], ()),
 }
 
 
@@ -172,14 +169,38 @@ async def test_only_well_formed_candidate_numbers_count_and_anything_else_is_lef
     assert first == ranking
 
 
-async def test_note_the_reply_leaves_out_gets_no_image_and_unknown_note_numbers_are_ignored() -> None:
-    assert await rank(model_reply({"notes": {"2": [1], "3": [1], "0": [1]}})) == ((), (D,))
+NOT_A_RANKING = {
+    "single number": 1,
+    "text": "1, 2",
+    "object": {"1": 1},
+    "null": None,
+    "boolean": True,
+}
 
 
-async def test_note_whose_number_appears_twice_with_different_rankings_gets_no_image() -> None:
+@pytest.mark.parametrize("value", NOT_A_RANKING.values(), ids=NOT_A_RANKING.keys())
+async def test_note_whose_value_is_not_a_list_is_omitted_never_rejected(value: object) -> None:
+    [first, _] = await rank(model_reply({"notes": {"1": value, "2": [1]}}))
+
+    assert first == OMITTED
+
+
+async def test_note_the_reply_leaves_out_is_omitted_and_unknown_note_numbers_are_ignored() -> None:
+    assert await rank(model_reply({"notes": {"2": [1], "3": [1], "0": [1]}})) == (OMITTED, (D,))
+
+
+async def test_note_ranked_with_an_empty_list_is_rejected_outright_not_omitted() -> None:
+    assert await rank(model_reply({"notes": {"1": [], "2": [1]}})) == ((), (D,))
+
+
+async def test_reply_with_no_note_at_all_omits_every_note() -> None:
+    assert await rank(model_reply({"notes": {}})) == (OMITTED, OMITTED)
+
+
+async def test_note_whose_number_appears_twice_with_different_rankings_is_omitted() -> None:
     reply = LlmReply(text='{"notes": {"1": [1], "1": [2], "2": [1]}}', stop=LlmStop.COMPLETE)
 
-    assert await rank(reply) == ((), (D,))
+    assert await rank(reply) == (OMITTED, (D,))
 
 
 async def test_ranking_wrapped_in_prose_or_a_code_fence_is_read() -> None:
@@ -195,6 +216,7 @@ async def test_refusal_accepts_nothing_and_is_logged_as_a_warning(caplog: pytest
     assert rankings == ((), ())
     [record] = [record for record in caplog.records if record.getMessage() == "images_screened"]
     assert record.levelno == logging.WARNING
+    assert record.__dict__["omitted_notes"] == 0
 
 
 UNUSABLE_REPLIES: dict[str, LlmReply | Exception] = {
@@ -232,7 +254,8 @@ async def test_outcome_is_logged_with_counts_and_none_of_the_wiki_text(
         line["screened_candidates"],
         line["accepted_candidates"],
         line["notes_without_image"],
-    ) == (2, 4, 1, 1)
+        line["omitted_notes"],
+    ) == (2, 4, 1, 1, 1)
     assert "Picture of" not in logs.text
     assert "stop sign" not in logs.text
 
@@ -241,14 +264,18 @@ STOP_SIGN_QUERY = (ImageQuery(client_id=STOP_SIGN_NOTE.client_id, text="stop sig
 STOP_SIGN_RESULT = result_with(STOP_SIGN_NOTE)
 
 
-async def illustrate_stop_sign(judge: LlmCandidateJudge | FakeCandidateJudge) -> tuple[NoteMedia, ...]:
+async def fetch_stop_sign(judge: LlmCandidateJudge | FakeCandidateJudge) -> FetchedMedia:
     fetcher = commons_fetcher(
         lambda _: httpx2.Response(200, json=STOP_SIGN_SEARCH), ManualTime(), judge=judge
     )
     try:
-        return (await fetcher.fetch(JOB_ID, STOP_SIGN_RESULT, STOP_SIGN_QUERY)).attachments
+        return await fetcher.fetch(JOB_ID, STOP_SIGN_RESULT, STOP_SIGN_QUERY)
     finally:
         await fetcher.aclose()
+
+
+async def illustrate_stop_sign(judge: LlmCandidateJudge | FakeCandidateJudge) -> tuple[NoteMedia, ...]:
+    return (await fetch_stop_sign(judge)).attachments
 
 
 async def test_dec9_failure_unscreened_the_top_commons_hit_for_stop_sign_is_a_photo_of_letterboxes() -> None:
@@ -278,3 +305,33 @@ async def test_stop_sign_note_gets_no_image_when_the_judge_accepts_none_of_the_c
     llm = FakeLlmClient(model_reply({"notes": {"1": []}}))
 
     assert await illustrate_stop_sign(LlmCandidateJudge(llm=llm)) == ()
+
+
+def missing_stop_sign(reason: MissingImageReason) -> tuple[MissingImage, ...]:
+    return (MissingImage(client_id=STOP_SIGN_NOTE.client_id, reason=reason),)
+
+
+async def test_stop_sign_note_the_judge_leaves_out_is_missing_as_failed() -> None:
+    llm = FakeLlmClient(model_reply({"notes": {"2": [1]}}))
+
+    fetched = await fetch_stop_sign(LlmCandidateJudge(llm=llm))
+
+    assert fetched.attachments == ()
+    assert fetched.missing == missing_stop_sign(MissingImageReason.FAILED)
+
+
+async def test_stop_sign_note_the_judge_ranks_with_an_empty_list_is_missing_as_rejected() -> None:
+    llm = FakeLlmClient(model_reply({"notes": {"1": []}}))
+
+    fetched = await fetch_stop_sign(LlmCandidateJudge(llm=llm))
+
+    assert fetched.missing == missing_stop_sign(MissingImageReason.REJECTED)
+
+
+async def test_stop_sign_note_is_missing_as_rejected_when_the_judge_refuses_the_whole_batch() -> None:
+    llm = FakeLlmClient(LlmReply(text="I can't help with that.", stop=LlmStop.REFUSED))
+
+    fetched = await fetch_stop_sign(LlmCandidateJudge(llm=llm))
+
+    assert fetched.attachments == ()
+    assert fetched.missing == missing_stop_sign(MissingImageReason.REJECTED)
