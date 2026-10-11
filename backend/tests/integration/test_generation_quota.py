@@ -22,6 +22,7 @@ from deckly.main import API_PREFIX, create_app
 from tests.fakes import FakeTopicModerator, fresh_metrics
 from tests.integration.conftest import Cleanup, purge_quota, screen_topics_with, with_generation_limits
 from tests.integration.test_health_endpoint import LOOPBACK, Proxy
+from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -369,7 +370,7 @@ async def test_app_rejects_a_policy_violating_topic_with_a_422_stores_nothing_an
     topic_moderator: FakeTopicModerator,
 ) -> None:
     client, address = app_client
-    client_id, key = uuid4(), uuid4()
+    client_id, key = reserved_client_id(), uuid4()
     requesters.track(Requester(client_id=client_id, address=address))
     topic_moderator.outcome = False
 
@@ -393,7 +394,7 @@ async def test_app_gives_the_unit_back_when_the_topic_cannot_be_checked(
     topic_moderator: FakeTopicModerator,
 ) -> None:
     client, address = app_client
-    client_id = uuid4()
+    client_id = reserved_client_id()
     requesters.track(Requester(client_id=client_id, address=address))
     topic_moderator.outcome = UpstreamUnavailableError(5)
 
@@ -409,7 +410,7 @@ async def test_app_charges_a_new_job_once_and_reports_the_same_quota_on_health(
     app_client: tuple[httpx2.AsyncClient, str], cleanup: Cleanup, requesters: Requesters
 ) -> None:
     client, address = app_client
-    client_id, key = uuid4(), uuid4()
+    client_id, key = reserved_client_id(), uuid4()
     requesters.track(Requester(client_id=client_id, address=address))
 
     first = await post(client, cleanup, headers(client_id, key))
@@ -427,7 +428,7 @@ async def test_app_refuses_an_exhausted_client_with_a_429_and_stores_nothing(
     app_client: tuple[httpx2.AsyncClient, str], cleanup: Cleanup, requesters: Requesters
 ) -> None:
     client, address = app_client
-    client_id = uuid4()
+    client_id = reserved_client_id()
     requesters.track(Requester(client_id=client_id, address=address))
     for _ in range(2):
         assert (await post(client, cleanup, headers(client_id))).status_code == HTTPStatus.ACCEPTED
@@ -444,7 +445,7 @@ async def test_app_stops_spoofed_client_ids_from_one_address(
     app_client: tuple[httpx2.AsyncClient, str], cleanup: Cleanup, requesters: Requesters
 ) -> None:
     client, address = app_client
-    spoofed = [uuid4() for _ in range(4)]
+    spoofed = [reserved_client_id() for _ in range(4)]
     for client_id in spoofed:
         requesters.track(Requester(client_id=client_id, address=address))
 
@@ -458,7 +459,7 @@ async def test_app_ignores_a_forwarded_header_when_counting_the_address(
     app_client: tuple[httpx2.AsyncClient, str], cleanup: Cleanup, requesters: Requesters
 ) -> None:
     client, address = app_client
-    spoofed = [uuid4() for _ in range(4)]
+    spoofed = [reserved_client_id() for _ in range(4)]
     for client_id in spoofed:
         requesters.track(Requester(client_id=client_id, address=address))
 

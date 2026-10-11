@@ -19,6 +19,7 @@ from deckly.main import API_PREFIX, create_app
 from tests.domain.builders import FULL_RESULT, T0, at
 from tests.fakes import generation_request
 from tests.integration.conftest import Cleanup, open_queue_pool
+from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
 
 pytestmark = pytest.mark.integration
@@ -151,7 +152,7 @@ def test_cancelling_a_finished_job_aborts_nothing(
 
 
 def test_job_created_through_the_api_can_be_cancelled_once(client: TestClient, cleanup: Cleanup) -> None:
-    client_id = uuid4()
+    client_id = reserved_client_id()
     cleanup.client_ids.add(client_id)
     created = client.post(
         ENDPOINT, json=PAYLOAD, headers={"Idempotency-Key": str(uuid4()), "X-Client-Id": str(client_id)}

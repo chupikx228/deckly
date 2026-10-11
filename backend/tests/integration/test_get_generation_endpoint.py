@@ -20,6 +20,7 @@ from deckly.transport.generations import POLL_RETRY_AFTER_SECONDS
 from tests.domain.builders import FULL_RESULT, T0, at
 from tests.fakes import generation_request
 from tests.integration.conftest import Cleanup
+from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
 
 pytestmark = pytest.mark.integration
@@ -96,7 +97,7 @@ STORED_JOBS: dict[str, Callable[[], GenerationJob]] = {
 
 
 def test_job_created_through_the_api_polls_as_queued(client: TestClient, cleanup: Cleanup) -> None:
-    client_id = uuid4()
+    client_id = reserved_client_id()
     cleanup.client_ids.add(client_id)
     created = client.post(
         ENDPOINT, json=PAYLOAD, headers={"Idempotency-Key": str(uuid4()), "X-Client-Id": str(client_id)}

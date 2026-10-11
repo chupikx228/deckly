@@ -17,6 +17,7 @@ from tests.domain.builders import T0
 from tests.fakes import generation_request
 from tests.integration.conftest import Cleanup
 from tests.integration.test_health_endpoint import Dependency, Proxy, postgres_at, upstream
+from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -86,7 +87,7 @@ async def service(
 
 
 def client_headers(service: Service) -> dict[str, str]:
-    client_id = uuid4()
+    client_id = reserved_client_id()
     service.cleanup.client_ids.add(client_id)
     return {CLIENT_ID_HEADER: str(client_id)}
 
