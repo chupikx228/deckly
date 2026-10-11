@@ -1,15 +1,17 @@
+import asyncio
 import json
 import logging
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
+from itertools import batched
 from types import MappingProxyType
 from uuid import UUID
 
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.ports import ContentModerator
-from deckly.domain.deck import GenerationResult
+from deckly.domain.deck import Deck, GenerationResult
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.notes.note import Note
 from deckly.domain.regeneration import RegenerationRequest
@@ -29,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 NO_DECK_REPLACEMENT = None
 CONFLICTING_VALUE = None
+NOTES_PER_CONTENT_CHECK = 50
+NO_NOTES: tuple[Note, ...] = ()
 
 
 class Verdict(StrEnum):
@@ -50,6 +54,15 @@ class ContentVerdicts:
 
 
 REFUSED_CONTENT = ContentVerdicts(deck=Verdict.BLOCK, notes=NO_NOTE_VERDICTS)
+
+
+@dataclass(frozen=True, slots=True)
+class ContentCheck:
+    stop: LlmStop
+    verdicts: ContentVerdicts
+
+    def judged(self, notes: Sequence[Note]) -> list[Verdict | None]:
+        return [self.verdicts.notes.get(note_number(index)) for index in range(len(notes))]
 
 
 @contextmanager
@@ -142,19 +155,20 @@ class LlmContentModerator:
     async def screen(
         self, _job_id: UUID, request: GenerationRequest, result: GenerationResult
     ) -> GenerationResult:
-        with moderation_faults_as_upstream({"subject": "content"}):
-            reply = await self.llm.complete(build_content_prompt(result))
-            verdicts = content_verdicts(reply)
-        judged = [verdicts.notes.get(note_number(index)) for index in range(len(result.notes))]
+        batches = tuple(batched(result.notes, NOTES_PER_CONTENT_CHECK)) or (NO_NOTES,)
+        checks = await self._check_all(result.deck, batches)
+        judged = [
+            verdict for check, batch in zip(checks, batches, strict=True) for verdict in check.judged(batch)
+        ]
         kept = tuple(
             note for note, verdict in zip(result.notes, judged, strict=True) if verdict is Verdict.ALLOW
         )
-        deck_allowed = verdicts.deck is Verdict.ALLOW
+        deck_allowed = all(check.verdicts.deck is Verdict.ALLOW for check in checks)
         logger.log(
             logging.INFO if len(kept) == len(result.notes) and deck_allowed else logging.WARNING,
             "content_screened",
             extra={
-                "reply_stop": reply.stop,
+                "reply_stops": [check.stop for check in checks],
                 "screened_notes": len(result.notes),
                 "kept_notes": len(kept),
                 "blocked_notes": judged.count(Verdict.BLOCK),
@@ -164,6 +178,20 @@ class LlmContentModerator:
         )
         deck = result.deck if deck_allowed else repair_deck(NO_DECK_REPLACEMENT, request.topic)
         return GenerationResult(deck=deck, notes=kept)
+
+    async def _check_all(self, deck: Deck, batches: tuple[tuple[Note, ...], ...]) -> tuple[ContentCheck, ...]:
+        try:
+            async with asyncio.TaskGroup() as group:
+                tasks = [group.create_task(self._check(deck, batch)) for batch in batches]
+        except BaseExceptionGroup as failures:
+            first = failures.exceptions[0]
+            raise first from first.__cause__
+        return tuple(task.result() for task in tasks)
+
+    async def _check(self, deck: Deck, notes: tuple[Note, ...]) -> ContentCheck:
+        with moderation_faults_as_upstream({"subject": "content"}):
+            reply = await self.llm.complete(build_content_prompt(GenerationResult(deck=deck, notes=notes)))
+            return ContentCheck(stop=reply.stop, verdicts=content_verdicts(reply))
 
 
 @dataclass(frozen=True, slots=True)
