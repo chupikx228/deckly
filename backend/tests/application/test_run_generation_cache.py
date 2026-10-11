@@ -6,6 +6,7 @@ from uuid import UUID
 import pytest
 
 from deckly.application.exceptions import UpstreamUnavailableError
+from deckly.application.ports import MissingImage, MissingImageReason
 from deckly.domain.deck import GenerationResult
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import Cancelled, Failed, JobStage, JobStatus, Succeeded
@@ -361,6 +362,92 @@ async def test_a_deck_whose_media_step_failed_is_returned_but_not_cached_so_the_
 
     assert await succeeded_result(harness, second) == replace(GENERATED, notes=with_images(GENERATED.notes))
     assert len(harness.cache.writes) == 1
+
+
+def missing_image(note_number: int, reason: MissingImageReason) -> MissingImage:
+    return MissingImage(client_id=GENERATED.notes[note_number].client_id, reason=reason)
+
+
+async def test_a_deck_with_an_image_lost_to_a_failure_is_returned_but_not_cached_for_the_full_ttl() -> None:
+    harness = Harness()
+    harness.providers.missing = (missing_image(0, MissingImageReason.FAILED),)
+
+    first = await run(harness, WITH_IMAGES, client=1)
+
+    assert await succeeded_result(harness, first) == replace(GENERATED, notes=with_images(GENERATED.notes))
+    assert harness.cache.writes == []
+
+    harness.providers.missing = ()
+    second = await run(harness, WITH_IMAGES, client=2)
+
+    assert await succeeded_result(harness, second) == replace(GENERATED, notes=with_images(GENERATED.notes))
+    assert len(harness.providers.fetched_for) == 2
+    assert len(harness.cache.writes) == 1
+
+
+async def test_a_deck_whose_missing_images_were_all_legitimately_rejected_is_cached_in_full() -> None:
+    harness = Harness()
+    harness.providers.missing = (
+        missing_image(0, MissingImageReason.REJECTED),
+        missing_image(1, MissingImageReason.REJECTED),
+    )
+
+    first = await run(harness, WITH_IMAGES, client=1)
+    second = await run(harness, WITH_IMAGES, client=2)
+
+    assert await succeeded_result(harness, second) == await succeeded_result(harness, first)
+    assert len(harness.cache.writes) == 1
+    assert len(harness.providers.fetched_for) == 1
+
+
+async def test_a_failure_among_legitimate_rejections_keeps_the_deck_out_of_the_cache() -> None:
+    harness = Harness()
+    harness.providers.missing = (
+        missing_image(0, MissingImageReason.REJECTED),
+        missing_image(1, MissingImageReason.FAILED),
+        missing_image(2, MissingImageReason.REJECTED),
+    )
+
+    await run(harness, WITH_IMAGES)
+
+    assert harness.cache.writes == []
+
+
+async def test_a_failure_reported_for_a_note_that_is_not_in_the_result_does_not_block_the_cache() -> None:
+    harness = Harness()
+    stranger = MissingImage(client_id=UUID(int=4242, version=4), reason=MissingImageReason.FAILED)
+    harness.providers.missing = (stranger,)
+
+    await run(harness, WITH_IMAGES)
+
+    assert len(harness.cache.writes) == 1
+
+
+async def test_a_deck_that_asked_for_no_images_ignores_failures_and_is_cached() -> None:
+    harness = Harness()
+    harness.providers.missing = (missing_image(0, MissingImageReason.FAILED),)
+
+    await run(harness, MULTI_TYPE)
+
+    assert harness.providers.fetched_for == []
+    assert len(harness.cache.writes) == 1
+
+
+async def test_the_count_of_notes_that_lost_their_image_to_a_failure_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = Harness()
+    harness.providers.missing = (
+        missing_image(0, MissingImageReason.FAILED),
+        missing_image(0, MissingImageReason.FAILED),
+        missing_image(1, MissingImageReason.REJECTED),
+    )
+
+    with caplog.at_level(logging.INFO, logger=PIPELINE_LOGGER):
+        await run(harness, WITH_IMAGES)
+
+    [record] = [record for record in caplog.records if record.getMessage() == "media_attached"]
+    assert record.__dict__["failed_image_notes"] == 1
 
 
 async def test_a_deck_that_asked_for_no_images_is_cached_even_though_the_media_stage_never_ran() -> None:

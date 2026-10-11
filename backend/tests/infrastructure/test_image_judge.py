@@ -246,7 +246,7 @@ async def illustrate_stop_sign(judge: LlmCandidateJudge | FakeCandidateJudge) ->
         lambda _: httpx2.Response(200, json=STOP_SIGN_SEARCH), ManualTime(), judge=judge
     )
     try:
-        return await fetcher.fetch(JOB_ID, STOP_SIGN_RESULT, STOP_SIGN_QUERY)
+        return (await fetcher.fetch(JOB_ID, STOP_SIGN_RESULT, STOP_SIGN_QUERY)).attachments
     finally:
         await fetcher.aclose()
 

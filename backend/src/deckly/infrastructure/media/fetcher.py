@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from deckly.application.exceptions import UpstreamUnavailableError
-from deckly.application.ports import ImageQuery, NoteMedia
+from deckly.application.ports import FetchedMedia, ImageQuery, MissingImage, MissingImageReason, NoteMedia
 from deckly.domain.deck import GenerationResult
 from deckly.domain.notes.note import Note
 from deckly.infrastructure.media.client import ImageCandidate, ImageSearch, ImageSearchClient, MediaError
@@ -37,6 +37,7 @@ class SearchOutcome:
 @dataclass(frozen=True, slots=True)
 class SearchRound:
     outcomes: tuple[SearchOutcome, ...]
+    abandoned: tuple[ImageQuery, ...]
     deadline_reached: bool
 
 
@@ -65,6 +66,23 @@ def finished_outcome(task: asyncio.Task[SearchOutcome]) -> SearchOutcome | None:
     return task.result()
 
 
+def missing_images(searched: SearchRound, attachments: Iterable[NoteMedia]) -> tuple[MissingImage, ...]:
+    attached = {attachment.client_id for attachment in attachments}
+    missing = [
+        MissingImage(
+            client_id=outcome.query.client_id,
+            reason=MissingImageReason.REJECTED if outcome.failure is None else MissingImageReason.FAILED,
+        )
+        for outcome in searched.outcomes
+        if outcome.query.client_id not in attached
+    ]
+    missing.extend(
+        MissingImage(client_id=query.client_id, reason=MissingImageReason.FAILED)
+        for query in searched.abandoned
+    )
+    return tuple(missing)
+
+
 @dataclass(frozen=True, slots=True)
 class CommonsMediaFetcher:
     client: ImageSearchClient
@@ -75,7 +93,7 @@ class CommonsMediaFetcher:
 
     async def fetch(
         self, _job_id: UUID, result: GenerationResult, queries: tuple[ImageQuery, ...]
-    ) -> tuple[NoteMedia, ...]:
+    ) -> FetchedMedia:
         notes = {note.client_id: note for note in result.notes}
         illustrable = (query for query in queries if query.client_id in notes)
         searched = await self._search_all(one_query_per_note(illustrable, self.limits.max_images))
@@ -95,7 +113,7 @@ class CommonsMediaFetcher:
                 "deadline_reached": searched.deadline_reached,
             },
         )
-        return attachments
+        return FetchedMedia(attachments=attachments, missing=missing_images(searched, attachments))
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -109,9 +127,10 @@ class CommonsMediaFetcher:
                 tasks.extend(group.create_task(self._search(query, gate)) for query in queries)
         except TimeoutError:
             deadline_reached = True
-        outcomes = (finished_outcome(task) for task in tasks)
+        settled = tuple((query, finished_outcome(task)) for query, task in zip(queries, tasks, strict=True))
         return SearchRound(
-            outcomes=tuple(outcome for outcome in outcomes if outcome is not None),
+            outcomes=tuple(outcome for _, outcome in settled if outcome is not None),
+            abandoned=tuple(query for query, outcome in settled if outcome is None),
             deadline_reached=deadline_reached,
         )
 
