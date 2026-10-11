@@ -416,6 +416,14 @@ an outage, error with the traceback for anything else) and succeeds with the gen
 they were. An image outage therefore never fails a job and never produces `PROVIDER_UNAVAILABLE`.
 An image classifier outage, or an unreadable reply, is such an escape: the job succeeds without
 images and the result is not cached.
+
+The port also reports why each searched note has no image: `rejected` (no search hit, no
+candidate with a derivable licence, or none the classifier accepted, which a retry would most
+likely repeat) or `failed` (the search errored, its circuit was open, or it was cut off by the
+stage deadline, which a retry may well fix). A job whose result has any `failed` note is
+returned but not cached, exactly like one whose media stage raised; `rejected` notes do not
+count, and a request without `includeImages` never has any. The pipeline logs the count as
+`failed_image_notes` on `media_attached`.
 The port returns attachments keyed by `clientId`, never notes, so a media adapter cannot drop or
 duplicate a note; attachments for unknown notes are ignored and a repeated `mediaId` is kept once.
 

@@ -14,10 +14,12 @@ from deckly.application.exceptions import RateLimitedError, UnreadableJobRequest
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
 from deckly.application.pipeline import RunGeneration
 from deckly.application.ports import (
+    FetchedMedia,
     GeneratedCards,
     IdempotencyScope,
     ImageQuery,
     JobTransition,
+    MissingImage,
     NoteMedia,
     Quota,
     Requester,
@@ -593,6 +595,7 @@ class FakeProviders:
         self.screen_failure: Exception | None = None
         self.image_queries: tuple[ImageQuery, ...] | None = None
         self.attach: Callable[[tuple[ImageQuery, ...]], tuple[NoteMedia, ...]] = images_for
+        self.missing: tuple[MissingImage, ...] = ()
         self.calls: list[JobStage] = []
         self.received: dict[JobStage, object] = {}
         self.retrieved_for: list[UUID] = []
@@ -638,11 +641,11 @@ class FakeProviders:
 
     async def fetch(
         self, job_id: UUID, result: GenerationResult, queries: tuple[ImageQuery, ...]
-    ) -> tuple[NoteMedia, ...]:
+    ) -> FetchedMedia:
         self.fetched_for.append(job_id)
         self.illustrated.append(result)
         await self._reach(JobStage.FETCHING_MEDIA, queries)
-        return self.attach(queries)
+        return FetchedMedia(attachments=self.attach(queries), missing=self.missing)
 
     async def _reach(self, stage: JobStage, received: object) -> None:
         self.calls.append(stage)

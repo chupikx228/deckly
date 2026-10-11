@@ -20,7 +20,7 @@ async def test_configured_judge_keeps_the_letterbox_photo_out_and_picks_a_real_s
         lambda _: httpx2.Response(200, json=STOP_SIGN_SEARCH), ManualTime(), judge=LlmCandidateJudge(llm=llm)
     )
     try:
-        [attachment] = await fetcher.fetch(
+        fetched = await fetcher.fetch(
             job_id(1),
             result_with(STOP_SIGN_NOTE),
             (ImageQuery(client_id=STOP_SIGN_NOTE.client_id, text="stop sign"),),
@@ -29,4 +29,5 @@ async def test_configured_judge_keeps_the_letterbox_photo_out_and_picks_a_real_s
         await fetcher.aclose()
         await llm.aclose()
 
+    [attachment] = fetched.attachments
     assert attachment.media.url.split("/")[-2] in STOP_SIGN_FILES

@@ -85,6 +85,23 @@ class NoteMedia:
     media: Media
 
 
+class MissingImageReason(StrEnum):
+    REJECTED = "rejected"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class MissingImage:
+    client_id: UUID
+    reason: MissingImageReason
+
+
+@dataclass(frozen=True, slots=True)
+class FetchedMedia:
+    attachments: tuple[NoteMedia, ...] = ()
+    missing: tuple[MissingImage, ...] = ()
+
+
 class JobStore(Protocol):
     async def add(
         self, job: GenerationJob, request: GenerationRequest, scope: IdempotencyScope
@@ -162,7 +179,7 @@ class ContentModerator(Protocol):
 class MediaFetcher(Protocol):
     async def fetch(
         self, job_id: UUID, result: GenerationResult, queries: tuple[ImageQuery, ...]
-    ) -> tuple[NoteMedia, ...]: ...
+    ) -> FetchedMedia: ...
 
 
 class NoteRegenerator(Protocol):

@@ -24,6 +24,8 @@ from deckly.application.ports import (
     JobStore,
     JobTransition,
     MediaFetcher,
+    MissingImage,
+    MissingImageReason,
     NoteMedia,
     ResultCache,
     SourceParser,
@@ -82,6 +84,16 @@ def attach_media(result: GenerationResult, attachments: Iterable[NoteMedia]) -> 
         media_by_note.setdefault(attachment.client_id, []).append(attachment.media)
     notes = tuple(with_media(note, media_by_note.get(note.client_id, ())) for note in result.notes)
     return replace(result, notes=notes)
+
+
+def failed_image_notes(result: GenerationResult, missing: Iterable[MissingImage]) -> int:
+    client_ids = {note.client_id for note in result.notes}
+    failed = {
+        item.client_id
+        for item in missing
+        if item.reason is MissingImageReason.FAILED and item.client_id in client_ids
+    }
+    return len(failed)
 
 
 def failure_level(error: Exception) -> int:
@@ -236,7 +248,8 @@ class RunGeneration:
         self, job_id: UUID, result: GenerationResult, queries: tuple[ImageQuery, ...]
     ) -> Illustrated:
         try:
-            illustrated = attach_media(result, await self.media.fetch(job_id, result, queries))
+            fetched = await self.media.fetch(job_id, result, queries)
+            illustrated = attach_media(result, fetched.attachments)
         except Exception as error:
             logger.log(
                 failure_level(error),
@@ -245,6 +258,7 @@ class RunGeneration:
                 extra={"job_id": str(job_id), "image_queries": len(queries)},
             )
             return Illustrated(result=result, complete=False)
+        failed_notes = failed_image_notes(result, fetched.missing)
         illustrated_notes = sum(
             1 for before, after in zip(result.notes, illustrated.notes, strict=True) if after is not before
         )
@@ -254,9 +268,10 @@ class RunGeneration:
                 "job_id": str(job_id),
                 "image_queries": len(queries),
                 "illustrated_notes": illustrated_notes,
+                "failed_image_notes": failed_notes,
             },
         )
-        return Illustrated(result=illustrated, complete=True)
+        return Illustrated(result=illustrated, complete=failed_notes == 0)
 
     @asynccontextmanager
     async def _stage(self, job_id: UUID, stage: JobStage) -> AsyncIterator[None]:

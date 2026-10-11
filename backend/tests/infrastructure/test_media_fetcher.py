@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 from uuid import UUID
 
@@ -10,7 +11,8 @@ from deckly.application.correlation import JOB_ID as JOB_ID_FIELD
 from deckly.application.correlation import correlated
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.pipeline import RunGeneration
-from deckly.application.ports import ImageQuery, NoteMedia
+from deckly.application.ports import ImageQuery, MissingImage, MissingImageReason, NoteMedia
+from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import STAGE_ORDER, GenerationJob, Succeeded
 from deckly.domain.media import MediaKind
 from deckly.infrastructure.media.client import (
@@ -116,6 +118,14 @@ def fetcher_with(
     return fetcher, client
 
 
+REJECTED = MissingImageReason.REJECTED
+FAILED = MissingImageReason.FAILED
+
+
+def missing(number: int, reason: MissingImageReason) -> MissingImage:
+    return MissingImage(client_id=query(number).client_id, reason=reason)
+
+
 def titles(attachments: tuple[NoteMedia, ...]) -> list[tuple[UUID, str | None]]:
     return [(attachment.client_id, attachment.media.alt) for attachment in attachments]
 
@@ -126,7 +136,7 @@ async def test_each_note_gets_the_first_licensed_candidate_the_judge_accepts() -
         (candidate("File:D.png"),),
     )
 
-    attachments = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
+    attachments = (await fetcher.fetch(JOB, RESULT, (query(1), query(2)))).attachments
 
     assert titles(attachments) == [
         (query(1).client_id, "Picture of File:B.png"),
@@ -145,7 +155,7 @@ async def test_note_whose_candidates_have_no_derivable_licence_gets_no_image_and
         (candidate("File:C.png"),),
     )
 
-    attachments = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
+    attachments = (await fetcher.fetch(JOB, RESULT, (query(1), query(2)))).attachments
 
     assert [attachment.client_id for attachment in attachments] == [query(2).client_id]
 
@@ -154,7 +164,7 @@ async def test_the_same_file_is_not_attached_to_two_notes() -> None:
     shared = candidate("File:Shared.png")
     fetcher, _ = fetcher_with((shared,), (shared, candidate("File:Other.png")), (shared,))
 
-    attachments = await fetcher.fetch(JOB, RESULT, (query(1), query(2), query(3)))
+    attachments = (await fetcher.fetch(JOB, RESULT, (query(1), query(2), query(3)))).attachments
 
     assert titles(attachments) == [
         (query(1).client_id, "Picture of File:Shared.png"),
@@ -218,7 +228,7 @@ async def test_judge_ranking_wins_over_the_search_rank() -> None:
         judge=FakeCandidateJudge(reversed_rankings),
     )
 
-    attachments = await fetcher.fetch(JOB, RESULT, (query(1),))
+    attachments = (await fetcher.fetch(JOB, RESULT, (query(1),))).attachments
 
     assert titles(attachments) == [(query(1).client_id, "Picture of File:Relevant.png")]
 
@@ -226,7 +236,7 @@ async def test_judge_ranking_wins_over_the_search_rank() -> None:
 async def test_note_whose_candidates_the_judge_all_rejects_gets_no_image() -> None:
     fetcher, _ = fetcher_with((candidate("File:A.png"),), judge=FakeCandidateJudge(nothing_accepted))
 
-    assert await fetcher.fetch(JOB, RESULT, (query(1), query(2))) == ()
+    assert (await fetcher.fetch(JOB, RESULT, (query(1), query(2)))).attachments == ()
 
 
 async def test_file_the_judge_picks_for_two_notes_goes_to_the_first_and_the_second_takes_its_next_pick() -> (
@@ -235,7 +245,7 @@ async def test_file_the_judge_picks_for_two_notes_goes_to_the_first_and_the_seco
     shared = candidate("File:Shared.png")
     fetcher, _ = fetcher_with((shared, candidate("File:First.png")), (shared, candidate("File:Second.png")))
 
-    attachments = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
+    attachments = (await fetcher.fetch(JOB, RESULT, (query(1), query(2)))).attachments
 
     assert titles(attachments) == [
         (query(1).client_id, "Picture of File:Shared.png"),
@@ -247,7 +257,7 @@ async def test_judge_is_not_asked_when_no_candidate_survives_the_licence_checks(
     judge = FakeCandidateJudge()
     fetcher, _ = fetcher_with((unlicensed("File:A.png"),), (), judge=judge)
 
-    assert await fetcher.fetch(JOB, RESULT, (query(1), query(2))) == ()
+    assert (await fetcher.fetch(JOB, RESULT, (query(1), query(2)))).attachments == ()
     assert judge.calls == []
 
 
@@ -263,7 +273,9 @@ async def test_judge_outage_escapes_the_fetcher_so_no_unscreened_image_ships() -
 async def test_query_for_a_note_missing_from_the_result_is_never_searched() -> None:
     fetcher, client = fetcher_with((candidate("File:A.png"),))
 
-    attachments = await fetcher.fetch(JOB, result_with(basic_note(2)), (query(1, "gone"), query(2, "kept")))
+    attachments = (
+        await fetcher.fetch(JOB, result_with(basic_note(2)), (query(1, "gone"), query(2, "kept")))
+    ).attachments
 
     assert [search.text for search in client.searches] == ["kept"]
     assert [attachment.client_id for attachment in attachments] == [query(2).client_id]
@@ -290,7 +302,7 @@ async def test_only_the_first_query_of_a_note_is_searched_and_only_up_to_the_ima
 async def test_no_queries_means_no_search() -> None:
     fetcher, client = fetcher_with(())
 
-    assert await fetcher.fetch(JOB, RESULT, ()) == ()
+    assert (await fetcher.fetch(JOB, RESULT, ())).attachments == ()
     assert client.searches == []
 
 
@@ -298,7 +310,7 @@ async def test_transient_failure_is_retried_and_then_attaches() -> None:
     time = ManualTime()
     fetcher, client = fetcher_with(MediaUnavailableError("503"), (candidate("File:A.png"),), time=time)
 
-    attachments = await fetcher.fetch(JOB, RESULT, (query(1),))
+    attachments = (await fetcher.fetch(JOB, RESULT, (query(1),))).attachments
 
     assert len(attachments) == 1
     assert len(client.searches) == 2
@@ -320,7 +332,7 @@ async def test_failed_search_leaves_its_note_without_an_image_and_never_raises(
 ) -> None:
     fetcher, client = fetcher_with(error)
 
-    assert await fetcher.fetch(JOB, RESULT, (query(1),)) == ()
+    assert (await fetcher.fetch(JOB, RESULT, (query(1),))).attachments == ()
     assert len(client.searches) == attempts
 
 
@@ -332,7 +344,7 @@ async def test_one_failed_search_does_not_cost_the_other_notes_their_images() ->
         limits=replace(MEDIA_LIMITS, max_concurrency=1),
     )
 
-    attachments = await fetcher.fetch(JOB, RESULT, (query(1), query(2), query(3)))
+    attachments = (await fetcher.fetch(JOB, RESULT, (query(1), query(2), query(3)))).attachments
 
     assert [attachment.client_id for attachment in attachments] == [query(1).client_id, query(3).client_id]
 
@@ -343,7 +355,7 @@ async def test_open_circuit_means_no_images_without_calling_the_provider() -> No
     breaker.record_failure()
     fetcher, client = fetcher_with((candidate("File:A.png"),), breaker=breaker, time=time)
 
-    assert await fetcher.fetch(JOB, RESULT, (query(1), query(2))) == ()
+    assert (await fetcher.fetch(JOB, RESULT, (query(1), query(2)))).attachments == ()
     assert client.searches == []
 
 
@@ -354,7 +366,9 @@ async def test_repeated_blocks_open_the_circuit_and_the_remaining_searches_fail_
         MediaBlockedError("403"), breaker=breaker, time=time, limits=replace(MEDIA_LIMITS, max_concurrency=1)
     )
 
-    assert await fetcher.fetch(JOB, RESULT, tuple(query(number) for number in range(1, 6))) == ()
+    assert (
+        await fetcher.fetch(JOB, RESULT, tuple(query(number) for number in range(1, 6)))
+    ).attachments == ()
     assert len(client.searches) == 2
     assert breaker.state is CircuitState.OPEN
 
@@ -367,7 +381,7 @@ async def test_stage_deadline_keeps_the_images_found_in_time_and_abandons_the_re
     )
 
     with caplog.at_level(logging.INFO, logger=FETCHER_LOGGER):
-        attachments = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
+        attachments = (await fetcher.fetch(JOB, RESULT, (query(1), query(2)))).attachments
 
     assert [attachment.client_id for attachment in attachments] == [query(1).client_id]
     [record] = [record for record in caplog.records if record.getMessage() == "media_fetched"]
@@ -442,6 +456,112 @@ async def test_outcome_is_logged_with_counts_and_no_query_text() -> None:
     assert "secret subject" not in logs.text
 
 
+async def test_note_without_a_derivable_licence_is_missing_as_rejected_and_attached_notes_are_not() -> None:
+    fetcher, _ = fetcher_with((unlicensed("File:A.png"),), (candidate("File:B.png"),))
+
+    fetched = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
+
+    assert [attachment.client_id for attachment in fetched.attachments] == [query(2).client_id]
+    assert fetched.missing == (missing(1, REJECTED),)
+
+
+async def test_note_whose_candidates_the_judge_all_rejects_is_missing_as_rejected() -> None:
+    fetcher, _ = fetcher_with((candidate("File:A.png"),), judge=FakeCandidateJudge(nothing_accepted))
+
+    fetched = await fetcher.fetch(JOB, RESULT, (query(1),))
+
+    assert fetched.missing == (missing(1, REJECTED),)
+
+
+async def test_note_whose_search_found_nothing_is_missing_as_rejected() -> None:
+    fetcher, _ = fetcher_with(())
+
+    fetched = await fetcher.fetch(JOB, RESULT, (query(1),))
+
+    assert fetched.missing == (missing(1, REJECTED),)
+
+
+async def test_note_whose_only_candidate_went_to_an_earlier_note_is_missing_as_rejected() -> None:
+    shared = candidate("File:Shared.png")
+    fetcher, _ = fetcher_with((shared,), (shared,))
+
+    fetched = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
+
+    assert [attachment.client_id for attachment in fetched.attachments] == [query(1).client_id]
+    assert fetched.missing == (missing(2, REJECTED),)
+
+
+@pytest.mark.parametrize(("error", "attempts"), FAILED_SEARCHES.values(), ids=FAILED_SEARCHES.keys())
+async def test_note_whose_search_failed_is_missing_as_failed(error: Exception, attempts: int) -> None:
+    fetcher, client = fetcher_with(error)
+
+    fetched = await fetcher.fetch(JOB, RESULT, (query(1),))
+
+    assert fetched.missing == (missing(1, FAILED),)
+    assert len(client.searches) == attempts
+
+
+async def test_open_circuit_marks_every_searched_note_as_failed() -> None:
+    time = ManualTime()
+    breaker = time.breaker(failure_threshold=1)
+    breaker.record_failure()
+    fetcher, _ = fetcher_with((candidate("File:A.png"),), breaker=breaker, time=time)
+
+    fetched = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
+
+    assert fetched.missing == (missing(1, FAILED), missing(2, FAILED))
+
+
+async def test_note_whose_search_was_cut_off_by_the_stage_deadline_is_missing_as_failed() -> None:
+    fetcher, _ = fetcher_with(
+        (candidate("File:A.png"),), hang_search, limits=replace(MEDIA_LIMITS, deadline_seconds=0.05)
+    )
+
+    fetched = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
+
+    assert [attachment.client_id for attachment in fetched.attachments] == [query(1).client_id]
+    assert fetched.missing == (missing(2, FAILED),)
+
+
+async def test_failed_and_rejected_notes_are_told_apart_in_one_fetch() -> None:
+    fetcher, _ = fetcher_with(
+        (unlicensed("File:A.png"),),
+        MediaRejectedError("400"),
+        (candidate("File:C.png"),),
+        limits=replace(MEDIA_LIMITS, max_concurrency=1),
+    )
+
+    fetched = await fetcher.fetch(JOB, RESULT, (query(1), query(2), query(3)))
+
+    assert [attachment.client_id for attachment in fetched.attachments] == [query(3).client_id]
+    assert fetched.missing == (missing(1, REJECTED), missing(2, FAILED))
+
+
+async def test_note_with_several_queries_is_reported_missing_once_for_its_first_search() -> None:
+    fetcher, client = fetcher_with(MediaRejectedError("400"), (candidate("File:A.png"),))
+
+    fetched = await fetcher.fetch(JOB, RESULT, (query(1, "first"), query(1, "second")))
+
+    assert [search.text for search in client.searches] == ["first"]
+    assert fetched.missing == (missing(1, FAILED),)
+
+
+async def test_note_beyond_the_image_cap_is_not_reported_missing() -> None:
+    fetcher, _ = fetcher_with((), limits=replace(MEDIA_LIMITS, max_images=1))
+
+    fetched = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
+
+    assert fetched.missing == (missing(1, REJECTED),)
+
+
+async def test_query_for_a_note_missing_from_the_result_is_not_reported_missing() -> None:
+    fetcher, _ = fetcher_with(MediaUnavailableError("503"), ())
+
+    fetched = await fetcher.fetch(JOB, result_with(basic_note(2)), (query(1, "gone"), query(2)))
+
+    assert fetched.missing == (missing(2, REJECTED),)
+
+
 async def test_closing_the_fetcher_closes_the_image_client() -> None:
     fetcher, client = fetcher_with(())
 
@@ -484,9 +604,17 @@ async def run_with_commons(
     return await harness.get(job_id), seen
 
 
-async def run_with_judge(judge: FakeCandidateJudge, respond: object) -> tuple[GenerationJob, Harness]:
+async def run_with_handler(
+    handler: Callable[[httpx2.Request], httpx2.Response],
+    judge: FakeCandidateJudge | None = None,
+    request: GenerationRequest = WITH_IMAGES,
+) -> tuple[GenerationJob, Harness]:
     harness = Harness()
     harness.providers.result = result_with(basic_note(1), basic_note(2))
+    harness.providers.image_queries = (
+        ImageQuery(client_id=basic_note(1).client_id, text="alpha sign"),
+        ImageQuery(client_id=basic_note(2).client_id, text="beta sign"),
+    )
     run = RunGeneration(
         store=harness.store,
         cache=harness.cache,
@@ -494,13 +622,17 @@ async def run_with_judge(judge: FakeCandidateJudge, respond: object) -> tuple[Ge
         parser=harness.providers,
         generator=harness.providers,
         moderator=harness.providers,
-        media=commons_fetcher(lambda _: httpx2.Response(200, json=respond), ManualTime(), judge=judge),
+        media=commons_fetcher(handler, ManualTime(), judge=judge),
         clock=lambda: harness.now,
         telemetry=fresh_telemetry(),
     )
-    job_id = (await harness.create(WITH_IMAGES, scope(), ADDRESS)).job.job_id
+    job_id = (await harness.create(request, scope(), ADDRESS)).job.job_id
     await run(job_id)
     return await harness.get(job_id), harness
+
+
+async def run_with_judge(judge: FakeCandidateJudge, respond: object) -> tuple[GenerationJob, Harness]:
+    return await run_with_handler(lambda _: httpx2.Response(200, json=respond), judge=judge)
 
 
 OUTAGES: dict[str, object] = {
@@ -648,3 +780,75 @@ async def test_bug_in_the_media_adapter_still_yields_a_succeeded_job(
     assert [entry.stage for entry in harness.store.history] == [*STAGE_ORDER, None]
     [record] = [record for record in caplog.records if record.getMessage() == "media_skipped"]
     assert record.levelno == logging.ERROR
+
+
+NETWORK_TIMEOUT = httpx2.ReadTimeout("slow")
+
+
+def searched_for(request: httpx2.Request, phrase: str) -> bool:
+    return phrase in request.url.params["gsrsearch"]
+
+
+def alpha_unlicensed_beta_licensed(request: httpx2.Request) -> httpx2.Response:
+    page = commons_page(1, "File:Alpha.png", license_code=None)
+    if searched_for(request, "beta"):
+        page = commons_page(2, "File:Beta.png")
+    return httpx2.Response(200, json=commons_results(page))
+
+
+def alpha_times_out_beta_licensed(request: httpx2.Request) -> httpx2.Response:
+    if searched_for(request, "alpha"):
+        raise NETWORK_TIMEOUT
+    return httpx2.Response(200, json=commons_results(commons_page(2, "File:Beta.png")))
+
+
+def alpha_times_out_beta_unlicensed(request: httpx2.Request) -> httpx2.Response:
+    if searched_for(request, "alpha"):
+        raise NETWORK_TIMEOUT
+    return httpx2.Response(200, json=commons_results(commons_page(2, "File:Beta.png", license_code=None)))
+
+
+def illustrated_notes(job: GenerationJob) -> list[int]:
+    assert isinstance(job.state, Succeeded)
+    return [number for number, note in enumerate(job.state.result.notes, start=1) if note.media]
+
+
+async def test_deck_whose_only_missing_image_was_rejected_for_its_licence_is_cached_in_full() -> None:
+    job, harness = await run_with_handler(alpha_unlicensed_beta_licensed)
+
+    assert illustrated_notes(job) == [2]
+    assert len(harness.cache.writes) == 1
+
+
+async def test_deck_whose_only_missing_image_was_rejected_by_the_judge_is_cached_in_full() -> None:
+    job, harness = await run_with_handler(
+        lambda _: httpx2.Response(200, json=commons_results(commons_page(1))),
+        judge=FakeCandidateJudge(nothing_accepted),
+    )
+
+    assert illustrated_notes(job) == []
+    assert len(harness.cache.writes) == 1
+
+
+async def test_deck_with_one_image_lost_to_a_search_timeout_is_returned_but_not_cached() -> None:
+    job, harness = await run_with_handler(alpha_times_out_beta_licensed)
+
+    assert illustrated_notes(job) == [2]
+    assert harness.cache.writes == []
+
+
+async def test_deck_with_a_failure_and_a_rejection_is_treated_as_containing_the_failure() -> None:
+    job, harness = await run_with_handler(alpha_times_out_beta_unlicensed)
+
+    assert illustrated_notes(job) == []
+    assert harness.cache.writes == []
+
+
+async def test_deck_that_asked_for_no_images_never_searches_and_is_cached() -> None:
+    def refuse(_: httpx2.Request) -> httpx2.Response:
+        raise NETWORK_TIMEOUT
+
+    job, harness = await run_with_handler(refuse, request=replace(WITH_IMAGES, include_images=False))
+
+    assert illustrated_notes(job) == []
+    assert len(harness.cache.writes) == 1
