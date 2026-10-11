@@ -233,6 +233,22 @@ job. `DECKLY_PROVIDER_MODEL_PROVIDER` picks the client: `anthropic` (official SD
 (raw `httpx2` against `models/{model}:generateContent`, JSON output mode). The same choice
 drives every model call: card generation, topic and content moderation, and note regeneration.
 
+For DeepSeek, every request sends `thinking: {"type": "disabled"}`. deepseek-flash thinks at
+`high` effort by default, and its reasoning tokens count against `max_tokens`: now and then it
+reasons until the cap runs out and answers `finish_reason: "length"` with `content` exactly
+empty, which is no JSON to salvage. How often depends on the prompt rather than on chance. On five
+real regenerate prompts at the 1000-token cap (October 2026), 7 of 65 replies came back empty,
+all from two of the prompts, and they took 6.5–7.6 s, so under the 4.5 s regenerate timeout they
+surfaced as timeouts: 14 of 65 calls ran past 4.5 s. `reasoning_effort: "low"` did not help (7 of
+40 empty). With thinking off, none of 65 came back empty, the model took 1.5 s at p50 and 2.7 s
+at most, 25 of 25 replies yielded a valid note against 23 of 25 with thinking on, and the
+moderation, image-judge and card-generator live tests still pass. DeepSeek's JSON-mode
+documentation also warns that the API "may occasionally return empty content"; none came back in
+those 65 calls. An empty reply cut at the cap stays an answer, `LlmStop.TRUNCATED` with no text,
+for every provider: it is not retried and does not count against the circuit breaker, because it
+follows from the prompt and the budget, not from a provider fault, and a retry spends the same
+budget on the same prompt.
+
 For Gemini, set `DECKLY_PROVIDER_MODEL_BASE_URL=https://generativelanguage.googleapis.com/v1beta`
 and Gemini 3.x model names in `DECKLY_PROVIDER_MODEL_NAME` and
 `DECKLY_PROVIDER_MODERATION_MODEL_NAME`. The key travels in the `x-goog-api-key` header, never in
@@ -344,7 +360,7 @@ the regenerate request shape, spread over two and a half hours of one afternoon)
 | Search, same, on a new connection     | 2.4 s  | 2.9 s  | 4.3 s  | 10 % at 3.0 s           |
 | Search, query repeated within minutes | 0.5 s  | 1.1 s  | 4.8 s  | (cached by Tavily)      |
 | Request check                         | 1.0 s  | 1.5 s  | 1.7 s  | none                    |
-| Model, useful replies                 | 3.0 s  | 4.2 s  | 4.5 s  | 25 % timed out at 4.5 s |
+| Model, useful replies, thinking on    | 3.0 s  | 4.2 s  | 4.5 s  | 25 % timed out at 4.5 s |
 | Note check                            | 1.0 s  | 1.3 s  | 1.4 s  | none                    |
 | Parsing, validation and the response  | 0.07 s | 0.07 s | 0.37 s | none                    |
 
@@ -354,21 +370,36 @@ rows are the ones that count, and on a quiet API process the connection is usual
 searches timed out, 40 % on a new connection, and per-round medians drifted between 1.5 s and 2.9 s
 across the afternoon. Connecting to Tavily takes about 0.35 s, and leaving out the raw page content
 saves about 0.3 s, so neither explains the latency. The search went from 2.5 s to 3.0 s, taking
-the 0.5 s from the overhead, which used at most 0.37 s. The model and the note check already
-reach close to their timeouts, and the rate limit has not been measured, so neither gives time.
+the 0.5 s from the overhead, which used at most 0.37 s. The model and the note check then
+reached close to their timeouts, and the rate limit has not been measured, so neither gave time.
 A wider search would cut timeouts only from 8 % to 3 % at 3.5 s, small next to the model's 25 %:
-about one call in four runs into the 1000-token output cap at about 5.1 s with no content at all,
-which no timeout rescues. Earlier measurements put the search at 0.2–1.6 s because the live test
-then searched the same topic every run and Tavily answered from its cache.
+about one call in four ran into the 1000-token output cap with no content at all, which no
+timeout rescues. Earlier measurements put the search at 0.2–1.6 s because the live test then
+searched the same topic every run and Tavily answered from its cache.
+
+That 25 % was DeepSeek reasoning until the output cap ran out (see Card generation). With
+thinking off, measured the same way (October 2026, 36 regenerations over 20 minutes):
+
+| Step          | p50    | p90   | max   | Over its timeout |
+| ------------- | ------ | ----- | ----- | ---------------- |
+| Search        | 1.8 s  | 2.4 s | 3.0 s | 1 of 36 at 3.0 s |
+| Request check | 1.0 s  | 1.3 s | 1.4 s | none             |
+| Model         | 1.35 s | 1.7 s | 2.4 s | none             |
+| Note check    | 0.9 s  | 1.2 s | 1.4 s | none             |
+| Whole request | 4.0 s  | 5.0 s | 6.1 s | none at 10 s     |
+
+35 of 36 regenerations succeeded; the one failure was the search timeout. The model now leaves
+about 2 s of its 4.5 s unused, but the split is left as it is until the search and the note check,
+which still reaches 1.4 s of its 1.5 s, have been measured over a longer stretch.
 
 `tests/live/test_regeneration_live.py` (`make test-live`) times every step against the configured
 provider and fails when one does not fit its timeout: run it after switching provider or model.
 Each sample searches its own topic, drawn at random from 160 road-sign topics (20 countries × 8
 kinds of sign), so the search leg measures a query Tavily has not cached. Two back-to-back runs
 repeat a topic about one time in twenty. The topics stay on road signs so the rejected card the
-test sends still belongs to the deck. With the measured rates above, a run fails on a slow search
-about one time in five and on the model's empty replies more often than that, so read a failure
-from the `regeneration_latency_measured` line it logs, not as a regression on its own.
+test sends still belongs to the deck. With the measured rates above, a run of three regenerations
+fails on a slow search about one time in ten, so read a failure from the
+`regeneration_latency_measured` line it logs, not as a regression on its own.
 
 Search, model and both checks get **one attempt each, no retry**: a second attempt after a timeout
 cannot fit in what is left, and one that follows an instant `429`/`5xx` is better left to the
@@ -487,8 +518,10 @@ MAX_ATTEMPTS}` per chunk. Because the chunks run concurrently, the filter's wall
   the input. 50-note chunks took 1.7–3.4 s and 330–610 output tokens. Ten 200-card runs of four
   concurrent chunks took 2.1–3.0 s wall time. The single call already fit its timeout, so chunking
   buys two things: a retry that fits (a second attempt only fits when the first fails within about
-  5 s, minus backoff), and replies about 6× under the output cap instead of 3×, which matters
-  because of DeepSeek's empty replies at the cap.
+  5 s, minus backoff), and replies about 6× under the output cap instead of 3×, which mattered
+  because of DeepSeek's empty replies at the cap. Those figures were measured with DeepSeek's
+  thinking on; with it off (see Card generation), the 200-card live test of four concurrent
+  chunks took 2.4 s.
 
 - **Image screening** (`LlmCandidateJudge`, wired in the worker): images are found after the
   content filter has run, and Commons titles and descriptions are third-party wiki text, so one

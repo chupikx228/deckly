@@ -18,6 +18,7 @@ PROVIDER = "DeepSeek"
 CHAT_COMPLETIONS_PATH = "/chat/completions"
 AUTHORIZATION_HEADER = "Authorization"
 JSON_OUTPUT: Mapping[str, str] = {"type": "json_object"}
+THINKING_OFF: Mapping[str, str] = {"type": "disabled"}
 TRANSIENT_FINISH_REASONS = frozenset({"insufficient_system_resource", "aborted"})
 STOPS: Mapping[str, LlmStop] = {"length": LlmStop.TRUNCATED, "content_filter": LlmStop.REFUSED}
 
@@ -31,6 +32,7 @@ def request_body(endpoint: LlmEndpoint, prompt: LlmPrompt) -> dict[str, object]:
         ],
         "max_tokens": endpoint.max_output_tokens,
         "response_format": dict(JSON_OUTPUT),
+        "thinking": dict(THINKING_OFF),
         "stream": False,
     }
 
