@@ -39,7 +39,7 @@ from deckly.infrastructure.moderation.moderator import LlmContentModerator
 from deckly.infrastructure.observability.metrics import Metrics
 from deckly.infrastructure.observability.runtime import Observability
 from deckly.infrastructure.observability.tracing import continued_trace, trace_carrier_from
-from deckly.infrastructure.queue import GENERATION_TASK
+from deckly.infrastructure.queue import GENERATION_TASK, create_bounded_pool, create_redis_settings
 from deckly.infrastructure.resilience import (
     CircuitBreaker,
     ProviderOperation,
@@ -56,7 +56,7 @@ from deckly.infrastructure.search.tavily_client import TavilySearchClient
 
 SETTINGS_KEY = "settings"
 OBSERVABILITY_KEY = "observability"
-REDIS_KEY = "redis"
+CACHE_REDIS_KEY = "cache_redis"
 ENGINE_KEY = "engine"
 LLM_CLIENT_KEY = "llm_client"
 MODERATION_LLM_CLIENT_KEY = "moderation_llm_client"
@@ -244,6 +244,17 @@ def build_media_fetcher(
     )
 
 
+def build_cache_redis(settings: Settings) -> Redis:
+    return create_bounded_pool(
+        create_redis_settings(
+            str(settings.cache_redis_url),
+            connect_timeout_seconds=settings.redis.connect_timeout_seconds,
+            connect_retries=settings.redis.connect_retries,
+        ),
+        read_timeout_seconds=settings.redis.connect_timeout_seconds,
+    )
+
+
 def build_result_cache(redis: Redis, settings: Settings, metrics: Metrics) -> RedisResultCache:
     return RedisResultCache(
         redis,
@@ -345,9 +356,11 @@ async def startup(ctx: WorkerContext) -> None:
     housekeeping = PostgresJobHousekeeping(session_factory)
     ctx[SWEEP_STALE_JOBS_KEY] = build_sweep(store, housekeeping, settings)
     ctx[ENFORCE_JOB_RETENTION_KEY] = build_retention(housekeeping, settings)
+    cache_redis = build_cache_redis(settings)
+    ctx[CACHE_REDIS_KEY] = cache_redis
     ctx[RUN_GENERATION_KEY] = RunGeneration(
         store=store,
-        cache=build_result_cache(from_context(ctx, REDIS_KEY, Redis), settings, observability.metrics),
+        cache=build_result_cache(cache_redis, settings, observability.metrics),
         retriever=retriever,
         parser=CleaningSourceParser(max_characters=settings.providers.search_max_source_characters),
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),
@@ -360,6 +373,7 @@ async def startup(ctx: WorkerContext) -> None:
 
 async def shutdown(ctx: WorkerContext) -> None:
     engine = ctx.get(ENGINE_KEY)
+    cache_redis = ctx.get(CACHE_REDIS_KEY)
     media = ctx.get(MEDIA_FETCHER_KEY)
     retriever = ctx.get(SOURCE_RETRIEVER_KEY)
     llm_clients = (
@@ -370,6 +384,8 @@ async def shutdown(ctx: WorkerContext) -> None:
     async with AsyncExitStack() as closing:
         if isinstance(engine, AsyncEngine):
             closing.push_async_callback(engine.dispose)
+        if isinstance(cache_redis, Redis):
+            closing.push_async_callback(cache_redis.aclose)
         if isinstance(media, CommonsMediaFetcher):
             closing.push_async_callback(media.aclose)
         if isinstance(retriever, WebSourceRetriever):

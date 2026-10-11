@@ -22,8 +22,8 @@ def create_redis_settings(url: str, *, connect_timeout_seconds: int, connect_ret
     return settings
 
 
-async def create_queue_pool(settings: RedisSettings, *, read_timeout_seconds: float) -> ArqRedis:
-    pool = ArqRedis(
+def create_bounded_pool(settings: RedisSettings, *, read_timeout_seconds: float) -> ArqRedis:
+    return ArqRedis(
         host=settings.host,
         port=settings.port,
         unix_socket_path=settings.unix_socket_path,
@@ -34,6 +34,10 @@ async def create_queue_pool(settings: RedisSettings, *, read_timeout_seconds: fl
         socket_connect_timeout=settings.conn_timeout,
         socket_timeout=read_timeout_seconds,
     )
+
+
+async def create_queue_pool(settings: RedisSettings, *, read_timeout_seconds: float) -> ArqRedis:
+    pool = create_bounded_pool(settings, read_timeout_seconds=read_timeout_seconds)
     retries_left = settings.conn_retries
     while True:
         try:

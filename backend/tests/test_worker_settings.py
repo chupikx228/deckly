@@ -1,11 +1,12 @@
 import logging
 from datetime import datetime, timedelta
-from typing import get_args
+from typing import get_args, override
 from uuid import UUID, uuid4
 
 import pytest
 from arq.worker import create_worker
 from pydantic import AnyHttpUrl, SecretStr
+from redis.asyncio import Redis
 
 from deckly.application.housekeeping import (
     EnforceJobRetention,
@@ -27,6 +28,7 @@ from deckly.infrastructure.resilience import ResilientCaller
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
 from deckly.worker.settings import (
+    CACHE_REDIS_KEY,
     ENFORCE_JOB_RETENTION_KEY,
     HOUSEKEEPING_TASK,
     LLM_CLIENT_KEY,
@@ -225,6 +227,30 @@ async def test_shutdown_closes_the_search_and_image_clients_even_when_closing_th
 
     assert search.closed
     assert images.closed
+
+
+class RecordingRedis(Redis):
+    closed = False
+
+    @override
+    async def aclose(self, close_connection_pool: bool | None = None) -> None:
+        del close_connection_pool
+        self.closed = True
+
+
+async def test_shutdown_closes_the_cache_redis_even_when_closing_the_model_client_fails() -> None:
+    time = ManualTime()
+    caller = ResilientCaller(SEARCH_POLICY, time.breaker(), time.runtime(), probe=fresh_probe())
+    cache_redis = RecordingRedis()
+    ctx: WorkerContext = {
+        LLM_CLIENT_KEY: ResilientLlmClient(FailingToCloseLlm(), caller, 1000),
+        CACHE_REDIS_KEY: cache_redis,
+    }
+
+    with pytest.raises(RuntimeError):
+        await shutdown(ctx)
+
+    assert cache_redis.closed
 
 
 async def test_shutdown_closes_the_moderation_clients_even_when_closing_the_model_client_fails() -> None:

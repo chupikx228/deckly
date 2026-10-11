@@ -663,11 +663,27 @@ topics worth keeping for the TTL. Alert on `used_memory` against `maxmemory` on 
 The cache already fails open: a timeout, an out-of-memory reply or a corrupt entry is a miss
 (`infrastructure/result_cache.py`), so the cache instance needs no special handling when full.
 
-**Not implemented yet:** the application reads one `DECKLY_REDIS_URL`, so the cache cannot be
-pointed at its own instance. Until a cache URL setting exists (a follow-up, only the worker
-needs it), a production deployment must not run on a single instance with a memory limit. Local
-`docker-compose.yml` runs the shared instance with `--maxmemory 256mb --maxmemory-policy noeviction`,
-which is the queue and quota row, so a full Redis fails the way it would in production.
+`DECKLY_CACHE_REDIS_URL` points the cache at its own instance. It is optional and only the worker
+reads it (`build_cache_redis` in `worker/settings.py`). Unset, the cache uses `DECKLY_REDIS_URL`,
+so a single local Redis keeps working, and a production deployment must set it: on one instance
+with a memory limit the cache competes with the queue and the quota for memory. A blank value is
+rejected instead of read as unset, so a templated deployment cannot fall back to the shared
+instance without saying so. Local `docker-compose.yml` runs the shared instance with
+`--maxmemory 256mb --maxmemory-policy noeviction`, which is the queue and quota row, so a full
+Redis fails the way it would in production.
+
+The cache connection is built like the queue's (`create_bounded_pool` in `infrastructure/queue.py`):
+the same connect and read timeout from `DECKLY_REDIS_CONNECT_TIMEOUT_SECONDS`, so a cache instance
+that accepts connections and then freezes fails a command after that timeout instead of hanging
+the job. Unlike the queue pool it is not pinged at startup. The worker boots with the cache
+instance down or unreachable and treats every lookup as a miss, because the cache must not be able
+to stop generation. A URL whose database path is not a number (`redis://host/abc`) is not
+reachability: it passes config validation, as it does for `DECKLY_REDIS_URL`, and stops the worker
+at startup. The symptom is `generation_cache_read_failed` warnings and
+`deckly_generation_cache_lookups_total{result="error"}`, so alert on it. The integration test points the
+cache at another database of the local Redis rather than a second container: instance and
+database number go through the same URL parsing and connection parameters, which is the code
+under test, while memory and eviction separation is a property of the Redis deployment.
 
 ### Metrics access
 
