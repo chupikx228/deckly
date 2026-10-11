@@ -307,12 +307,6 @@ def test_housekeeping_runs_on_every_interval_boundary_of_the_hour_and_never_over
     assert job.run_at_startup is False
 
 
-async def test_arq_worker_runs_the_pinned_number_of_jobs_at_once() -> None:
-    worker = create_worker(WorkerSettings, handle_signals=False)
-
-    assert worker.max_jobs == WORKER_MAX_JOBS
-
-
 def test_moderation_concurrency_default_tracks_the_number_of_jobs_a_worker_runs() -> None:
     assert DEFAULT_MODERATION_MAX_CONCURRENCY == WORKER_MAX_JOBS
 

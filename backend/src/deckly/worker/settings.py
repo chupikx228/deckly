@@ -20,14 +20,7 @@ from deckly.application.housekeeping import (
     SweepStaleJobs,
 )
 from deckly.application.pipeline import RunGeneration
-from deckly.config import (
-    MINUTES_PER_HOUR,
-    WORKER_MAX_JOBS,
-    ModelProvider,
-    ProviderSettings,
-    Settings,
-    SweepSettings,
-)
+from deckly.config import MINUTES_PER_HOUR, ModelProvider, ProviderSettings, Settings, SweepSettings
 from deckly.infrastructure.card_generator.generator import LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.clock import utc_now
@@ -414,4 +407,3 @@ class WorkerSettings:
     on_startup: StartupShutdown | None = startup
     on_shutdown: StartupShutdown | None = shutdown
     allow_abort_jobs = True
-    max_jobs = WORKER_MAX_JOBS

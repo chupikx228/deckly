@@ -4,7 +4,7 @@ import sys
 from arq.connections import ArqRedis
 from arq.worker import Worker, create_worker
 
-from deckly.config import Settings, load_settings
+from deckly.config import WORKER_MAX_JOBS, Settings, load_settings
 from deckly.infrastructure.logging import configure_logging
 from deckly.infrastructure.observability.exposition import serve_metrics
 from deckly.infrastructure.observability.runtime import Observability, create_observability
@@ -30,6 +30,7 @@ def build_worker(settings: Settings, observability: Observability, pool: ArqRedi
         WorkerSettings,
         redis_pool=pool,
         job_timeout=settings.limits.generation_job_timeout_seconds,
+        max_jobs=WORKER_MAX_JOBS,
         cron_jobs=housekeeping_cron_jobs(settings.sweep),
         ctx={SETTINGS_KEY: settings, OBSERVABILITY_KEY: observability},
     )
