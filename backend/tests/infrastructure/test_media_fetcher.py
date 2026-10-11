@@ -15,6 +15,7 @@ from deckly.application.ports import ImageQuery, MissingImage, MissingImageReaso
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import STAGE_ORDER, GenerationJob, Succeeded
 from deckly.domain.media import MediaKind
+from deckly.infrastructure.llm.client import LlmReply, LlmStop
 from deckly.infrastructure.media.client import (
     ImageCandidate,
     MediaBlockedError,
@@ -23,7 +24,8 @@ from deckly.infrastructure.media.client import (
     MediaUnavailableError,
 )
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
-from deckly.infrastructure.media.judging import Ranking, Shortlist
+from deckly.infrastructure.media.judging import OMITTED, CandidateJudge, Ranking, Shortlist, Verdict
+from deckly.infrastructure.moderation.image_judge import LlmCandidateJudge
 from deckly.infrastructure.resilience import CircuitBreaker, CircuitState, ResilientCaller
 from deckly.transport.results import GenerationResultBody
 from tests.domain.builders import basic_note, result_with
@@ -33,6 +35,7 @@ from tests.fakes import (
     MEDIA_POLICY,
     FakeCandidateJudge,
     FakeImageSearchClient,
+    FakeLlmClient,
     Harness,
     ImageOutcome,
     ManualTime,
@@ -43,6 +46,7 @@ from tests.fakes import (
     fresh_telemetry,
     generation_request,
     hang_forever,
+    model_reply,
     scope,
     sequential_job_ids,
 )
@@ -95,6 +99,14 @@ def reversed_rankings(shortlists: tuple[Shortlist, ...]) -> tuple[Ranking, ...]:
 
 def nothing_accepted(shortlists: tuple[Shortlist, ...]) -> tuple[Ranking, ...]:
     return tuple(() for _ in shortlists)
+
+
+def first_note_omitted(shortlists: tuple[Shortlist, ...]) -> tuple[Verdict, ...]:
+    return (OMITTED, *(shortlist.images for shortlist in shortlists[1:]))
+
+
+def every_note_omitted(shortlists: tuple[Shortlist, ...]) -> tuple[Verdict, ...]:
+    return tuple(OMITTED for _ in shortlists)
 
 
 def fetcher_with(
@@ -473,6 +485,50 @@ async def test_note_whose_candidates_the_judge_all_rejects_is_missing_as_rejecte
     assert fetched.missing == (missing(1, REJECTED),)
 
 
+async def test_note_the_judge_left_out_is_missing_as_failed_and_the_others_are_attached() -> None:
+    fetcher, _ = fetcher_with(
+        (candidate("File:A.png"),),
+        (candidate("File:B.png"),),
+        judge=FakeCandidateJudge(first_note_omitted),
+    )
+
+    fetched = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
+
+    assert [attachment.client_id for attachment in fetched.attachments] == [query(2).client_id]
+    assert fetched.missing == (missing(1, FAILED),)
+
+
+async def test_every_note_the_judge_left_out_is_missing_as_failed() -> None:
+    fetcher, _ = fetcher_with(
+        (candidate("File:A.png"),),
+        (candidate("File:B.png"),),
+        judge=FakeCandidateJudge(every_note_omitted),
+    )
+
+    fetched = await fetcher.fetch(JOB, RESULT, (query(1), query(2)))
+
+    assert fetched.attachments == ()
+    assert fetched.missing == (missing(1, FAILED), missing(2, FAILED))
+
+
+async def test_omitted_verdict_is_told_apart_from_a_rejection_and_a_licence_miss_in_one_fetch() -> None:
+    def omit_second(shortlists: tuple[Shortlist, ...]) -> tuple[Verdict, ...]:
+        return (shortlists[0].images, OMITTED)
+
+    fetcher, _ = fetcher_with(
+        (unlicensed("File:A.png"),),
+        (candidate("File:B.png"),),
+        (candidate("File:C.png"),),
+        judge=FakeCandidateJudge(omit_second),
+        limits=replace(MEDIA_LIMITS, max_concurrency=1),
+    )
+
+    fetched = await fetcher.fetch(JOB, RESULT, (query(1), query(2), query(3)))
+
+    assert [attachment.client_id for attachment in fetched.attachments] == [query(2).client_id]
+    assert fetched.missing == (missing(1, REJECTED), missing(3, FAILED))
+
+
 async def test_note_whose_search_found_nothing_is_missing_as_rejected() -> None:
     fetcher, _ = fetcher_with(())
 
@@ -606,7 +662,7 @@ async def run_with_commons(
 
 async def run_with_handler(
     handler: Callable[[httpx2.Request], httpx2.Response],
-    judge: FakeCandidateJudge | None = None,
+    judge: CandidateJudge | None = None,
     request: GenerationRequest = WITH_IMAGES,
 ) -> tuple[GenerationJob, Harness]:
     harness = Harness()
@@ -824,6 +880,40 @@ async def test_deck_whose_only_missing_image_was_rejected_by_the_judge_is_cached
     job, harness = await run_with_handler(
         lambda _: httpx2.Response(200, json=commons_results(commons_page(1))),
         judge=FakeCandidateJudge(nothing_accepted),
+    )
+
+    assert illustrated_notes(job) == []
+    assert len(harness.cache.writes) == 1
+
+
+async def test_deck_with_one_note_the_judge_left_out_is_returned_but_not_cached() -> None:
+    judge = LlmCandidateJudge(llm=FakeLlmClient(model_reply({"notes": {"2": [1]}})))
+
+    job, harness = await run_with_handler(
+        lambda _: httpx2.Response(200, json=commons_results(commons_page(1))), judge=judge
+    )
+
+    assert illustrated_notes(job) == [2]
+    assert harness.cache.writes == []
+
+
+async def test_deck_whose_every_note_the_judge_left_out_is_returned_but_not_cached() -> None:
+    judge = LlmCandidateJudge(llm=FakeLlmClient(model_reply({"notes": {}})))
+
+    job, harness = await run_with_handler(
+        lambda _: httpx2.Response(200, json=commons_results(commons_page(1))), judge=judge
+    )
+
+    assert illustrated_notes(job) == []
+    assert harness.cache.writes == []
+
+
+async def test_deck_whose_whole_image_batch_the_judge_refused_is_cached_in_full() -> None:
+    refusal = LlmReply(text="I can't help with that.", stop=LlmStop.REFUSED)
+    judge = LlmCandidateJudge(llm=FakeLlmClient(refusal))
+
+    job, harness = await run_with_handler(
+        lambda _: httpx2.Response(200, json=commons_results(commons_page(1))), judge=judge
     )
 
     assert illustrated_notes(job) == []

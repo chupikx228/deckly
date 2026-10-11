@@ -10,7 +10,7 @@ from deckly.application.ports import FetchedMedia, ImageQuery, MissingImage, Mis
 from deckly.domain.deck import GenerationResult
 from deckly.domain.notes.note import Note
 from deckly.infrastructure.media.client import ImageCandidate, ImageSearch, ImageSearchClient, MediaError
-from deckly.infrastructure.media.judging import CandidateJudge, Ranking, Shortlist, ShortlistedImage
+from deckly.infrastructure.media.judging import CandidateJudge, Omitted, Shortlist, ShortlistedImage, Verdict
 from deckly.infrastructure.media.licensing import licensed_image
 from deckly.infrastructure.resilience import CallSize, ResilientCaller
 
@@ -48,16 +48,26 @@ def one_query_per_note(queries: Iterable[ImageQuery], limit: int) -> tuple[Image
     return tuple(by_note.values())[:limit]
 
 
-def chosen(shortlists: Iterable[Shortlist], rankings: Iterable[Ranking]) -> tuple[NoteMedia, ...]:
+def chosen(shortlists: Iterable[Shortlist], verdicts: Iterable[Verdict]) -> tuple[NoteMedia, ...]:
     used: set[str] = set()
     attachments: list[NoteMedia] = []
-    for shortlist, ranking in zip(shortlists, rankings, strict=True):
-        image = next((image for image in ranking if image.candidate.file_title not in used), None)
+    for shortlist, verdict in zip(shortlists, verdicts, strict=True):
+        if isinstance(verdict, Omitted):
+            continue
+        image = next((image for image in verdict if image.candidate.file_title not in used), None)
         if image is None:
             continue
         used.add(image.candidate.file_title)
         attachments.append(NoteMedia(client_id=shortlist.note.client_id, media=image.media))
     return tuple(attachments)
+
+
+def omitted_notes(shortlists: Iterable[Shortlist], verdicts: Iterable[Verdict]) -> frozenset[UUID]:
+    return frozenset(
+        shortlist.note.client_id
+        for shortlist, verdict in zip(shortlists, verdicts, strict=True)
+        if isinstance(verdict, Omitted)
+    )
 
 
 def finished_outcome(task: asyncio.Task[SearchOutcome]) -> SearchOutcome | None:
@@ -66,12 +76,18 @@ def finished_outcome(task: asyncio.Task[SearchOutcome]) -> SearchOutcome | None:
     return task.result()
 
 
-def missing_images(searched: SearchRound, attachments: Iterable[NoteMedia]) -> tuple[MissingImage, ...]:
+def missing_images(
+    searched: SearchRound, attachments: Iterable[NoteMedia], omitted: frozenset[UUID]
+) -> tuple[MissingImage, ...]:
     attached = {attachment.client_id for attachment in attachments}
     missing = [
         MissingImage(
             client_id=outcome.query.client_id,
-            reason=MissingImageReason.REJECTED if outcome.failure is None else MissingImageReason.FAILED,
+            reason=(
+                MissingImageReason.FAILED
+                if outcome.failure is not None or outcome.query.client_id in omitted
+                else MissingImageReason.REJECTED
+            ),
         )
         for outcome in searched.outcomes
         if outcome.query.client_id not in attached
@@ -98,8 +114,8 @@ class CommonsMediaFetcher:
         illustrable = (query for query in queries if query.client_id in notes)
         searched = await self._search_all(one_query_per_note(illustrable, self.limits.max_images))
         shortlists = self._shortlist(searched.outcomes, notes)
-        rankings = await self.judge.rank(result.deck, shortlists) if shortlists else ()
-        attachments = chosen(shortlists, rankings)
+        verdicts = await self.judge.rank(result.deck, shortlists) if shortlists else ()
+        attachments = chosen(shortlists, verdicts)
         failures = Counter(outcome.failure for outcome in searched.outcomes if outcome.failure is not None)
         logger.log(
             logging.WARNING if failures or searched.deadline_reached else logging.INFO,
@@ -113,7 +129,8 @@ class CommonsMediaFetcher:
                 "deadline_reached": searched.deadline_reached,
             },
         )
-        return FetchedMedia(attachments=attachments, missing=missing_images(searched, attachments))
+        omitted = omitted_notes(shortlists, verdicts)
+        return FetchedMedia(attachments=attachments, missing=missing_images(searched, attachments, omitted))
 
     async def aclose(self) -> None:
         await self.client.aclose()

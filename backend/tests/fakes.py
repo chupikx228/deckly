@@ -39,7 +39,7 @@ from deckly.infrastructure.llm.client import LlmPrompt, LlmReply, LlmStop
 from deckly.infrastructure.media.client import ImageCandidate, ImageSearch, MediaEndpoint
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
-from deckly.infrastructure.media.judging import CandidateJudge, Ranking, Shortlist
+from deckly.infrastructure.media.judging import CandidateJudge, Ranking, Shortlist, Verdict
 from deckly.infrastructure.observability.metrics import Metrics
 from deckly.infrastructure.observability.runtime import Observability, create_observability
 from deckly.infrastructure.observability.telemetry import ObservedGeneration
@@ -107,7 +107,7 @@ type SearchOutcome = tuple[SearchHit, ...] | Exception | Callable[[], Awaitable[
 type ImageOutcome = (
     tuple[ImageCandidate, ...] | Exception | Callable[[], Awaitable[tuple[ImageCandidate, ...]]]
 )
-type Judging = Callable[[tuple[Shortlist, ...]], tuple[Ranking, ...]]
+type Judging = Callable[[tuple[Shortlist, ...]], tuple[Verdict, ...]]
 
 
 def fresh_observability() -> Observability:
@@ -202,7 +202,7 @@ class FakeCandidateJudge:
         self.judging = judging
         self.calls: list[tuple[Deck, tuple[Shortlist, ...]]] = []
 
-    async def rank(self, deck: Deck, shortlists: tuple[Shortlist, ...]) -> tuple[Ranking, ...]:
+    async def rank(self, deck: Deck, shortlists: tuple[Shortlist, ...]) -> tuple[Verdict, ...]:
         self.calls.append((deck, shortlists))
         if isinstance(self.judging, Exception):
             raise self.judging
