@@ -15,11 +15,13 @@ from deckly import main
 from deckly.application.generations import CreateGeneration
 from deckly.application.ports import IdempotencyScope, TopicModerator
 from deckly.config import Settings, load_settings
+from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.database import create_engine, create_session_factory
 from deckly.infrastructure.queue import ArqJobQueue, create_queue_pool, create_redis_settings
 from deckly.infrastructure.quota import ADDRESS_KEY_PREFIX, CLIENT_KEY_PREFIX, address_bucket
 from deckly.infrastructure.tables import GenerationJobRow
 from tests.fakes import FakeTopicModerator
+from tests.reserved_clients import purge_abandoned_test_jobs, reserved_client_id
 
 COMMAND_TIMEOUT_SECONDS = 2
 TEST_PEER_ADDRESSES = ("testclient", "127.0.0.1")
@@ -52,6 +54,11 @@ def with_generation_limits(settings: Settings, *, per_client: int, per_address: 
     )
 
 
+@pytest.fixture(autouse=True, scope="session")
+def abandoned_test_jobs_purged() -> None:
+    asyncio.run(purge_abandoned_test_jobs(load_settings(), utc_now()))
+
+
 @pytest.fixture(autouse=True)
 def topics_screened_without_a_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main, "build_topic_moderator", lambda *_: FakeTopicModerator())
@@ -80,7 +87,7 @@ class Cleanup:
         self.addresses: set[str] = set(TEST_PEER_ADDRESSES)
 
     def scope(self) -> IdempotencyScope:
-        client_id = uuid4()
+        client_id = reserved_client_id()
         self.client_ids.add(client_id)
         return IdempotencyScope(client_id=client_id, idempotency_key=uuid4())
 

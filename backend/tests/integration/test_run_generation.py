@@ -29,6 +29,7 @@ from tests.fakes import (
     generation_request,
 )
 from tests.integration.conftest import Cleanup
+from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
 
 pytestmark = pytest.mark.integration
@@ -79,7 +80,7 @@ async def queued_in(store: PostgresJobStore, cleanup: Cleanup) -> GenerationJob:
 def test_generation_created_through_the_api_runs_and_polls_back_as_succeeded(
     client: TestClient, cleanup: Cleanup, settings: Settings
 ) -> None:
-    client_id = uuid4()
+    client_id = reserved_client_id()
     cleanup.client_ids.add(client_id)
     created = client.post(
         ENDPOINT, json=PAYLOAD, headers={"Idempotency-Key": str(uuid4()), "X-Client-Id": str(client_id)}

@@ -43,6 +43,7 @@ from tests.fakes import (
     generation_request,
 )
 from tests.integration.conftest import Cleanup, open_queue_pool
+from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
 
 pytestmark = pytest.mark.integration
@@ -232,7 +233,7 @@ async def run_through_postgres_and_redis(settings: Settings, providers: FakeProv
 
 
 def submit(client: TestClient, cleanup: Cleanup, payload: dict[str, object]) -> UUID:
-    client_id = uuid4()
+    client_id = reserved_client_id()
     cleanup.client_ids.add(client_id)
     created = client.post(
         ENDPOINT, json=payload, headers={"Idempotency-Key": str(uuid4()), "X-Client-Id": str(client_id)}

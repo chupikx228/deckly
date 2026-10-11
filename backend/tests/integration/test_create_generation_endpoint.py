@@ -19,6 +19,7 @@ from deckly.infrastructure.job_store import PostgresJobHousekeeping
 from deckly.infrastructure.tables import GenerationJobRow
 from deckly.main import API_PREFIX, create_app
 from tests.integration.conftest import Cleanup, open_queue_pool, with_generation_limits
+from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
 
 pytestmark = pytest.mark.integration
@@ -66,11 +67,11 @@ async def queued_job_exists(settings: Settings, job_id: str) -> bool:
 def test_created_job_is_persisted_enqueued_and_replayable(
     client: TestClient, cleanup: Cleanup, settings: Settings
 ) -> None:
-    client_id, key = uuid4(), uuid4()
+    client_id, key = reserved_client_id(), uuid4()
 
     first = post(client, cleanup, client_id, key)
     replay = post(client, cleanup, client_id, key)
-    other = post(client, cleanup, uuid4(), key)
+    other = post(client, cleanup, reserved_client_id(), key)
 
     assert first["status"] == "queued"
     assert {key: replay[key] for key in JOB_FIELDS} == {key: first[key] for key in JOB_FIELDS}
@@ -79,7 +80,7 @@ def test_created_job_is_persisted_enqueued_and_replayable(
 
 
 def test_reusing_a_key_for_a_different_body_is_a_conflict(client: TestClient, cleanup: Cleanup) -> None:
-    client_id, key = uuid4(), uuid4()
+    client_id, key = reserved_client_id(), uuid4()
     first = post(client, cleanup, client_id, key)
 
     response = client.post(
@@ -111,7 +112,7 @@ def unmetered_client(settings: Settings) -> Iterator[TestClient]:
 
 def test_p95_latency_is_within_budget(unmetered_client: TestClient, cleanup: Cleanup) -> None:
     client = unmetered_client
-    client_id = uuid4()
+    client_id = reserved_client_id()
     for _ in range(WARMUP_REQUESTS):
         post(client, cleanup, client_id, uuid4())
 
@@ -168,7 +169,7 @@ async def age_and_enforce_retention(settings: Settings, job_id: UUID) -> None:
 def test_key_older_than_its_ttl_starts_a_new_job_and_the_original_stays_pollable(
     client: TestClient, cleanup: Cleanup, settings: Settings
 ) -> None:
-    client_id, key = uuid4(), uuid4()
+    client_id, key = reserved_client_id(), uuid4()
     original = post(client, cleanup, client_id, key)
     asyncio.run(age_and_enforce_retention(settings, UUID(str(original["jobId"]))))
 
