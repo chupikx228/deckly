@@ -2,6 +2,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from secrets import SystemRandom
 from uuid import UUID
 
 import pytest
@@ -32,7 +33,39 @@ CLIENT_ID = UUID("0b6f7c1e-4a3d-4f2e-9c8b-7a6d5e4f3a21")
 PROVIDER_CALL_FINISHED = "provider_call_finished"
 OK = "ok"
 MILLISECONDS_PER_SECOND = 1000
-TOPIC = "Road signs of the Russian traffic code"
+HARMFUL_CARD_TOPIC = "Road signs of the Russian traffic code"
+TOPIC_COUNTRIES = (
+    "Russia",
+    "Germany",
+    "France",
+    "Japan",
+    "Brazil",
+    "Canada",
+    "India",
+    "Italy",
+    "Spain",
+    "Poland",
+    "Sweden",
+    "Australia",
+    "Mexico",
+    "Turkey",
+    "South Korea",
+    "Argentina",
+    "Norway",
+    "Greece",
+    "Thailand",
+    "South Africa",
+)
+TOPIC_ASPECTS = (
+    "warning signs",
+    "priority signs",
+    "prohibitory signs",
+    "mandatory signs",
+    "information signs",
+    "road markings",
+    "signs for learner drivers",
+    "driving theory test signs",
+)
 REJECTED_FIELDS = {"front": "What does a red triangle warn of?", "back": "A hazard ahead"}
 SAMPLED_REASONS = (RejectionReason.TOO_EASY, RejectionReason.TOO_HARD, RejectionReason.DUPLICATE)
 HARMFUL_FIELDS = {
@@ -41,11 +74,16 @@ HARMFUL_FIELDS = {
 }
 
 
+def uncached_topics(count: int) -> list[str]:
+    pairs = [(country, aspect) for country in TOPIC_COUNTRIES for aspect in TOPIC_ASPECTS]
+    return [f"Road signs in {country}: {aspect}" for country, aspect in SystemRandom().sample(pairs, count)]
+
+
 def regeneration(
-    reason: RejectionReason, fields: Mapping[str, object] = REJECTED_FIELDS
+    reason: RejectionReason, topic: str, fields: Mapping[str, object] = REJECTED_FIELDS
 ) -> RegenerationRequest:
     return RegenerationRequest(
-        topic=TOPIC, language="en", note_type=NoteType.BASIC, rejected_fields=fields, reason=reason
+        topic=topic, language="en", note_type=NoteType.BASIC, rejected_fields=fields, reason=reason
     )
 
 
@@ -107,17 +145,23 @@ async def live_regenerate(settings: Settings) -> AsyncIterator[RegenerateNote]:
 async def test_every_regeneration_step_fits_its_timeout_on_the_configured_provider() -> None:
     settings = load_settings()
     timeouts = step_timeouts(settings)
+    topics = uncached_topics(len(SAMPLED_REASONS))
     totals: list[tuple[float, str]] = []
 
     with captured_json_logs(logging.INFO) as logs:
         async with live_regenerate(settings) as regenerate:
-            for reason in SAMPLED_REASONS:
+            for reason, topic in zip(SAMPLED_REASONS, topics, strict=True):
                 started = time.monotonic()
-                outcome = await outcome_of(regenerate, regeneration(reason))
+                outcome = await outcome_of(regenerate, regeneration(reason, topic))
                 totals.append((time.monotonic() - started, outcome))
 
     durations = durations_by_step(logs.named(PROVIDER_CALL_FINISHED), timeouts)
-    measured = {"provider": settings.providers.model_provider, "steps": durations, "totals": totals}
+    measured = {
+        "provider": settings.providers.model_provider,
+        "topics": topics,
+        "steps": durations,
+        "totals": totals,
+    }
     logger.info("regeneration_latency_measured", extra=measured)
     assert [outcome for _, outcome in totals] == [OK] * len(SAMPLED_REASONS), measured
     assert all(len(taken) == len(SAMPLED_REASONS) for taken in durations.values()), measured
@@ -132,4 +176,6 @@ async def test_configured_classifier_rejects_a_harmful_rejected_card_on_a_harmle
 
     async with live_regenerate(settings) as regenerate:
         with pytest.raises(TopicRejectedError):
-            await regenerate(regeneration(RejectionReason.OTHER, HARMFUL_FIELDS), CLIENT_ID)
+            await regenerate(
+                regeneration(RejectionReason.OTHER, HARMFUL_CARD_TOPIC, HARMFUL_FIELDS), CLIENT_ID
+            )
