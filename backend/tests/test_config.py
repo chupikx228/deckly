@@ -6,10 +6,12 @@ import pytest
 from pydantic import ValidationError
 
 from deckly.config import (
+    DEFAULT_MODERATION_MAX_CONCURRENCY,
     MAX_JUDGED_CANDIDATES,
     MAX_MEDIA_CANDIDATES,
     MAX_MEDIA_CONCURRENCY,
     MAX_MEDIA_IMAGES,
+    MAX_MODERATION_CONCURRENCY,
     MAX_MODERATION_TIMEOUT_SECONDS,
     MEDIA_URL_MIN_VALIDITY_SECONDS,
     MIN_JOB_RETENTION_SECONDS,
@@ -501,6 +503,35 @@ def test_topic_check_timeout_within_its_bounds_is_accepted(
     clean_environment.setenv("DECKLY_PROVIDER_MODERATION_TIMEOUT_SECONDS", value)
 
     assert ProviderSettings().moderation_timeout_seconds == float(value)
+
+
+def test_moderation_concurrency_defaults_to_the_arq_default_of_ten_jobs_with_a_chunk_each(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_provider_environment(clean_environment)
+
+    assert ProviderSettings().moderation_max_concurrency == DEFAULT_MODERATION_MAX_CONCURRENCY == 10
+
+
+@pytest.mark.parametrize("value", [1, DEFAULT_MODERATION_MAX_CONCURRENCY, MAX_MODERATION_CONCURRENCY])
+def test_moderation_concurrency_within_its_bounds_is_accepted(
+    clean_environment: pytest.MonkeyPatch, value: int
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MODERATION_MAX_CONCURRENCY", str(value))
+
+    assert ProviderSettings().moderation_max_concurrency == value
+
+
+@pytest.mark.parametrize("value", ["0", "-1", str(MAX_MODERATION_CONCURRENCY + 1), "2.5", "many", ""])
+def test_moderation_concurrency_outside_its_bounds_is_rejected(
+    clean_environment: pytest.MonkeyPatch, value: str
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MODERATION_MAX_CONCURRENCY", value)
+
+    with pytest.raises(ValidationError, match="moderation_max_concurrency"):
+        ProviderSettings()
 
 
 @pytest.mark.parametrize("url", ["ftp://commons.wikimedia.org", "commons.wikimedia.org"])

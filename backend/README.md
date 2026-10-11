@@ -501,8 +501,8 @@ reaches the classifier as a JSON document, so it cannot break out of its delimit
 - **Generated-content filter** (`LlmContentModerator`, wired in the worker): runs after
   `generating_cards`, before media. Notes go to the classifier in chunks of
   `NOTES_PER_CONTENT_CHECK` (50), each chunk with the deck and its notes numbered from 1, and
-  every chunk runs at once: at most four calls at the 200-card maximum, one call at 50 cards or
-  fewer. A note is kept only on an explicit `"allow"`; a missing or unreadable verdict drops it.
+  every chunk of a job runs at once: at most four calls at the 200-card maximum, one call at 50
+  cards or fewer. A note is kept only on an explicit `"allow"`; a missing or unreadable verdict drops it.
   A deck title that is not allowed by every chunk is replaced with the topic. A refused chunk drops
   its own notes and the deck title. If any chunk fails, the whole filter fails like a single call
   would (`provider_unavailable`), and the other chunks are cancelled, so no partial deck ships.
@@ -522,6 +522,25 @@ MAX_ATTEMPTS}` per chunk. Because the chunks run concurrently, the filter's wall
   because of DeepSeek's empty replies at the cap. Those figures were measured with DeepSeek's
   thinking on; with it off (see Card generation), the 200-card live test of four concurrent
   chunks took 2.4 s.
+
+- **Concurrency cap** (`BoundedLlmClient`, wired in `worker/settings.py`): Arq runs up to ten
+  jobs per worker process (`WORKER_MAX_JOBS`, pinned as `max_jobs` in `WorkerSettings`), so ten
+  maximum-size decks would otherwise put forty chunk calls in flight at once against one
+  provider key. One semaphore per worker process, sized by
+  `DECKLY_PROVIDER_MODERATION_MAX_CONCURRENCY` (default `WORKER_MAX_JOBS`, 10, at most 40),
+  bounds every call of the content filter and the image judge together, whatever job it belongs
+  to. Because the default is `WORKER_MAX_JOBS` itself, raising the job count raises it too. A
+  worker at full load with decks of up to 50 cards never queues, and one 200-card job still
+  runs its four chunks together. Only bursts of larger decks
+  queue: ten 200-card jobs take four waves of chunk calls instead of one, which at the measured
+  2–3 s per chunk adds roughly 10 s to the slowest job, far inside the generation job timeout.
+  The cap is not a breaker or a retry: excess calls wait for a slot and are never rejected. It
+  sits outside the resilience layer, so waiting for a slot is not charged to an attempt timeout,
+  the retry deadline or the circuit; it does count toward the generation job timeout. A slot is
+  held across the retries of a call, which is deliberate while a provider is rate limiting. The
+  API process is not capped: the topic check and the regeneration checks are one call per
+  request, sequential within it, and are interactive paths with single-attempt timeouts of
+  seconds, where queueing would add latency instead of smoothing a burst.
 
 - **Image screening** (`LlmCandidateJudge`, wired in the worker): images are found after the
   content filter has run, and Commons titles and descriptions are third-party wiki text, so one

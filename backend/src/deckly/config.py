@@ -26,6 +26,9 @@ MAX_MEDIA_IMAGES = 50
 MAX_MEDIA_CANDIDATES = 50
 MAX_MEDIA_CONCURRENCY = 8
 MAX_JUDGED_CANDIDATES = 10
+WORKER_MAX_JOBS = 10
+DEFAULT_MODERATION_MAX_CONCURRENCY = WORKER_MAX_JOBS
+MAX_MODERATION_CONCURRENCY = 40
 MAX_MODERATION_TIMEOUT_SECONDS = 10
 REGENERATE_OVERHEAD_SECONDS = 0.5
 MEDIA_URL_MIN_VALIDITY_SECONDS = 24 * 60 * 60
@@ -138,6 +141,9 @@ class ProviderSettings(BaseSettings):
     moderation_filter_timeout_seconds: PositiveInt
     moderation_filter_deadline_seconds: PositiveInt
     moderation_filter_max_attempts: PositiveInt
+    moderation_max_concurrency: Annotated[int, Field(ge=1, le=MAX_MODERATION_CONCURRENCY)] = (
+        DEFAULT_MODERATION_MAX_CONCURRENCY
+    )
 
     @field_validator("model_api_key", "search_api_key")
     @classmethod

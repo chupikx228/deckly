@@ -5,11 +5,13 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from arq.connections import ArqRedis
 from arq.connections import RedisSettings as ArqRedisSettings
 from pydantic import RedisDsn
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from deckly.config import RedisSettings, Settings
+from deckly.config import WORKER_MAX_JOBS, RedisSettings, Settings
+from deckly.worker import main as worker_main
 from deckly.worker.main import build_worker, connect_queue
 from deckly.worker.settings import build_cache_redis
 from tests.fakes import fresh_observability
@@ -90,6 +92,17 @@ async def test_worker_whose_redis_freezes_fails_within_the_read_timeout(
 
     assert redis.frozen
     assert isinstance(failure, RedisTimeoutError)
+
+
+async def test_worker_runs_the_pinned_number_of_jobs_at_once(
+    environment_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pinned = WORKER_MAX_JOBS + 1
+    monkeypatch.setattr(worker_main, "WORKER_MAX_JOBS", pinned)
+
+    worker = build_worker(environment_settings, fresh_observability(), ArqRedis())
+
+    assert worker.max_jobs == pinned
 
 
 def settings_with_cache(base: Settings, *, queue: RedisDsn, cache: RedisDsn | None) -> Settings:
