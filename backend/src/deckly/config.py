@@ -231,6 +231,7 @@ class RegenerateSettings(BaseSettings):
 class CacheSettings(BaseSettings):
     model_config = _settings_config("DECKLY_CACHE_")
 
+    redis_url: RedisDsn | None = None
     generation_result_ttl_seconds: Annotated[int, Field(gt=0, lt=MEDIA_URL_MIN_VALIDITY_SECONDS)]
     idempotency_key_ttl_seconds: PositiveInt
     job_retention_seconds: Annotated[int, Field(ge=MIN_JOB_RETENTION_SECONDS)]
@@ -286,6 +287,12 @@ class Settings:
     regenerate: RegenerateSettings
     sweep: SweepSettings
     observability: ObservabilitySettings
+
+    @property
+    def cache_redis_url(self) -> RedisDsn:
+        if self.cache.redis_url is None:
+            return self.redis.url
+        return self.cache.redis_url
 
     def __post_init__(self) -> None:
         provider_deadlines = (

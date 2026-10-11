@@ -1,4 +1,5 @@
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,8 @@ from deckly.infrastructure.media.licensing import MIN_IMAGE_SIDE
 from deckly.infrastructure.search.parser import MIN_VISIBLE_CHARACTERS
 
 ASYNC_URL = "postgresql+asyncpg://deckly:deckly@localhost:5433/deckly"
+QUEUE_REDIS_URL = "redis://queue.internal:6379/0"
+CACHE_REDIS_URL = "redis://cache.internal:6380/2"
 
 
 @pytest.fixture
@@ -814,6 +817,65 @@ def test_idempotency_key_ttl_must_be_positive(
 
     with pytest.raises(ValidationError, match="idempotency_key_ttl_seconds"):
         CacheSettings()
+
+
+def settings_with_redis(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Settings:
+    monkeypatch.setenv("DECKLY_REDIS_URL", QUEUE_REDIS_URL)
+    monkeypatch.setenv("DECKLY_REDIS_CONNECT_TIMEOUT_SECONDS", "2")
+    monkeypatch.setenv("DECKLY_REDIS_CONNECT_RETRIES", "3")
+    set_cache_environment(monkeypatch, idempotency_ttl="86400", retention="86400")
+    base = settings_from_environment(monkeypatch, **overrides)
+    return replace(base, redis=RedisSettings(), cache=CacheSettings())
+
+
+def test_cache_redis_url_falls_back_to_the_queue_redis_url_when_unset(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_with_redis(clean_environment)
+
+    assert settings.cache.redis_url is None
+    assert str(settings.cache_redis_url) == QUEUE_REDIS_URL
+    assert settings.cache_redis_url == settings.redis.url
+
+
+def test_cache_redis_url_is_used_instead_of_the_fallback_when_set(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_with_redis(clean_environment, DECKLY_CACHE_REDIS_URL=CACHE_REDIS_URL)
+
+    assert str(settings.cache_redis_url) == CACHE_REDIS_URL
+    assert str(settings.redis.url) == QUEUE_REDIS_URL
+
+
+def test_cache_redis_url_is_trimmed_like_every_other_setting(clean_environment: pytest.MonkeyPatch) -> None:
+    settings = settings_with_redis(clean_environment, DECKLY_CACHE_REDIS_URL=f"  {CACHE_REDIS_URL}  ")
+
+    assert str(settings.cache_redis_url) == CACHE_REDIS_URL
+
+
+@pytest.mark.parametrize("url", ["rediss://cache.internal:6380/0", "redis://:secret@cache.internal/0"])
+def test_cache_redis_url_accepts_tls_and_credentials(clean_environment: pytest.MonkeyPatch, url: str) -> None:
+    settings = settings_with_redis(clean_environment, DECKLY_CACHE_REDIS_URL=url)
+
+    assert settings.cache_redis_url.scheme == url.split(":", 1)[0]
+    assert settings.cache_redis_url.host == "cache.internal"
+
+
+@pytest.mark.parametrize(
+    "url", ["", "   ", "cache.internal:6379", "http://cache.internal:6379/0", "postgresql://cache/0"]
+)
+def test_cache_redis_url_that_is_blank_or_not_a_redis_url_is_rejected_not_read_as_unset(
+    clean_environment: pytest.MonkeyPatch, url: str
+) -> None:
+    with pytest.raises(ValidationError, match="redis_url"):
+        settings_with_redis(clean_environment, DECKLY_CACHE_REDIS_URL=url)
+
+
+def test_invalid_cache_redis_url_does_not_leak_password(clean_environment: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValidationError) as raised:
+        settings_with_redis(clean_environment, DECKLY_CACHE_REDIS_URL="http://:hunter2@cache.internal/0")
+
+    assert "hunter2" not in str(raised.value)
 
 
 def set_sweep_environment(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:

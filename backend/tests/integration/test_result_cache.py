@@ -5,11 +5,13 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import replace
 from http import HTTPStatus
 from typing import Unpack
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import pytest
-from arq.connections import ArqRedis
+from arq.connections import ArqRedis, RedisSettings
 from fastapi.testclient import TestClient
+from pydantic import RedisDsn
 
 from deckly.application.pipeline import RunGeneration
 from deckly.config import Settings
@@ -18,11 +20,28 @@ from deckly.domain.notes.note_type import NoteType
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.database import create_engine, create_session_factory
 from deckly.infrastructure.job_store import PostgresJobStore
+from deckly.infrastructure.queue import create_queue_pool, create_redis_settings
 from deckly.infrastructure.result_cache import RedisResultCache, ResultCacheLimits, cache_key
 from deckly.main import API_PREFIX, create_app
-from deckly.worker.settings import build_result_cache
+from deckly.worker.settings import (
+    OBSERVABILITY_KEY,
+    RUN_GENERATION_KEY,
+    SETTINGS_KEY,
+    WorkerContext,
+    build_result_cache,
+    from_context,
+    shutdown,
+    startup,
+)
 from tests.domain.builders import FULL_RESULT, RequestChanges
-from tests.fakes import GENERATED, FakeProviders, fresh_metrics, fresh_telemetry, generation_request
+from tests.fakes import (
+    GENERATED,
+    FakeProviders,
+    fresh_metrics,
+    fresh_observability,
+    fresh_telemetry,
+    generation_request,
+)
 from tests.integration.conftest import Cleanup, open_queue_pool
 from tests.transport.openapi import spec_errors
 
@@ -32,6 +51,7 @@ ENDPOINT = f"{API_PREFIX}/generations"
 SHORT_TTL_SECONDS = 1
 EXPIRY_WAIT_SECONDS = SHORT_TTL_SECONDS + 0.5
 COMMAND_TIMEOUT_SECONDS = 2.0
+REDIS_DATABASES = 16
 
 
 def limits(ttl_seconds: int) -> ResultCacheLimits:
@@ -289,3 +309,47 @@ def test_a_request_for_images_is_not_served_the_deck_cached_without_them(
 
     assert providers.generated_for == [first, second]
     assert providers.fetched_for == [second]
+
+
+def another_database(url: RedisDsn) -> RedisDsn:
+    database = (RedisSettings.from_dsn(str(url)).database + 1) % REDIS_DATABASES
+    return RedisDsn(urlsplit(str(url))._replace(path=f"/{database}").geturl())
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("configured", [True, False], ids=["its own database", "the queue database"])
+async def test_the_worker_caches_in_the_configured_cache_redis_and_in_the_queue_redis_when_unset(
+    settings: Settings, pool: ArqRedis, *, configured: bool
+) -> None:
+    cache_url = another_database(settings.redis.url) if configured else None
+    wired = replace(settings, cache=settings.cache.model_copy(update={"redis_url": cache_url}))
+    cache_pool = await create_queue_pool(
+        create_redis_settings(
+            str(wired.cache_redis_url),
+            connect_timeout_seconds=settings.redis.connect_timeout_seconds,
+            connect_retries=settings.redis.connect_retries,
+        ),
+        read_timeout_seconds=settings.redis.connect_timeout_seconds,
+    )
+    request = unique_request()
+    key = cache_key(request.fingerprint())
+    ctx: WorkerContext = {SETTINGS_KEY: wired, OBSERVABILITY_KEY: fresh_observability()}
+    await startup(ctx)
+    try:
+        cache = from_context(ctx, RUN_GENERATION_KEY, RunGeneration).cache
+        await cache.put(request, FULL_RESULT)
+
+        in_cache_redis = await cache_pool.exists(key)
+        in_queue_redis = await pool.exists(key)
+        read_back = await cache.get(request)
+    finally:
+        try:
+            await shutdown(ctx)
+        finally:
+            await cache_pool.delete(key)
+            await pool.delete(key)
+            await cache_pool.aclose()
+
+    assert in_cache_redis == 1
+    assert in_queue_redis == (0 if configured else 1)
+    assert read_back == FULL_RESULT
