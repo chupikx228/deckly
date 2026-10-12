@@ -11,7 +11,7 @@ from deckly.domain.source import Source
 from deckly.infrastructure.search.cleaning import MAX_TITLE_CHARACTERS
 from deckly.infrastructure.search.parser import MIN_VISIBLE_CHARACTERS, CleaningSourceParser
 from tests.domain.builders import JOB_ID, T0
-from tests.fakes import generation_request
+from tests.fakes import source_query
 from tests.logs import captured_json_logs
 
 pytestmark = pytest.mark.anyio
@@ -30,9 +30,7 @@ SOURCE_TAG = re.compile(r"<\s*/?\s*source\b", re.IGNORECASE)
 
 
 async def parse(*pages: RetrievedPage, max_characters: int = MAX_CHARACTERS) -> tuple[SourceMaterial, ...]:
-    return await CleaningSourceParser(max_characters=max_characters).parse(
-        JOB_ID, generation_request(), pages
-    )
+    return await CleaningSourceParser(max_characters=max_characters).parse(JOB_ID, source_query(), pages)
 
 
 def page(content: str, title: str = SOURCE.title) -> RetrievedPage:

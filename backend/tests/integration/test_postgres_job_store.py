@@ -13,7 +13,7 @@ from deckly.application.exceptions import UnreadableJobRequestError
 from deckly.application.ports import IdempotencyScope, JobTransition, StoredJob
 from deckly.config import Settings
 from deckly.domain.exceptions import InvalidJobTransitionError, JobAlreadyTerminalError
-from deckly.domain.generation import Difficulty, GenerationRequest
+from deckly.domain.generation import MAX_CARD_COUNT, MIN_CARD_COUNT, Difficulty, GenerationRequest
 from deckly.domain.job import FailureCode, GenerationJob, JobStage, JobStatus
 from deckly.domain.notes.basic import BasicFields
 from deckly.domain.notes.note_type import NoteType
@@ -371,6 +371,25 @@ async def test_find_of_a_request_saved_before_its_note_type_was_withdrawn_is_unr
             update(GenerationJobRow)
             .where(GenerationJobRow.job_id == job.job_id)
             .values(note_types=[NoteType.IMAGE_OCCLUSION], include_images=True)
+        )
+
+    with pytest.raises(UnreadableJobRequestError):
+        await store.find(scope)
+
+
+@pytest.mark.parametrize("card_count", [MIN_CARD_COUNT - 1, MAX_CARD_COUNT + 1], ids=repr)
+async def test_find_of_a_request_saved_with_an_out_of_bounds_card_count_is_unreadable(
+    session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup, card_count: int
+) -> None:
+    store = PostgresJobStore(session_factory)
+    scope = cleanup.scope()
+    job = new_job()
+    await store.add(job, generation_request(), scope)
+    async with session_factory.begin() as session:
+        await session.execute(
+            update(GenerationJobRow)
+            .where(GenerationJobRow.job_id == job.job_id)
+            .values(card_count=card_count)
         )
 
     with pytest.raises(UnreadableJobRequestError):

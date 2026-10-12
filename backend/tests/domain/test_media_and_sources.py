@@ -3,9 +3,9 @@ from uuid import UUID
 
 import pytest
 
-from deckly.domain.exceptions import InvalidMediaError, InvalidSourceError
+from deckly.domain.exceptions import InvalidGenerationRequestError, InvalidMediaError, InvalidSourceError
 from deckly.domain.media import Attribution, Media, MediaKind
-from deckly.domain.source import Source
+from deckly.domain.source import Source, SourceQuery
 from tests.domain.builders import T0, client_id
 
 IMAGE_URL = "https://cdn.example.com/sign.png"
@@ -142,3 +142,13 @@ def test_source_with_a_blank_title_is_rejected(title: str) -> None:
 def test_source_retrieved_without_an_offset_is_rejected() -> None:
     with pytest.raises(InvalidSourceError):
         Source(title="Traffic regulations", url="https://example.com", retrieved_at=T0.replace(tzinfo=None))
+
+
+@pytest.mark.parametrize("topic", ["", "   ", "\n\t", "\u200b", "\N{HANGUL FILLER}"], ids=repr)
+def test_source_query_with_a_blank_topic_is_rejected(topic: str) -> None:
+    with pytest.raises(InvalidGenerationRequestError, match="topic"):
+        SourceQuery(topic=topic, language="ru")
+
+
+def test_source_query_with_a_visible_topic_is_accepted() -> None:
+    assert SourceQuery(topic=" x ", language="ru").topic == " x "

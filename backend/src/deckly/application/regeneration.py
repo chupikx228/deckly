@@ -15,28 +15,14 @@ from deckly.application.ports import (
     SourceRetriever,
 )
 from deckly.domain.exceptions import TopicRejectedError
-from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.notes.note import Note
 from deckly.domain.regeneration import RegenerationRequest
 
 logger = logging.getLogger(__name__)
 
-SINGLE_NOTE = 1
 TIMED_OUT_RETRY_AFTER_SECONDS = 5
 
 type RequestIdFactory = Callable[[], UUID]
-
-
-def retrieval_request(request: RegenerationRequest) -> GenerationRequest:
-    return GenerationRequest(
-        topic=request.topic,
-        language=request.language,
-        card_count=SINGLE_NOTE,
-        difficulty=Difficulty.INTERMEDIATE,
-        note_types=(request.note_type,),
-        include_images=False,
-        instructions=None,
-    )
 
 
 async def alongside[T](work: Coroutine[object, object, T], check: Coroutine[object, object, None]) -> T:
@@ -75,13 +61,13 @@ class RegenerateNote:
 
     async def _regenerate(self, request_id: UUID, request: RegenerationRequest, client_id: UUID) -> Note:
         await self.limiter.acquire(client_id, self.clock())
-        search = retrieval_request(request)
+        query = request.source_query()
         pages = await alongside(
-            self.retriever.retrieve(request_id, search), self._screen_request(request_id, request)
+            self.retriever.retrieve(request_id, query), self._screen_request(request_id, request)
         )
-        material = await self.parser.parse(request_id, search, pages)
+        material = await self.parser.parse(request_id, query, pages)
         note = await self.regenerator.regenerate(request_id, request, material)
-        if not await self.moderator.allows_note(request_id, search, note):
+        if not await self.moderator.allows_note(request_id, query, note):
             logger.warning("regenerated_note_blocked", extra={"request_id": str(request_id)})
             message = "the regenerated note violates the content policy"
             raise NoValidContentError(message)

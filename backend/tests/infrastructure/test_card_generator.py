@@ -675,16 +675,6 @@ async def test_lone_surrogates_and_nul_in_the_source_material_never_reach_the_pr
     assert [source.title for source in note.sources] == ["Traffic regulations"]
 
 
-@pytest.mark.parametrize("card_count", [0, -1])
-async def test_non_positive_card_count_yields_no_notes_without_calling_the_model(card_count: int) -> None:
-    llm = FakeLlmClient(model_reply(document(basic(1), basic(2), basic(3))))
-
-    result = await generate(llm, request(NoteType.BASIC, card_count=card_count))
-
-    assert result.notes == ()
-    assert llm.prompts == []
-
-
 async def test_more_valid_notes_than_card_count_are_trimmed_to_the_first_card_count() -> None:
     job_request = request(NoteType.BASIC, card_count=5)
     llm = FakeLlmClient(model_reply(document(*(basic(number) for number in range(1, 9)))))
@@ -728,11 +718,13 @@ async def test_document_repeated_verbatim_in_a_code_fence_yields_each_note_once(
 
 
 async def test_duplicates_do_not_count_towards_card_count() -> None:
-    llm = FakeLlmClient(model_reply(document(basic(1), basic(1), basic(2))))
+    llm = FakeLlmClient(
+        model_reply(document(basic(1), basic(1), basic(2), basic(2), basic(3), basic(4), basic(5)))
+    )
 
-    result = await generate(llm, request(NoteType.BASIC, card_count=2))
+    result = await generate(llm, request(NoteType.BASIC, card_count=5))
 
-    assert fronts(result) == ["front 1", "front 2"]
+    assert fronts(result) == [f"front {number}" for number in range(1, 6)]
 
 
 async def test_first_of_two_duplicates_is_kept_with_its_own_sources() -> None:
@@ -857,12 +849,12 @@ async def test_near_duplicate_is_logged_as_a_duplicate_and_does_not_use_up_card_
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     near = note_json(NoteType.BASIC, {"front": "FRONT 1", "back": "BACK 1"})
-    llm = FakeLlmClient(model_reply(document(basic(1), near, basic(2))))
+    llm = FakeLlmClient(model_reply(document(basic(1), near, *(basic(number) for number in range(2, 6)))))
 
     with caplog.at_level(logging.INFO, logger=GENERATOR_LOGGER):
-        result = await generate(llm, request(NoteType.BASIC, card_count=2))
+        result = await generate(llm, request(NoteType.BASIC, card_count=5))
 
-    assert fronts(result) == ["front 1", "front 2"]
+    assert fronts(result) == [f"front {number}" for number in range(1, 6)]
     [record] = [record for record in caplog.records if record.getMessage() == "card_generation_finished"]
     assert record.__dict__["dropped_notes"] == {"duplicate": 1}
 
@@ -1160,14 +1152,17 @@ async def test_dropped_duplicate_and_trimmed_notes_carry_no_image_query() -> Non
         with_image(basic(1), "duplicate"),
         with_image(note_json(NoteType.BASIC, {"front": "no back"}), "invalid"),
         with_image(basic(2), "second"),
-        with_image(basic(3), "over the card count"),
+        with_image(basic(3), "third"),
+        with_image(basic(4), "fourth"),
+        with_image(basic(5), "fifth"),
+        with_image(basic(6), "over the card count"),
     ]
     llm = FakeLlmClient(model_reply(document(*notes)))
 
-    cards = await generate_cards(llm, illustrated_request(NoteType.BASIC, card_count=2))
+    cards = await generate_cards(llm, illustrated_request(NoteType.BASIC, card_count=5))
 
     kept = {note.client_id for note in cards.result.notes}
-    assert [query.text for query in cards.image_queries] == ["first", "second"]
+    assert [query.text for query in cards.image_queries] == ["first", "second", "third", "fourth", "fifth"]
     assert {query.client_id for query in cards.image_queries} == kept
 
 
@@ -1190,12 +1185,12 @@ async def test_outcome_is_logged_with_drop_counts_by_reason_and_no_note_content(
         basic(1),
         valid_note(NoteType.CLOZE),
         note_json(NoteType.BASIC, {"front": "secret"}),
-        basic(2),
+        *(basic(number) for number in range(2, 7)),
     ]
     llm = FakeLlmClient(model_reply(document(*notes)))
 
     with caplog.at_level(logging.INFO, logger=GENERATOR_LOGGER):
-        await generate(llm, request(NoteType.BASIC, card_count=1))
+        await generate(llm, request(NoteType.BASIC, card_count=5))
 
     [record] = [record for record in caplog.records if record.getMessage() == "card_generation_finished"]
     assert record.__dict__["dropped_notes"] == {

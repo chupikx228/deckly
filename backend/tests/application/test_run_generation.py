@@ -117,10 +117,23 @@ async def test_each_port_receives_what_the_previous_stage_produced() -> None:
     await harness.run(job_id)
 
     assert harness.providers.received == {
-        JobStage.RETRIEVING_SOURCES: WITH_IMAGES,
+        JobStage.RETRIEVING_SOURCES: WITH_IMAGES.source_query(),
         JobStage.PARSING_SOURCES: PAGES,
         JobStage.GENERATING_CARDS: MATERIAL,
         JobStage.FETCHING_MEDIA: queries_for_every_note(GENERATED),
+    }
+
+
+async def test_every_port_that_searches_or_screens_is_given_the_source_query_of_the_request() -> None:
+    harness = Harness()
+    job_id = await create(harness, WITH_IMAGES)
+
+    await harness.run(job_id)
+
+    assert harness.providers.queried == {
+        JobStage.RETRIEVING_SOURCES: WITH_IMAGES.source_query(),
+        JobStage.PARSING_SOURCES: WITH_IMAGES.source_query(),
+        JobStage.GENERATING_CARDS: WITH_IMAGES.source_query(),
     }
 
 

@@ -18,10 +18,10 @@ from tests.fakes import (
     ManualTime,
     fresh_metrics,
     fresh_probe,
-    generation_request,
     hang_forever,
     job_id,
     model_reply,
+    source_query,
 )
 
 pytestmark = pytest.mark.anyio
@@ -36,7 +36,7 @@ MODERATION_MAX_OUTPUT_TOKENS = 4000
 REPLY = LlmReply(text="{}", stop=LlmStop.COMPLETE)
 PROMPT = LlmPrompt(system="system", user=json.dumps({"notes": {"1": "front"}}), expected_output_tokens=100)
 MAX_DECK = result_with(*(basic_note(number) for number in range(1, MAX_CARD_COUNT + 1)))
-REQUEST = generation_request()
+QUERY = source_query()
 
 
 class CountingClassifier:
@@ -223,7 +223,7 @@ async def test_time_spent_queued_is_not_charged_to_the_attempt_timeout_of_the_re
 async def screen_queued_decks(moderator: LlmContentModerator) -> tuple[int, ...]:
     async with asyncio.timeout(FAIL_FAST_SECONDS):
         screened = await asyncio.gather(
-            *(moderator.screen(job_id(number), REQUEST, MAX_DECK) for number in range(QUEUED_JOBS))
+            *(moderator.screen(job_id(number), QUERY, MAX_DECK) for number in range(QUEUED_JOBS))
         )
     return tuple(len(result.notes) for result in screened)
 
@@ -252,7 +252,7 @@ async def test_chunks_of_one_maximum_size_deck_still_run_together_under_the_limi
     moderator = LlmContentModerator(llm=bounded(provider))
 
     async with asyncio.timeout(FAIL_FAST_SECONDS):
-        screened = await moderator.screen(job_id(1), REQUEST, MAX_DECK)
+        screened = await moderator.screen(job_id(1), QUERY, MAX_DECK)
 
     assert provider.peak == CHUNKS_PER_MAX_DECK
     assert len(screened.notes) == MAX_CARD_COUNT
@@ -264,7 +264,7 @@ async def test_provider_outage_fails_every_queued_job_instead_of_hanging_them() 
 
     async with asyncio.timeout(FAIL_FAST_SECONDS):
         outcomes = await asyncio.gather(
-            *(moderator.screen(job_id(number), REQUEST, MAX_DECK) for number in range(QUEUED_FAILING_JOBS)),
+            *(moderator.screen(job_id(number), QUERY, MAX_DECK) for number in range(QUEUED_FAILING_JOBS)),
             return_exceptions=True,
         )
 
@@ -342,7 +342,7 @@ async def test_failing_chunk_under_a_single_slot_cancels_the_chunks_still_queued
 
     async with asyncio.timeout(FAIL_FAST_SECONDS):
         with pytest.raises(UpstreamUnavailableError):
-            await LlmContentModerator(llm=llm).screen(job_id(1), REQUEST, MAX_DECK)
+            await LlmContentModerator(llm=llm).screen(job_id(1), QUERY, MAX_DECK)
 
     assert len(provider.prompts) <= 2
     assert await holds_every_slot(gate, 1)

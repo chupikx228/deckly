@@ -35,6 +35,7 @@ from deckly.domain.media import Media, MediaKind
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.regeneration import RegenerationRequest, RejectionReason
+from deckly.domain.source import SourceQuery
 from deckly.infrastructure.llm.client import LlmPrompt, LlmReply, LlmStop
 from deckly.infrastructure.media.client import ImageCandidate, ImageSearch, MediaEndpoint
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
@@ -361,6 +362,10 @@ def generation_request(topic: str = "Road signs") -> GenerationRequest:
     )
 
 
+def source_query(topic: str = "Road signs") -> SourceQuery:
+    return generation_request(topic).source_query()
+
+
 def scope(client: int = 1, key: int = 1) -> IdempotencyScope:
     return IdempotencyScope(client_id=UUID(int=client, version=4), idempotency_key=UUID(int=key, version=4))
 
@@ -598,6 +603,7 @@ class FakeProviders:
         self.missing: tuple[MissingImage, ...] = ()
         self.calls: list[JobStage] = []
         self.received: dict[JobStage, object] = {}
+        self.queried: dict[JobStage, SourceQuery] = {}
         self.retrieved_for: list[UUID] = []
         self.parsed_for: list[UUID] = []
         self.generated_for: list[UUID] = []
@@ -606,15 +612,16 @@ class FakeProviders:
         self.failures: dict[JobStage, Exception] = {}
         self.during: dict[JobStage, Hook] = {}
 
-    async def retrieve(self, job_id: UUID, request: GenerationRequest) -> tuple[RetrievedPage, ...]:
+    async def retrieve(self, job_id: UUID, query: SourceQuery) -> tuple[RetrievedPage, ...]:
         self.retrieved_for.append(job_id)
-        await self._reach(JobStage.RETRIEVING_SOURCES, request)
+        self.queried[JobStage.RETRIEVING_SOURCES] = query
+        await self._reach(JobStage.RETRIEVING_SOURCES, query)
         return PAGES
 
     async def parse(
-        self, job_id: UUID, request: GenerationRequest, pages: tuple[RetrievedPage, ...]
+        self, job_id: UUID, query: SourceQuery, pages: tuple[RetrievedPage, ...]
     ) -> tuple[SourceMaterial, ...]:
-        del request
+        self.queried[JobStage.PARSING_SOURCES] = query
         self.parsed_for.append(job_id)
         await self._reach(JobStage.PARSING_SOURCES, pages)
         return MATERIAL
@@ -628,10 +635,9 @@ class FakeProviders:
         queries = queries_for_every_note(self.result) if self.image_queries is None else self.image_queries
         return GeneratedCards(result=self.result, image_queries=queries)
 
-    async def screen(
-        self, job_id: UUID, request: GenerationRequest, result: GenerationResult
-    ) -> GenerationResult:
-        del job_id, request
+    async def screen(self, job_id: UUID, query: SourceQuery, result: GenerationResult) -> GenerationResult:
+        del job_id
+        self.queried[JobStage.GENERATING_CARDS] = query
         self.screened.append(result)
         if self.screen_failure is not None:
             raise self.screen_failure
@@ -722,13 +728,13 @@ class FakeRegeneration:
         self.note = basic_note(1)
         self.steps: list[RegenerationStep] = []
         self.acquired: list[tuple[UUID, datetime]] = []
-        self.searched: list[tuple[UUID, GenerationRequest]] = []
+        self.searched: list[tuple[UUID, SourceQuery]] = []
         self.parsed: list[tuple[UUID, tuple[RetrievedPage, ...]]] = []
         self.regenerated: list[tuple[UUID, RegenerationRequest, tuple[SourceMaterial, ...]]] = []
         self.request_allowed = True
         self.note_allowed = True
         self.screened_requests: list[RegenerationRequest] = []
-        self.screened_notes: list[tuple[UUID, GenerationRequest, Note]] = []
+        self.screened_notes: list[tuple[UUID, SourceQuery, Note]] = []
         self.cancelled: list[RegenerationStep] = []
         self.failures: dict[RegenerationStep, Exception] = {}
         self.during: dict[RegenerationStep, Hook] = {}
@@ -737,15 +743,15 @@ class FakeRegeneration:
         self.acquired.append((client_id, now))
         await self._reach(RegenerationStep.LIMIT)
 
-    async def retrieve(self, job_id: UUID, request: GenerationRequest) -> tuple[RetrievedPage, ...]:
-        self.searched.append((job_id, request))
+    async def retrieve(self, job_id: UUID, query: SourceQuery) -> tuple[RetrievedPage, ...]:
+        self.searched.append((job_id, query))
         await self._reach(RegenerationStep.SEARCH)
         return PAGES
 
     async def parse(
-        self, job_id: UUID, request: GenerationRequest, pages: tuple[RetrievedPage, ...]
+        self, job_id: UUID, query: SourceQuery, pages: tuple[RetrievedPage, ...]
     ) -> tuple[SourceMaterial, ...]:
-        del request
+        del query
         self.parsed.append((job_id, pages))
         await self._reach(RegenerationStep.PARSE)
         return MATERIAL
@@ -762,8 +768,8 @@ class FakeRegeneration:
         await self._reach(RegenerationStep.SCREEN_REQUEST)
         return self.request_allowed
 
-    async def allows_note(self, request_id: UUID, request: GenerationRequest, note: Note) -> bool:
-        self.screened_notes.append((request_id, request, note))
+    async def allows_note(self, request_id: UUID, query: SourceQuery, note: Note) -> bool:
+        self.screened_notes.append((request_id, query, note))
         await self._reach(RegenerationStep.SCREEN_NOTE)
         return self.note_allowed
 

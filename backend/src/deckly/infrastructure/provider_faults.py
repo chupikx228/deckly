@@ -6,9 +6,9 @@ from uuid import UUID
 
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.ports import NoteRegenerator, RetrievedPage, SourceMaterial, SourceRetriever
-from deckly.domain.generation import GenerationRequest
 from deckly.domain.notes.note import Note
 from deckly.domain.regeneration import RegenerationRequest
+from deckly.domain.source import SourceQuery
 from deckly.infrastructure.llm.client import LlmError
 from deckly.infrastructure.search.client import SearchError
 
@@ -33,9 +33,9 @@ def provider_faults_as_upstream(request_id: UUID) -> Iterator[None]:
 class UpstreamFaultRetriever:
     inner: SourceRetriever
 
-    async def retrieve(self, job_id: UUID, request: GenerationRequest) -> tuple[RetrievedPage, ...]:
+    async def retrieve(self, job_id: UUID, query: SourceQuery) -> tuple[RetrievedPage, ...]:
         with provider_faults_as_upstream(job_id):
-            return await self.inner.retrieve(job_id, request)
+            return await self.inner.retrieve(job_id, query)
 
 
 @dataclass(frozen=True, slots=True)

@@ -7,8 +7,7 @@ from uuid import UUID
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.ports import RetrievedPage
 from deckly.domain.exceptions import InvalidSourceError
-from deckly.domain.generation import GenerationRequest
-from deckly.domain.source import Source
+from deckly.domain.source import Source, SourceQuery
 from deckly.domain.text import strip_unstorable
 from deckly.infrastructure.resilience import MIN_RETRY_AFTER_SECONDS, CallSize, ResilientCaller
 from deckly.infrastructure.search.cleaning import clean_title, visible_words
@@ -56,14 +55,14 @@ class WebSourceRetriever:
     clock: Callable[[], datetime]
     max_results: int
 
-    async def retrieve(self, _job_id: UUID, request: GenerationRequest) -> tuple[RetrievedPage, ...]:
-        query = SearchQuery(
-            text=visible_words(strip_unstorable(request.topic)),
-            language=language_hint(request.language),
+    async def retrieve(self, _job_id: UUID, query: SourceQuery) -> tuple[RetrievedPage, ...]:
+        search = SearchQuery(
+            text=visible_words(strip_unstorable(query.topic)),
+            language=language_hint(query.language),
             max_results=self.max_results,
         )
         try:
-            hits = await self.caller.call(lambda: self.client.search(query), size=CallSize.TYPICAL)
+            hits = await self.caller.call(lambda: self.client.search(search), size=CallSize.TYPICAL)
         except SearchQuotaExhaustedError as error:
             raise UpstreamUnavailableError(MIN_RETRY_AFTER_SECONDS) from error
         pages = unique_pages(hits, self.clock())[: self.max_results]

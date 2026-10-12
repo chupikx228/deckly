@@ -1,8 +1,19 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from deckly.domain.exceptions import InvalidSourceError
+from deckly.domain.exceptions import InvalidGenerationRequestError, InvalidSourceError
 from deckly.domain.text import is_blank, is_timezone_aware, is_web_url
+
+
+@dataclass(frozen=True, slots=True)
+class SourceQuery:
+    topic: str
+    language: str
+
+    def __post_init__(self) -> None:
+        if is_blank(self.topic):
+            message = "topic must contain visible characters"
+            raise InvalidGenerationRequestError(message)
 
 
 @dataclass(frozen=True, slots=True)

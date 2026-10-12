@@ -5,6 +5,7 @@ from enum import StrEnum
 from deckly.domain.exceptions import InvalidGenerationRequestError, UnsupportedNoteTypeError
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import fields_type_for
+from deckly.domain.source import SourceQuery
 from deckly.domain.text import is_blank
 
 UNREGENERATABLE_NOTE_TYPES = frozenset({NoteType.IMAGE_OCCLUSION})
@@ -39,3 +40,6 @@ class RegenerationRequest:
         except UnsupportedNoteTypeError as error:
             message = f"note type {self.note_type} cannot be regenerated"
             raise InvalidGenerationRequestError(message) from error
+
+    def source_query(self) -> SourceQuery:
+        return SourceQuery(topic=self.topic, language=self.language)

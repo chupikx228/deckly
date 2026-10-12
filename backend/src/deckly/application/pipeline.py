@@ -188,13 +188,14 @@ class RunGeneration:
                 await self._succeed(job_id, cached, started, cache_hit=True)
                 run.finish(JobOutcome.SUCCEEDED)
                 return
+        query = request.source_query()
         async with self._stage(job_id, JobStage.RETRIEVING_SOURCES):
-            pages = await self.retriever.retrieve(job_id, request)
+            pages = await self.retriever.retrieve(job_id, query)
         async with self._stage(job_id, JobStage.PARSING_SOURCES):
-            material = await self.parser.parse(job_id, request, pages)
+            material = await self.parser.parse(job_id, query, pages)
         async with self._stage(job_id, JobStage.GENERATING_CARDS):
             cards = await self.generator.generate(job_id, request, material)
-            result = require_notes(await self.moderator.screen(job_id, request, require_notes(cards.result)))
+            result = require_notes(await self.moderator.screen(job_id, query, require_notes(cards.result)))
         cacheable = True
         if request.include_images:
             async with self._stage(job_id, JobStage.FETCHING_MEDIA):
