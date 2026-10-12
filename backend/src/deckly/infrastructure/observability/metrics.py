@@ -6,6 +6,7 @@ from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 STAGE_BUCKETS = (0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0)
 JOB_BUCKETS = (0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 180.0, 240.0, 300.0, 600.0)
 GENERATION_QUEUE = "generation"
+MODERATION_GATE = "moderation"
 PROVIDER_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0, 90.0, 180.0)
 
 
@@ -14,6 +15,11 @@ class CacheLookup(StrEnum):
     MISS = "miss"
     CORRUPT = "corrupt"
     ERROR = "error"
+
+
+class GateWait(StrEnum):
+    ACQUIRED = "acquired"
+    ABANDONED = "abandoned"
 
 
 class RateLimit(StrEnum):
@@ -36,6 +42,9 @@ class Metrics:
     provider_circuit_open: Gauge
     cache_lookups: Counter
     queue_depth: Gauge
+    gate_in_flight: Gauge
+    gate_limit: Gauge
+    gate_wait: Histogram
     rate_limit_rejections: Counter
 
 
@@ -109,6 +118,25 @@ def create_metrics() -> Metrics:
             "deckly_generation_queue_depth",
             "Generation jobs waiting in the queue, read when the API is scraped.",
             ["queue"],
+            registry=registry,
+        ),
+        gate_in_flight=Gauge(
+            "deckly_gate_in_flight",
+            "Calls currently holding a slot of a concurrency gate.",
+            ["gate"],
+            registry=registry,
+        ),
+        gate_limit=Gauge(
+            "deckly_gate_limit",
+            "Slots of a concurrency gate, the ceiling of its in-flight count.",
+            ["gate"],
+            registry=registry,
+        ),
+        gate_wait=Histogram(
+            "deckly_gate_wait_seconds",
+            "Time a call waited for a slot of a concurrency gate, by outcome: acquired one, or abandoned.",
+            ["gate", "outcome"],
+            buckets=STAGE_BUCKETS,
             registry=registry,
         ),
         rate_limit_rejections=Counter(

@@ -37,7 +37,7 @@ from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
 from deckly.infrastructure.moderation.image_judge import LlmCandidateJudge
 from deckly.infrastructure.moderation.moderator import LlmContentModerator
-from deckly.infrastructure.observability.metrics import Metrics
+from deckly.infrastructure.observability.metrics import MODERATION_GATE, Metrics
 from deckly.infrastructure.observability.runtime import Observability
 from deckly.infrastructure.observability.tracing import continued_trace, trace_carrier_from
 from deckly.infrastructure.queue import GENERATION_TASK, create_bounded_pool, create_redis_settings
@@ -347,10 +347,19 @@ async def startup(ctx: WorkerContext) -> None:
     )
     ctx[MEDIA_JUDGE_LLM_CLIENT_KEY] = media_judge_llm
     moderation_gate = asyncio.Semaphore(settings.providers.moderation_max_concurrency)
+    observability.metrics.gate_limit.labels(gate=MODERATION_GATE).set(
+        settings.providers.moderation_max_concurrency
+    )
+
+    def bounded(inner: LlmClient) -> BoundedLlmClient:
+        return BoundedLlmClient(
+            inner, moderation_gate, MODERATION_GATE, observability.metrics, time.monotonic
+        )
+
     media = build_media_fetcher(
         settings.providers,
         observability.probe(ProviderOperation.IMAGE_SEARCH),
-        BoundedLlmClient(media_judge_llm, moderation_gate),
+        bounded(media_judge_llm),
     )
     ctx[MEDIA_FETCHER_KEY] = media
     session_factory = create_session_factory(engine)
@@ -368,7 +377,7 @@ async def startup(ctx: WorkerContext) -> None:
         retriever=retriever,
         parser=CleaningSourceParser(max_characters=settings.providers.search_max_source_characters),
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),
-        moderator=LlmContentModerator(llm=BoundedLlmClient(moderation_llm, moderation_gate)),
+        moderator=LlmContentModerator(llm=bounded(moderation_llm)),
         media=media,
         clock=utc_now,
         telemetry=observability.generation(),

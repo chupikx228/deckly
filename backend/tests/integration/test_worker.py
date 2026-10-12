@@ -1,9 +1,12 @@
 import asyncio
 import contextlib
+import dataclasses
+import socket
 import time
 from datetime import timedelta
 from uuid import UUID, uuid4
 
+import httpx2
 import pytest
 from arq.connections import ArqRedis, create_pool
 from arq.constants import (
@@ -26,10 +29,12 @@ from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.job_store import PostgresJobStore
 from deckly.infrastructure.llm.bounded import BoundedLlmClient
+from deckly.infrastructure.llm.client import LlmPrompt
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher
 from deckly.infrastructure.moderation.image_judge import LlmCandidateJudge
 from deckly.infrastructure.moderation.moderator import LlmContentModerator
+from deckly.infrastructure.observability.exposition import METRICS_PATH, serve_metrics
 from deckly.infrastructure.resilience import (
     CircuitBreaker,
     CircuitState,
@@ -74,6 +79,8 @@ from tests.integration.conftest import Cleanup, job_queue, redis_settings
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
+PROMPT = LlmPrompt(system="system", user="user", expected_output_tokens=10)
+GATE_LIMIT = 20
 DEFAULT_JOB_TIMEOUT_SECONDS = 300
 SHORT_JOB_TIMEOUT_SECONDS = 0.3
 ABORT_POLL_SECONDS = 0.05
@@ -235,6 +242,48 @@ async def test_worker_startup_bounds_content_and_image_moderation_by_one_shared_
     assert not gate.locked()
     await gate.acquire()
     assert gate.locked()
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+async def test_worker_exposes_the_moderation_gate_metrics_on_its_metrics_endpoint(
+    settings: Settings,
+) -> None:
+    observability = fresh_observability()
+    limited = dataclasses.replace(
+        settings,
+        providers=settings.providers.model_copy(update={"moderation_max_concurrency": GATE_LIMIT}),
+    )
+    ctx: WorkerContext = {SETTINGS_KEY: limited, OBSERVABILITY_KEY: observability}
+    port = free_port()
+
+    await startup(ctx)
+    stop = serve_metrics(observability.metrics, "127.0.0.1", port)
+    try:
+        run = from_context(ctx, RUN_GENERATION_KEY, RunGeneration)
+        media = from_context(ctx, MEDIA_FETCHER_KEY, CommonsMediaFetcher)
+        assert isinstance(run.moderator, LlmContentModerator)
+        assert isinstance(run.moderator.llm, BoundedLlmClient)
+        assert isinstance(media.judge, LlmCandidateJudge)
+        assert isinstance(media.judge.llm, BoundedLlmClient)
+        moderation = dataclasses.replace(run.moderator.llm, inner=FakeLlmClient(model_reply({})))
+        images = dataclasses.replace(media.judge.llm, inner=FakeLlmClient(model_reply({})))
+        await moderation.complete(PROMPT)
+        await images.complete(PROMPT)
+        async with httpx2.AsyncClient() as client:
+            scraped = (await client.get(f"http://127.0.0.1:{port}{METRICS_PATH}")).text
+    finally:
+        stop()
+        await shutdown(ctx)
+
+    assert 'deckly_gate_in_flight{gate="moderation"} 0.0' in scraped
+    assert f'deckly_gate_limit{{gate="moderation"}} {float(GATE_LIMIT)}' in scraped
+    assert 'deckly_gate_wait_seconds_count{gate="moderation",outcome="acquired"} 2.0' in scraped
+    assert 'deckly_gate_wait_seconds_bucket{gate="moderation",le="0.01",outcome="acquired"} 2.0' in scraped
 
 
 async def test_worker_startup_wires_the_llm_card_generator_behind_the_resilience_layer(
