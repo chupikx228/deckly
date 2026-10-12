@@ -223,7 +223,8 @@ other rejection (`400`, `401`, `403`…) or a body that is not the expected JSON
 not retried and fails the job `GENERATION_FAILED`. A search with no usable page is not an error
 here: the parser returns no material, the card generator skips the model call, and the job ends
 `NO_VALID_CONTENT`. Settings refuse to load unless the search, model, media, media judge and
-moderation deadlines together leave room within `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS`.
+moderation deadlines, plus the worst-case wait for a moderation concurrency slot (see
+Concurrency cap), together leave room within `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS`.
 
 ## Card generation
 
@@ -563,7 +564,22 @@ MAX_ATTEMPTS}` per chunk. Because the chunks run concurrently, the filter's wall
   worker at full load with decks of up to 50 cards never queues, and one 200-card job still
   runs its four chunks together. Only bursts of larger decks
   queue: ten 200-card jobs take four waves of chunk calls instead of one, which at the measured
-  2–3 s per chunk adds roughly 10 s to the slowest job, far inside the generation job timeout.
+  2–3 s per chunk adds roughly 10 s to the slowest job.
+
+  Startup refuses a configuration where that wait could exhaust the job timeout. A call queues
+  behind at most `WORKER_MAX_JOBS` × chunks per maximum deck − 1 others (39), freed
+  `DECKLY_PROVIDER_MODERATION_MAX_CONCURRENCY` at a time, so it waits for at most
+  ⌊39 / concurrency⌋ waves (3 at the default of 10, none at 40). A wave lasts as long as the
+  longest a slot can be held, which is the larger of the filter and the image judge deadlines
+  (20 s), not the 15 s attempt timeout: a slot is held across retries, and a retry only starts
+  when it can finish inside the deadline. A job passes the gate twice, at the content filter and
+  at the image judge, so the bound is 2 × 3 × 20 = 120 s, added to the 335 s of stage deadlines.
+  That is the worst case on purpose: the stage deadlines in the same sum are bounds, not typical
+  durations, and a bound built from the typical 2–3 s per chunk would not follow the configured
+  deadlines and would pass exactly when a slow provider makes the wait matter. It is slightly
+  conservative, since the judge call queues behind at most nine other jobs' chunks, not ten.
+  `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS` is 465 in `.env.example`: those 455 s and the
+  same 10 s of margin the earlier 345 left over the deadlines alone.
   The cap is not a breaker or a retry: excess calls wait for a slot and are never rejected. It
   sits outside the resilience layer, so waiting for a slot is not charged to an attempt timeout,
   the retry deadline or the circuit; it does count toward the generation job timeout. A slot is

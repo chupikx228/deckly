@@ -349,6 +349,7 @@ def test_search_base_url_must_be_an_http_url(clean_environment: pytest.MonkeyPat
 def settings_from_environment(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Settings:
     set_provider_environment(monkeypatch)
     environment = {
+        "DECKLY_PROVIDER_MODERATION_MAX_CONCURRENCY": str(MAX_MODERATION_CONCURRENCY),
         **LIMIT_ENVIRONMENT,
         "DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS": ROOMY_JOB_TIMEOUT_SECONDS,
         **REGENERATE_ENVIRONMENT,
@@ -412,6 +413,125 @@ def test_provider_deadlines_that_leave_room_in_the_job_timeout_are_accepted(
     settings = settings_with_job_timeout(clean_environment, 336)
 
     assert settings.limits.generation_job_timeout_seconds == 336
+
+
+DEADLINES_SECONDS = 40 + 240 + 20 + 15 + 20
+DEFAULT_GATE_WAIT_SECONDS = 2 * 3 * 20
+
+
+def settings_at_default_moderation_concurrency(
+    monkeypatch: pytest.MonkeyPatch, job_timeout_seconds: int, **overrides: str
+) -> Settings:
+    return settings_from_environment(
+        monkeypatch,
+        DECKLY_PROVIDER_MODERATION_MAX_CONCURRENCY=str(DEFAULT_MODERATION_MAX_CONCURRENCY),
+        DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS=str(job_timeout_seconds),
+        **overrides,
+    )
+
+
+@pytest.mark.parametrize(
+    ("concurrency", "wait_seconds"),
+    [
+        (1, 2 * 39 * 20),
+        (4, 2 * 9 * 20),
+        (DEFAULT_MODERATION_MAX_CONCURRENCY, DEFAULT_GATE_WAIT_SECONDS),
+        (13, 2 * 3 * 20),
+        (14, 2 * 2 * 20),
+        (20, 2 * 1 * 20),
+        (39, 2 * 1 * 20),
+        (MAX_MODERATION_CONCURRENCY, 0),
+    ],
+)
+def test_worst_case_moderation_gate_wait_counts_the_waves_a_last_chunk_queues_behind(
+    clean_environment: pytest.MonkeyPatch, concurrency: int, wait_seconds: int
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MODERATION_MAX_CONCURRENCY", str(concurrency))
+
+    assert ProviderSettings().moderation_gate_worst_case_wait_seconds == wait_seconds
+
+
+def test_worst_case_moderation_gate_wait_is_zero_when_every_chunk_of_every_job_has_a_slot(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv("DECKLY_PROVIDER_MODERATION_MAX_CONCURRENCY", str(MAX_MODERATION_CONCURRENCY))
+
+    assert ProviderSettings().moderation_gate_worst_case_wait_seconds == 0
+
+
+def test_worst_case_moderation_gate_wait_is_held_for_as_long_as_the_slower_gated_stage_may_run(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_provider_environment(clean_environment)
+    clean_environment.setenv(
+        "DECKLY_PROVIDER_MODERATION_MAX_CONCURRENCY", str(DEFAULT_MODERATION_MAX_CONCURRENCY)
+    )
+    clean_environment.setenv("DECKLY_PROVIDER_MEDIA_JUDGE_DEADLINE_SECONDS", "30")
+
+    assert ProviderSettings().moderation_gate_worst_case_wait_seconds == 2 * 3 * 30
+
+
+@pytest.mark.parametrize("job_timeout_seconds", [DEADLINES_SECONDS + DEFAULT_GATE_WAIT_SECONDS, 400, 336])
+def test_job_timeout_that_the_deadlines_fit_but_the_gate_wait_overflows_is_rejected(
+    clean_environment: pytest.MonkeyPatch, job_timeout_seconds: int
+) -> None:
+    with pytest.raises(ValueError, match="moderation concurrency slot"):
+        settings_at_default_moderation_concurrency(clean_environment, job_timeout_seconds)
+
+
+def test_job_timeout_one_second_past_the_deadlines_and_the_gate_wait_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    timeout = DEADLINES_SECONDS + DEFAULT_GATE_WAIT_SECONDS + 1
+
+    settings = settings_at_default_moderation_concurrency(clean_environment, timeout)
+
+    assert settings.limits.generation_job_timeout_seconds == timeout
+
+
+def test_gate_wait_error_reports_both_terms_so_the_operator_can_pick_which_to_change(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match=r"\(335s\).*\(120s\)"):
+        settings_at_default_moderation_concurrency(clean_environment, 400)
+
+
+def test_deadlines_that_overflow_the_job_timeout_alone_are_reported_without_blaming_the_gate(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match="moderation deadlines") as raised:
+        settings_at_default_moderation_concurrency(clean_environment, DEADLINES_SECONDS)
+
+    assert "concurrency slot" not in str(raised.value)
+
+
+def test_widening_the_gate_to_every_chunk_gives_the_wait_back_to_the_job_timeout(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_from_environment(
+        clean_environment,
+        DECKLY_PROVIDER_MODERATION_MAX_CONCURRENCY=str(MAX_MODERATION_CONCURRENCY),
+        DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS=str(DEADLINES_SECONDS + 1),
+    )
+
+    assert settings.providers.moderation_gate_worst_case_wait_seconds == 0
+
+
+def test_shipped_env_example_passes_every_startup_check(
+    clean_environment: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    del clean_environment
+    shipped = Path(__file__).parent.parent / ".env.example"
+    (tmp_path / ".env").write_text(shipped.read_text())
+
+    settings = load_settings()
+
+    assert (
+        settings.limits.generation_job_timeout_seconds
+        > DEADLINES_SECONDS + settings.providers.moderation_gate_worst_case_wait_seconds
+    )
 
 
 def test_source_character_limit_too_small_to_keep_any_page_is_rejected(

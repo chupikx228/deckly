@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from deckly.application.exceptions import UpstreamUnavailableError
+from deckly.config import MAX_MODERATION_CHUNKS_PER_JOB
 from deckly.domain.deck import Deck, GenerationResult
 from deckly.domain.job import Failed, FailureCode, Succeeded
 from deckly.domain.notes.basic import BasicFields
@@ -553,6 +554,14 @@ def allow_all(count: int) -> LlmReply:
 
 def chunk_count(notes: int) -> int:
     return math.ceil(notes / NOTES_PER_CONTENT_CHECK)
+
+
+async def test_maximum_deck_is_screened_in_as_many_calls_as_the_startup_gate_check_budgets_for() -> None:
+    classifier = PolicyClassifier()
+
+    await LlmContentModerator(llm=classifier).screen(JOB_ID, REQUEST, mixed_result(MAX_CARD_COUNT))
+
+    assert len(classifier.prompts) == MAX_MODERATION_CHUNKS_PER_JOB
 
 
 @pytest.mark.parametrize(
