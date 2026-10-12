@@ -238,7 +238,7 @@ For DeepSeek, every request sends `thinking: {"type": "disabled"}`. deepseek-fla
 reasons until the cap runs out and answers `finish_reason: "length"` with `content` exactly
 empty, which is no JSON to salvage. How often depends on the prompt rather than on chance. On five
 real regenerate prompts at the 1000-token cap (October 2026), 7 of 65 replies came back empty,
-all from two of the prompts, and they took 6.5–7.6 s, so under the 4.5 s regenerate timeout they
+all from two of the prompts, and they took 6.5–7.6 s, so under the then 4.5 s regenerate timeout they
 surfaced as timeouts: 14 of 65 calls ran past 4.5 s. `reasoning_effort: "low"` did not help (7 of
 40 empty). With thinking off, none of 65 came back empty, the model took 1.5 s at p50 and 2.7 s
 at most, 25 of 25 replies yielded a valid note against 23 of 25 with thinking on, and the
@@ -343,11 +343,11 @@ is `503 NO_VALID_CONTENT` and is never returned.
 
 The call must answer within `DECKLY_LIMIT_REGENERATE_NOTE_TIMEOUT_SECONDS` (10). Each step has its
 own `DECKLY_REGENERATE_*` timeout, separate from the job settings: the rate-limit check in Redis
-(0.5 s), the search (3.0 s), the request check (`REQUEST_MODERATION_TIMEOUT_SECONDS`, 2.5 s), the
-model (4.5 s) and the note check (`NOTE_MODERATION_TIMEOUT_SECONDS`, 1.5 s). Settings refuse to
+(0.5 s), the search (4.0 s), the request check (`REQUEST_MODERATION_TIMEOUT_SECONDS`, 2.5 s), the
+model (3.5 s) and the note check (`NOTE_MODERATION_TIMEOUT_SECONDS`, 1.5 s). Settings refuse to
 load unless the rate limit, the longer of the search and the request check, the model, the note
 check and 0.5 s for parsing, validation and the response fit within the total:
-0.5 + 3.0 + 4.5 + 1.5 + 0.5 = 10. The request check runs alongside the search, so it may take as
+0.5 + 4.0 + 3.5 + 1.5 + 0.5 = 10. The request check runs alongside the search, so it may take as
 long as the search does at no cost to the total.
 
 The split is not measured for every provider. Measured on deepseek-flash and Tavily (October 2026,
@@ -388,9 +388,39 @@ thinking off, measured the same way (October 2026, 36 regenerations over 20 minu
 | Note check    | 0.9 s  | 1.2 s | 1.4 s | none             |
 | Whole request | 4.0 s  | 5.0 s | 6.1 s | none at 10 s     |
 
-35 of 36 regenerations succeeded; the one failure was the search timeout. The model now leaves
-about 2 s of its 4.5 s unused, but the split is left as it is until the search and the note check,
-which still reaches 1.4 s of its 1.5 s, have been measured over a longer stretch.
+35 of 36 regenerations succeeded; the one failure was the search timeout. The model then left
+about 2 s of its 4.5 s unused, so the search, the model and the note check were measured again
+over a longer stretch, the same way as the first table: 12 rounds over two hours and ten minutes
+of one evening (October 2026), 144 searches with the regenerate request shape and 48
+regenerations through this wiring, every step given 15 s so that slow calls are timed to the end
+rather than cut off at their timeouts:
+
+| Step                                 | p50    | p90    | max    | Over 3.0 s | Over 3.5 s | Over 4.0 s | Over 4.5 s |
+| ------------------------------------ | ------ | ------ | ------ | ---------- | ---------- | ---------- | ---------- |
+| Search, query Tavily has not cached  | 1.95 s | 3.2 s  | 8.6 s  | 13 %       | 8 %        | 4 %        | 2 %        |
+| Search, same, on a new connection    | 2.2 s  | 3.6 s  | 8.6 s  | 17 %       | 11 %       | 6 %        | 4 %        |
+| Request check                        | 0.9 s  | 1.2 s  | 1.45 s | none       |            |            |            |
+| Model                                | 1.35 s | 1.75 s | 2.0 s  | none       |            |            |            |
+| Note check                           | 0.8 s  | 1.1 s  | 1.15 s | none       |            |            |            |
+| Parsing, validation and the response | 0.05 s | 0.06 s | 0.07 s | none       |            |            |            |
+
+The search rows count 192 uncached searches: the 144 above and the 48 the regenerations ran.
+Per-round search medians drifted between 1.5 s and 3.5 s across the evening, against 1.5–2.9 s
+across the earlier afternoon, and the model's per-round medians stayed between 0.9 s and 1.7 s.
+The live test regenerates only basic notes in English, so 18 more regenerations covered multiple
+choice, cloze and basic notes in English and Russian, each on new connections: the model took at
+most 2.0 s there too, the note check at most 1.3 s.
+
+The search was the only step that timed out, so it got the time: from 3.0 s to 4.0 s, taken from
+the model, which went from 4.5 s to 3.5 s. That cuts search timeouts from 13 % to 4 %, and from
+17 % to 6 % on a new connection, and leaves the model 1.75× the slowest reply measured here and
+0.8 s over the slowest measured with thinking off at all (2.7 s). Going further, to 4.5 s and
+3.0 s, would save two more searches in a hundred, and the model would then have only 0.3 s over
+that slowest reply. A model timeout is also the costlier failure, because it comes after the search
+has already spent its time. The rest of the search tail does not shrink with any timeout that
+fits: one search took 8.6 s and another 11.9 s. The note check keeps its 1.5 s: it never came
+within 0.2 s of it. The request check keeps its 2.5 s, which it never came within a second of; it
+runs alongside the search, so it does not lengthen the request.
 
 `tests/live/test_regeneration_live.py` (`make test-live`) times every step against the configured
 provider and fails when one does not fit its timeout: run it after switching provider or model.
@@ -398,7 +428,7 @@ Each sample searches its own topic, drawn at random from 160 road-sign topics (2
 kinds of sign), so the search leg measures a query Tavily has not cached. Two back-to-back runs
 repeat a topic about one time in twenty. The topics stay on road signs so the rejected card the
 test sends still belongs to the deck. With the measured rates above, a run of three regenerations
-fails on a slow search about one time in ten, so read a failure from the
+fails on a slow search about one time in nine, so read a failure from the
 `regeneration_latency_measured` line it logs, not as a regression on its own.
 
 Search, model and both checks get **one attempt each, no retry**: a second attempt after a timeout
