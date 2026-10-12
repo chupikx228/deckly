@@ -344,11 +344,11 @@ is `503 NO_VALID_CONTENT` and is never returned.
 
 The call must answer within `DECKLY_LIMIT_REGENERATE_NOTE_TIMEOUT_SECONDS` (10). Each step has its
 own `DECKLY_REGENERATE_*` timeout, separate from the job settings: the rate-limit check in Redis
-(0.5 s), the search (4.0 s), the request check (`REQUEST_MODERATION_TIMEOUT_SECONDS`, 2.5 s), the
-model (3.5 s) and the note check (`NOTE_MODERATION_TIMEOUT_SECONDS`, 1.5 s). Settings refuse to
+(0.5 s), the search (4.0 s), the request check (`REQUEST_MODERATION_TIMEOUT_SECONDS`, 4.0 s), the
+model (3.25 s) and the note check (`NOTE_MODERATION_TIMEOUT_SECONDS`, 1.75 s). Settings refuse to
 load unless the rate limit, the longer of the search and the request check, the model, the note
 check and 0.5 s for parsing, validation and the response fit within the total:
-0.5 + 4.0 + 3.5 + 1.5 + 0.5 = 10. The request check runs alongside the search, so it may take as
+0.5 + 4.0 + 3.25 + 1.75 + 0.5 = 10. The request check runs alongside the search, so it gets as
 long as the search does at no cost to the total.
 
 The split is not measured for every provider. Measured on deepseek-flash and Tavily (October 2026,
@@ -372,7 +372,8 @@ searches timed out, 40 % on a new connection, and per-round medians drifted betw
 across the afternoon. Connecting to Tavily takes about 0.35 s, and leaving out the raw page content
 saves about 0.3 s, so neither explains the latency. The search went from 2.5 s to 3.0 s, taking
 the 0.5 s from the overhead, which used at most 0.37 s. The model and the note check then
-reached close to their timeouts, and the rate limit has not been measured, so neither gave time.
+reached close to their timeouts, and the rate limit was not measured until later (see below), so
+none of them gave time.
 A wider search would cut timeouts only from 8 % to 3 % at 3.5 s, small next to the model's 25 %:
 about one call in four ran into the 1000-token output cap with no content at all, which no
 timeout rescues. Earlier measurements put the search at 0.2–1.6 s because the live test then
@@ -423,14 +424,76 @@ fits: one search took 8.6 s and another 11.9 s. The note check keeps its 1.5 s: 
 within 0.2 s of it. The request check keeps its 2.5 s, which it never came within a second of; it
 runs alongside the search, so it does not lengthen the request.
 
+The rate limit had carried its 0.5 s over from the first split without ever being measured, and
+both search campaigns above ran on a Sunday, so both were measured next (October 2026).
+`RedisRegenerationLimiter.acquire`, wired the way the API wires it (the shared queue pool, pinged
+at startup), was timed against the local Docker Redis with a 15 s command timeout:
+
+| Rate-limit check                                | n    | p50     | p99     | max     |
+| ----------------------------------------------- | ---- | ------- | ------- | ------- |
+| Back to back, a new client each time            | 500  | 0.32 ms | 0.45 ms | 2.2 ms  |
+| A client over its limit (rejected)              | 70   | 0.32 ms | 0.44 ms | 0.45 ms |
+| First check on a new connection                 | 50   | 1.1 ms  | 13.7 ms | 13.7 ms |
+| 100 at once, once the pool has grown            | 1900 | 7.0 ms  | 15.8 ms | 18.3 ms |
+| In the regenerate flow, over the campaign below | 192  | 2.7 ms  | 6.2 ms  | 6.7 ms  |
+
+The check used at most 18 ms of its 500, and only with a hundred running at once. It keeps the
+0.5 s anyway: this is a Redis on the same machine, there is no production deployment yet, and a
+check that outlasts its timeout fails the request closed with 503 rather than letting it through
+unmetered. A Redis across a network needs a round trip per command, and a few more with TLS on a
+new connection, where this one needed none. Giving 0.3 s of it to the search would cut search
+timeouts only from 3 % to 1.6 %. Measure it on the deployed Redis before taking time from it.
+
+The weekday was measured the same way as the evening above: 12 rounds over two hours and fifteen
+minutes of a Monday, 19:55–22:10 Moscow time, 144 searches with the regenerate request shape and 48
+regenerations through this wiring, every step given 15 s. Tavily answers from AWS us-east-1, so
+those hours are 12:55–15:10 US Eastern, the middle of a US working day; Moscow's midday is the US
+night, Tavily's quietest hours, so it was not measured separately. Each search had a topic of its
+own (road signs by country, kind of sign and setting, 960 combinations), so none was cached, and
+132 of the 192 ran on a new connection.
+
+| Uncached search            | Sunday afternoon | Sunday evening | Monday, US midday |
+| -------------------------- | ---------------- | -------------- | ----------------- |
+| p50                        | 2.0 s            | 1.95 s         | 2.2 s             |
+| p90                        | 2.9 s            | 3.2 s          | 3.4 s             |
+| max                        | 4.3 s            | 8.6 s          | 5.4 s             |
+| Over 3.0 s                 | 8 %              | 13 %           | 20 %              |
+| Over 4.0 s                 |                  | 4 %            | 3 %               |
+| Over 4.5 s                 |                  | 2 %            | 1.6 %             |
+| New connection, over 4.0 s |                  | 6 %            | 4 %               |
+
+Sunday afternoon is the first table in this section, Sunday evening the third. The weekday moves
+the body of the distribution, not the tail that times out: a fifth of the searches took over 3.0 s,
+against an eighth on Sunday evening, but no more of them went over 4.0 s, and the slowest took
+5.4 s, against 8.6 s and 11.9 s on Sunday. Per-round medians drifted between 1.8 s and 3.2 s, the
+first round the slowest. The search keeps its 4.0 s.
+
+The other steps, in those 48 regenerations, all of which succeeded:
+
+| Step                                 | p50    | p90    | max    |
+| ------------------------------------ | ------ | ------ | ------ |
+| Request check                        | 1.0 s  | 1.55 s | 2.3 s  |
+| Model                                | 1.4 s  | 1.9 s  | 2.7 s  |
+| Note check                           | 0.8 s  | 1.1 s  | 1.57 s |
+| Parsing, validation and the response | 0.05 s | 0.07 s | 0.08 s |
+| Whole request                        | 4.8 s  | 6.15 s | 7.4 s  |
+
+The note check went over its then 1.5 s once, after the search and the model had already spent
+their time, which makes it the costliest step to time out. The request check came within 0.25 s of
+its then 2.5 s, against 1.45 s at most on Sunday evening. So the note check got 0.25 s from the
+model: 1.5 s to 1.75 s, and 3.5 s to 3.25 s, which still leaves the model 0.5 s over the slowest
+reply measured with thinking off (2.7 s, here and before). The request check went from 2.5 s to
+4.0 s, as long as the search it runs alongside; the budget counts only the longer of the two, so
+that costs the total nothing.
+
 `tests/live/test_regeneration_live.py` (`make test-live`) times every step against the configured
 provider and fails when one does not fit its timeout: run it after switching provider or model.
 Each sample searches its own topic, drawn at random from 160 road-sign topics (20 countries × 8
 kinds of sign), so the search leg measures a query Tavily has not cached. Two back-to-back runs
 repeat a topic about one time in twenty. The topics stay on road signs so the rejected card the
-test sends still belongs to the deck. With the measured rates above, a run of three regenerations
-fails on a slow search about one time in nine, so read a failure from the
-`regeneration_latency_measured` line it logs, not as a regression on its own.
+test sends still belongs to the deck. With 3 % of searches over the 4.0 s timeout, as measured on
+Monday, a run of three regenerations fails on a slow search about one time in eleven, so read a
+failure from the `regeneration_latency_measured` line it logs, not as a regression on its own.
 
 Search, model and both checks get **one attempt each, no retry**: a second attempt after a timeout
 cannot fit in what is left, and one that follows an instant `429`/`5xx` is better left to the

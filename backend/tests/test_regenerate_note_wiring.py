@@ -80,6 +80,7 @@ REFUSED = LlmReply(text="", stop=LlmStop.REFUSED)
 CONCURRENT_CALLS = 5
 SCHEDULING_SLACK_SECONDS = 1
 NEAR_TIMEOUT_MARGIN_SECONDS = 0.1
+SHORTER_PARALLEL_TIMEOUT_SECONDS = "2.5"
 
 
 class FakeClassifier:
@@ -110,12 +111,16 @@ async def never_answers() -> tuple[SearchHit, ...]:
     raise AssertionError(message)
 
 
-@pytest.fixture
-def settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
+def isolated_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **overrides: str) -> Settings:
     monkeypatch.chdir(tmp_path)
     for name in [name for name in os.environ if name.startswith("DECKLY_")]:
         monkeypatch.delenv(name)
-    return settings_from_environment(monkeypatch)
+    return settings_from_environment(monkeypatch, **overrides)
+
+
+@pytest.fixture
+def settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
+    return isolated_settings(monkeypatch, tmp_path)
 
 
 def regenerate_note(
@@ -170,9 +175,9 @@ def test_budget_under_test_is_the_one_shipped(settings: Settings) -> None:
     assert settings.limits.regenerate_note_timeout_seconds == 10
     assert settings.regenerate.rate_limit_timeout_seconds == 0.5
     assert settings.regenerate.search_timeout_seconds == 4.0
-    assert settings.regenerate.model_timeout_seconds == 3.5
-    assert settings.regenerate.request_moderation_timeout_seconds == 2.5
-    assert settings.regenerate.note_moderation_timeout_seconds == 1.5
+    assert settings.regenerate.model_timeout_seconds == 3.25
+    assert settings.regenerate.request_moderation_timeout_seconds == 4.0
+    assert settings.regenerate.note_moderation_timeout_seconds == 1.75
     assert settings.regenerate.budgeted_seconds == settings.limits.regenerate_note_timeout_seconds
 
 
@@ -248,9 +253,14 @@ def test_slow_request_check_returns_a_clean_problem_at_its_own_timeout_without_c
     assert llm.prompts == []
 
 
+@pytest.mark.parametrize(
+    "shorter_step",
+    ["DECKLY_REGENERATE_REQUEST_MODERATION_TIMEOUT_SECONDS", "DECKLY_REGENERATE_SEARCH_TIMEOUT_SECONDS"],
+)
 def test_request_check_hanging_alongside_a_hanging_search_ends_at_the_shorter_timeout(
-    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shorter_step: str
 ) -> None:
+    settings = isolated_settings(monkeypatch, tmp_path, **{shorter_step: SHORTER_PARALLEL_TIMEOUT_SECONDS})
     classifier = FakeClassifier(request=hang_forever)
 
     response, elapsed = timed_post(
@@ -260,7 +270,8 @@ def test_request_check_hanging_alongside_a_hanging_search_ends_at_the_shorter_ti
     )
 
     assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE, response.text
-    shorter = min(
+    shorter = float(SHORTER_PARALLEL_TIMEOUT_SECONDS)
+    assert shorter < max(
         settings.regenerate.request_moderation_timeout_seconds, settings.regenerate.search_timeout_seconds
     )
     assert shorter <= elapsed < shorter + SCHEDULING_SLACK_SECONDS
