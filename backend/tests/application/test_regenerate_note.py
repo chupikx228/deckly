@@ -7,8 +7,8 @@ import pytest
 from deckly.application.exceptions import NoValidContentError, RateLimitedError, UpstreamUnavailableError
 from deckly.application.regeneration import TIMED_OUT_RETRY_AFTER_SECONDS
 from deckly.domain.exceptions import TopicRejectedError
-from deckly.domain.generation import Difficulty
 from deckly.domain.notes.note_type import NoteType
+from deckly.domain.source import SourceQuery
 from tests.fakes import (
     MATERIAL,
     PAGES,
@@ -48,12 +48,7 @@ async def test_note_is_regenerated_from_freshly_searched_material() -> None:
     assert providers.steps == list(RegenerationStep)
     assert providers.acquired == [(CLIENT_ID, harness.now)]
     request_id, search = providers.searched[0]
-    assert (search.topic, search.language, search.note_types) == ("Road signs", "ru", (NoteType.CLOZE,))
-    assert (search.card_count, search.difficulty, search.include_images) == (
-        1,
-        Difficulty.INTERMEDIATE,
-        False,
-    )
+    assert search == SourceQuery(topic="Road signs", language="ru")
     assert providers.parsed == [(request_id, PAGES)]
     assert providers.regenerated == [(request_id, request, MATERIAL)]
     assert providers.screened_requests == [request]

@@ -15,6 +15,7 @@ from deckly.domain.deck import Deck, GenerationResult
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.notes.note import Note
 from deckly.domain.regeneration import RegenerationRequest
+from deckly.domain.source import SourceQuery
 from deckly.infrastructure.card_generator.deck import repair_deck
 from deckly.infrastructure.card_generator.extraction import first_opening
 from deckly.infrastructure.card_generator.untrusted import JsonObject, as_object
@@ -152,9 +153,7 @@ class LlmTopicModerator:
 class LlmContentModerator:
     llm: LlmClient
 
-    async def screen(
-        self, _job_id: UUID, request: GenerationRequest, result: GenerationResult
-    ) -> GenerationResult:
+    async def screen(self, _job_id: UUID, query: SourceQuery, result: GenerationResult) -> GenerationResult:
         batches = tuple(batched(result.notes, NOTES_PER_CONTENT_CHECK)) or (NO_NOTES,)
         checks = await self._check_all(result.deck, batches)
         judged = [
@@ -176,7 +175,7 @@ class LlmContentModerator:
                 "deck_replaced": not deck_allowed,
             },
         )
-        deck = result.deck if deck_allowed else repair_deck(NO_DECK_REPLACEMENT, request.topic)
+        deck = result.deck if deck_allowed else repair_deck(NO_DECK_REPLACEMENT, query.topic)
         return GenerationResult(deck=deck, notes=kept)
 
     async def _check_all(self, deck: Deck, batches: tuple[tuple[Note, ...], ...]) -> tuple[ContentCheck, ...]:
@@ -206,7 +205,7 @@ class LlmRegenerationModerator:
         logger.info("regeneration_request_screened", extra={"verdict": verdict, "reply_stop": reply.stop})
         return verdict is Verdict.ALLOW
 
-    async def allows_note(self, request_id: UUID, request: GenerationRequest, note: Note) -> bool:
-        result = GenerationResult(deck=repair_deck(NO_DECK_REPLACEMENT, request.topic), notes=(note,))
-        screened = await self.content.screen(request_id, request, result)
+    async def allows_note(self, request_id: UUID, query: SourceQuery, note: Note) -> bool:
+        result = GenerationResult(deck=repair_deck(NO_DECK_REPLACEMENT, query.topic), notes=(note,))
+        screened = await self.content.screen(request_id, query, result)
         return note in screened.notes

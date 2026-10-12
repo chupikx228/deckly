@@ -5,6 +5,8 @@ import pytest
 
 from deckly.domain.exceptions import InvalidGenerationRequestError
 from deckly.domain.generation import (
+    MAX_CARD_COUNT,
+    MIN_CARD_COUNT,
     UNGENERATABLE_NOTE_TYPES,
     Difficulty,
     GenerationFingerprint,
@@ -12,16 +14,17 @@ from deckly.domain.generation import (
 )
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE
+from deckly.domain.source import SourceQuery
 from tests.domain.builders import RequestChanges, unregister
 
 
 def request_with(
-    *note_types: NoteType, topic: str = "Road signs", include_images: bool = False
+    *note_types: NoteType, topic: str = "Road signs", card_count: int = 40, include_images: bool = False
 ) -> GenerationRequest:
     return GenerationRequest(
         topic=topic,
         language="ru",
-        card_count=40,
+        card_count=card_count,
         difficulty=Difficulty.INTERMEDIATE,
         note_types=note_types,
         include_images=include_images,
@@ -101,6 +104,37 @@ BLANK_TOPICS = {
 def test_blank_topic_is_rejected(topic: str) -> None:
     with pytest.raises(InvalidGenerationRequestError, match="topic"):
         request_with(NoteType.BASIC, topic=topic)
+
+
+@pytest.mark.parametrize(
+    "card_count",
+    [MIN_CARD_COUNT - 1, 1, 0, -1, MAX_CARD_COUNT + 1, 10**9],
+    ids=repr,
+)
+def test_card_count_outside_the_bounds_is_rejected(card_count: int) -> None:
+    with pytest.raises(InvalidGenerationRequestError, match=f"card count must be .*got {card_count}$"):
+        request_with(NoteType.BASIC, card_count=card_count)
+
+
+@pytest.mark.parametrize(
+    "card_count",
+    [MIN_CARD_COUNT, MIN_CARD_COUNT + 1, 40, MAX_CARD_COUNT - 1, MAX_CARD_COUNT],
+    ids=repr,
+)
+def test_card_count_within_the_bounds_is_accepted(card_count: int) -> None:
+    assert request_with(NoteType.BASIC, card_count=card_count).card_count == card_count
+
+
+@pytest.mark.parametrize("card_count", [MIN_CARD_COUNT - 1, MAX_CARD_COUNT + 1], ids=repr)
+def test_replacing_the_card_count_with_an_out_of_bounds_value_is_rejected(card_count: int) -> None:
+    with pytest.raises(InvalidGenerationRequestError, match="card count"):
+        replace(request_with(NoteType.BASIC), card_count=card_count)
+
+
+def test_source_query_carries_the_topic_and_language_exactly_as_requested() -> None:
+    request = replace(request_with(NoteType.CLOZE, NoteType.BASIC), topic="  Road   signs ", language="RU")
+
+    assert request.source_query() == SourceQuery(topic="  Road   signs ", language="RU")
 
 
 def test_topic_with_one_visible_character_among_blanks_is_accepted() -> None:

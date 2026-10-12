@@ -7,7 +7,7 @@ from uuid import UUID
 
 from deckly.application.ports import RetrievedPage, SourceMaterial
 from deckly.domain.exceptions import InvalidSourceError
-from deckly.domain.generation import GenerationRequest
+from deckly.domain.source import SourceQuery
 from deckly.domain.text import visible_length
 from deckly.infrastructure.search.cleaning import clean_text, clean_title, garbage_share
 
@@ -36,9 +36,9 @@ class CleaningSourceParser:
     max_characters: int
 
     async def parse(
-        self, _job_id: UUID, request: GenerationRequest, pages: tuple[RetrievedPage, ...]
+        self, _job_id: UUID, query: SourceQuery, pages: tuple[RetrievedPage, ...]
     ) -> tuple[SourceMaterial, ...]:
-        del request
+        del query
         return await asyncio.to_thread(self._parse, pages)
 
     def _parse(self, pages: tuple[RetrievedPage, ...]) -> tuple[SourceMaterial, ...]:

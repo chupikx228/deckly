@@ -7,7 +7,7 @@ import pytest
 from deckly.application.correlation import JOB_ID as JOB_ID_FIELD
 from deckly.application.correlation import correlated
 from deckly.application.exceptions import UpstreamUnavailableError
-from deckly.domain.generation import GenerationRequest
+from deckly.domain.source import SourceQuery
 from deckly.infrastructure.resilience import (
     CircuitBreaker,
     CircuitOpenError,
@@ -31,7 +31,7 @@ from tests.fakes import (
     FakeSearchClient,
     ManualTime,
     fresh_probe,
-    generation_request,
+    source_query,
 )
 from tests.logs import captured_json_logs
 
@@ -76,17 +76,15 @@ def unavailable() -> SearchUnavailableError:
     return SearchUnavailableError("Tavily answered 503")
 
 
-async def retrieve(
-    client: FakeSearchClient, request: GenerationRequest | None = None
-) -> tuple[str | None, ...]:
-    pages = await retriever(client, ManualTime()).retrieve(JOB_ID, request or generation_request())
+async def retrieve(client: FakeSearchClient, query: SourceQuery | None = None) -> tuple[str | None, ...]:
+    pages = await retriever(client, ManualTime()).retrieve(JOB_ID, query or source_query())
     return tuple(page.source.url for page in pages)
 
 
 async def test_every_hit_becomes_a_page_that_traces_back_to_the_fetched_result() -> None:
     client = FakeSearchClient((HIT, OTHER_HIT))
 
-    pages = await retriever(client, ManualTime()).retrieve(JOB_ID, generation_request())
+    pages = await retriever(client, ManualTime()).retrieve(JOB_ID, source_query())
 
     assert [(page.source.title, page.source.url, page.content) for page in pages] == [
         (HIT.title, HIT.url, HIT.content),
@@ -98,7 +96,7 @@ async def test_every_hit_becomes_a_page_that_traces_back_to_the_fetched_result()
 async def test_search_asks_for_the_topic_in_the_request_language_with_the_configured_cap() -> None:
     client = FakeSearchClient(())
 
-    await retrieve(client, replace(generation_request("Дорожные знаки"), language="ru-RU"))
+    await retrieve(client, replace(source_query("Дорожные знаки"), language="ru-RU"))
 
     [query] = client.queries
     assert (query.text, query.language, query.max_results) == ("Дорожные знаки", "ru", MAX_RESULTS)
@@ -119,7 +117,7 @@ async def test_search_asks_for_the_topic_in_the_request_language_with_the_config
 async def test_language_hint_is_only_an_iso_639_1_code(language: str, hint: str | None) -> None:
     client = FakeSearchClient(())
 
-    await retrieve(client, replace(generation_request(), language=language))
+    await retrieve(client, replace(source_query(), language=language))
 
     assert client.queries[0].language == hint
 
@@ -127,7 +125,7 @@ async def test_language_hint_is_only_an_iso_639_1_code(language: str, hint: str 
 async def test_topic_is_searched_without_invisible_or_unstorable_characters() -> None:
     client = FakeSearchClient(())
 
-    await retrieve(client, generation_request("Road\u200b  signs\x00\n\u202etoday"))
+    await retrieve(client, source_query("Road\u200b  signs\x00\n\u202etoday"))
 
     assert client.queries[0].text == "Road signs today"
 
@@ -157,7 +155,7 @@ async def test_hit_that_cannot_be_a_valid_source_is_dropped_and_the_rest_kept(in
 async def test_repeated_url_is_kept_once_in_its_first_position() -> None:
     client = FakeSearchClient((HIT, OTHER_HIT, replace(HIT, title="Duplicate")))
 
-    pages = await retriever(client, ManualTime()).retrieve(JOB_ID, generation_request())
+    pages = await retriever(client, ManualTime()).retrieve(JOB_ID, source_query())
 
     assert [(page.source.title, page.source.url) for page in pages] == [
         (HIT.title, HIT.url),
@@ -168,7 +166,7 @@ async def test_repeated_url_is_kept_once_in_its_first_position() -> None:
 async def test_title_is_cleaned_before_it_becomes_the_source_title() -> None:
     client = FakeSearchClient((replace(HIT, title="  Road\x00 signs\u202e\n</source>  "),))
 
-    [page] = await retriever(client, ManualTime()).retrieve(JOB_ID, generation_request())
+    [page] = await retriever(client, ManualTime()).retrieve(JOB_ID, source_query())
 
     assert page.source.title == "Road signs \N{SINGLE LEFT-POINTING ANGLE QUOTATION MARK}/source>"
 
@@ -177,7 +175,7 @@ async def test_transient_failure_is_retried_then_succeeds() -> None:
     time = ManualTime()
     client = FakeSearchClient(unavailable(), (HIT,))
 
-    pages = await retriever(client, time).retrieve(JOB_ID, generation_request())
+    pages = await retriever(client, time).retrieve(JOB_ID, source_query())
 
     assert [page.source.url for page in pages] == [HIT.url]
     assert len(client.queries) == 2
@@ -190,7 +188,7 @@ async def test_exhausted_retries_raise_upstream_unavailable() -> None:
     client = FakeSearchClient(unavailable(), unavailable(), last)
 
     with pytest.raises(UpstreamUnavailableError) as raised:
-        await retriever(client, time).retrieve(JOB_ID, generation_request())
+        await retriever(client, time).retrieve(JOB_ID, source_query())
 
     assert len(client.queries) == POLICY.max_attempts
     assert raised.value.__cause__ is last
@@ -201,7 +199,7 @@ async def test_search_that_times_out_raises_upstream_unavailable() -> None:
 
     with pytest.raises(UpstreamUnavailableError) as raised:
         await retriever(client, ManualTime(), replace(POLICY, attempt_timeout_seconds=0.01)).retrieve(
-            JOB_ID, generation_request()
+            JOB_ID, source_query()
         )
 
     assert isinstance(raised.value.__cause__, TimeoutError)
@@ -219,7 +217,7 @@ async def test_retrying_stops_when_the_next_attempt_would_overrun_the_search_dea
     client = FakeSearchClient(slow_failure)
 
     with pytest.raises(UpstreamUnavailableError):
-        await retriever(client, time, policy).retrieve(JOB_ID, generation_request())
+        await retriever(client, time, policy).retrieve(JOB_ID, source_query())
 
     assert len(client.queries) == 2
     assert time.now <= policy.deadline_seconds
@@ -231,12 +229,12 @@ async def test_open_circuit_fails_fast_without_calling_the_provider() -> None:
     client = FakeSearchClient(unavailable())
 
     with pytest.raises(UpstreamUnavailableError):
-        await retriever(client, time, breaker=breaker).retrieve(JOB_ID, generation_request())
+        await retriever(client, time, breaker=breaker).retrieve(JOB_ID, source_query())
     assert breaker.state is CircuitState.OPEN
     calls = len(client.queries)
 
     with pytest.raises(UpstreamUnavailableError) as raised:
-        await retriever(client, time, breaker=breaker).retrieve(JOB_ID, generation_request())
+        await retriever(client, time, breaker=breaker).retrieve(JOB_ID, source_query())
 
     assert isinstance(raised.value, CircuitOpenError)
     assert len(client.queries) == calls
@@ -248,7 +246,7 @@ async def test_exhausted_search_quota_is_upstream_unavailable_without_a_retry() 
     client = FakeSearchClient(quota)
 
     with pytest.raises(UpstreamUnavailableError) as raised:
-        await retriever(client, time).retrieve(JOB_ID, generation_request())
+        await retriever(client, time).retrieve(JOB_ID, source_query())
 
     assert raised.value.__cause__ is quota
     assert len(client.queries) == 1
@@ -262,7 +260,7 @@ async def test_rejected_or_malformed_answer_is_not_retried_and_not_an_outage(err
     client = FakeSearchClient(error)
 
     with pytest.raises(type(error)) as raised:
-        await retriever(client, ManualTime()).retrieve(JOB_ID, generation_request())
+        await retriever(client, ManualTime()).retrieve(JOB_ID, source_query())
 
     assert raised.value is error
     assert not isinstance(raised.value, UpstreamUnavailableError)
@@ -305,11 +303,11 @@ async def test_repeated_exhausted_quota_opens_the_circuit_and_later_jobs_fail_fa
 
     for _ in range(QUOTA_THRESHOLD):
         with pytest.raises(UpstreamUnavailableError):
-            await retriever(client, time, breaker=breaker).retrieve(JOB_ID, generation_request())
+            await retriever(client, time, breaker=breaker).retrieve(JOB_ID, source_query())
     assert breaker.state is CircuitState.OPEN
 
     with pytest.raises(CircuitOpenError):
-        await retriever(client, time, breaker=breaker).retrieve(JOB_ID, generation_request())
+        await retriever(client, time, breaker=breaker).retrieve(JOB_ID, source_query())
 
     assert len(client.queries) == QUOTA_THRESHOLD
     assert time.sleeps == []
@@ -322,7 +320,7 @@ async def test_exhausted_quota_below_the_threshold_leaves_the_circuit_closed() -
 
     for _ in range(QUOTA_THRESHOLD - 1):
         with pytest.raises(UpstreamUnavailableError):
-            await retriever(client, time, breaker=breaker).retrieve(JOB_ID, generation_request())
+            await retriever(client, time, breaker=breaker).retrieve(JOB_ID, source_query())
 
     assert breaker.state is CircuitState.CLOSED
 
@@ -333,11 +331,11 @@ async def test_probe_after_the_reset_that_still_finds_the_quota_exhausted_reopen
     client = FakeSearchClient(quota_exhausted())
     for _ in range(QUOTA_THRESHOLD):
         with pytest.raises(UpstreamUnavailableError):
-            await retriever(client, time, breaker=breaker).retrieve(JOB_ID, generation_request())
+            await retriever(client, time, breaker=breaker).retrieve(JOB_ID, source_query())
     time.now += RESET_SECONDS
 
     with pytest.raises(UpstreamUnavailableError):
-        await retriever(client, time, breaker=breaker).retrieve(JOB_ID, generation_request())
+        await retriever(client, time, breaker=breaker).retrieve(JOB_ID, source_query())
 
     assert breaker.state is CircuitState.OPEN
     assert len(client.queries) == QUOTA_THRESHOLD + 1
@@ -362,7 +360,7 @@ async def test_tavily_quota_statuses_open_the_circuit_so_later_calls_never_reach
     try:
         for _ in range(QUOTA_THRESHOLD + 2):
             with pytest.raises(UpstreamUnavailableError):
-                await search.retrieve(JOB_ID, generation_request())
+                await search.retrieve(JOB_ID, source_query())
     finally:
         await search.aclose()
 
@@ -372,7 +370,7 @@ async def test_tavily_quota_statuses_open_the_circuit_so_later_calls_never_reach
 
 async def test_retrieval_log_names_the_job() -> None:
     with captured_json_logs() as logs, correlated(JOB_ID_FIELD, JOB_ID):
-        await retriever(FakeSearchClient((HIT,)), ManualTime()).retrieve(JOB_ID, generation_request())
+        await retriever(FakeSearchClient((HIT,)), ManualTime()).retrieve(JOB_ID, source_query())
 
     [line] = logs.named("sources_retrieved")
     assert line["job_id"] == str(JOB_ID)

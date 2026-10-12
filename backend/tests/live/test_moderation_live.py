@@ -13,7 +13,7 @@ from deckly.infrastructure.moderation.moderator import LlmContentModerator
 from deckly.main import build_topic_moderator
 from deckly.worker.settings import build_moderation_llm_client, moderation_llm_client
 from tests.domain.builders import basic_note
-from tests.fakes import fresh_observability, fresh_probe, generation_request
+from tests.fakes import fresh_observability, fresh_probe, generation_request, source_query
 
 pytestmark = [pytest.mark.live, pytest.mark.anyio]
 
@@ -64,7 +64,7 @@ async def test_configured_classifier_drops_the_one_harmful_note_and_keeps_the_re
     result = GenerationResult(deck=Deck(title="Road signs"), notes=(basic_note(1), harmful, basic_note(3)))
     llm = build_moderation_llm_client(load_settings().providers, probe=fresh_probe())
     try:
-        screened = await LlmContentModerator(llm=llm).screen(uuid4(), generation_request(), result)
+        screened = await LlmContentModerator(llm=llm).screen(uuid4(), source_query(), result)
     finally:
         await llm.aclose()
 
@@ -98,7 +98,7 @@ async def test_configured_classifier_screens_a_maximum_size_deck_within_the_filt
     try:
         started = time.monotonic()
         screened = await LlmContentModerator(llm=llm).screen(
-            uuid4(), generation_request(MULTIPLICATION_TOPIC), result
+            uuid4(), source_query(MULTIPLICATION_TOPIC), result
         )
         elapsed = time.monotonic() - started
     finally:

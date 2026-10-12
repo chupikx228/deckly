@@ -3,6 +3,7 @@ import pytest
 from deckly.domain.exceptions import InvalidGenerationRequestError
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.regeneration import RegenerationRequest, RejectionReason
+from deckly.domain.source import SourceQuery
 from tests.domain.builders import unregister
 
 REGENERATABLE_TYPES = [note_type for note_type in NoteType if note_type is not NoteType.IMAGE_OCCLUSION]
@@ -60,3 +61,7 @@ def test_note_type_without_a_field_shape_is_rejected(monkeypatch: pytest.MonkeyP
 def test_blank_topic_is_rejected(topic: str) -> None:
     with pytest.raises(InvalidGenerationRequestError, match="topic"):
         regeneration(topic=topic)
+
+
+def test_source_query_carries_the_topic_and_language_without_any_card_count() -> None:
+    assert regeneration(topic="Road signs").source_query() == SourceQuery(topic="Road signs", language="ru")

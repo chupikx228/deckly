@@ -4,6 +4,7 @@ from enum import StrEnum
 from deckly.domain.exceptions import InvalidGenerationRequestError, UnsupportedNoteTypeError
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import fields_type_for
+from deckly.domain.source import SourceQuery
 from deckly.domain.text import collapse_whitespace, is_blank
 
 UNGENERATABLE_NOTE_TYPES = frozenset({NoteType.IMAGE_OCCLUSION})
@@ -42,6 +43,9 @@ class GenerationRequest:
         if is_blank(self.topic):
             message = "topic must contain visible characters"
             raise InvalidGenerationRequestError(message)
+        if not MIN_CARD_COUNT <= self.card_count <= MAX_CARD_COUNT:
+            message = f"card count must be {MIN_CARD_COUNT} to {MAX_CARD_COUNT}, got {self.card_count}"
+            raise InvalidGenerationRequestError(message)
         if not self.note_types:
             message = "at least one note type is required"
             raise InvalidGenerationRequestError(message)
@@ -63,6 +67,9 @@ class GenerationRequest:
         if ungeneratable:
             message = f"note types {ungeneratable} are not generated yet"
             raise InvalidGenerationRequestError(message)
+
+    def source_query(self) -> SourceQuery:
+        return SourceQuery(topic=self.topic, language=self.language)
 
     def fingerprint(self) -> GenerationFingerprint:
         instructions = None if self.instructions is None else collapse_whitespace(self.instructions)

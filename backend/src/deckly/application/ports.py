@@ -12,7 +12,7 @@ from deckly.domain.job import FailureCode, GenerationJob, JobStage, JobStatus
 from deckly.domain.media import Media
 from deckly.domain.notes.note import Note
 from deckly.domain.regeneration import RegenerationRequest
-from deckly.domain.source import Source
+from deckly.domain.source import Source, SourceQuery
 
 type JobTransition = Callable[[GenerationJob], GenerationJob]
 
@@ -151,12 +151,12 @@ class DependencyProbe(Protocol):
 
 
 class SourceRetriever(Protocol):
-    async def retrieve(self, job_id: UUID, request: GenerationRequest) -> tuple[RetrievedPage, ...]: ...
+    async def retrieve(self, job_id: UUID, query: SourceQuery) -> tuple[RetrievedPage, ...]: ...
 
 
 class SourceParser(Protocol):
     async def parse(
-        self, job_id: UUID, request: GenerationRequest, pages: tuple[RetrievedPage, ...]
+        self, job_id: UUID, query: SourceQuery, pages: tuple[RetrievedPage, ...]
     ) -> tuple[SourceMaterial, ...]: ...
 
 
@@ -172,7 +172,7 @@ class TopicModerator(Protocol):
 
 class ContentModerator(Protocol):
     async def screen(
-        self, job_id: UUID, request: GenerationRequest, result: GenerationResult
+        self, job_id: UUID, query: SourceQuery, result: GenerationResult
     ) -> GenerationResult: ...
 
 
@@ -195,7 +195,7 @@ class RegenerationLimiter(Protocol):
 class RegenerationModerator(Protocol):
     async def allows_request(self, request: RegenerationRequest) -> bool: ...
 
-    async def allows_note(self, request_id: UUID, request: GenerationRequest, note: Note) -> bool: ...
+    async def allows_note(self, request_id: UUID, query: SourceQuery, note: Note) -> bool: ...
 
 
 class JobRun(Protocol):

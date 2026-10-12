@@ -62,6 +62,7 @@ pytestmark = pytest.mark.anyio
 MODERATION_LOGGER = "deckly.infrastructure.moderation.moderator"
 JOB_ID = job_id(1)
 REQUEST = generation_request()
+QUERY = REQUEST.source_query()
 DECK = Deck(title="Знаки", description="Предупреждающие знаки", tags=("пдд",))
 NOTES = (basic_note(1), basic_note(2), basic_note(3))
 RESULT = GenerationResult(deck=DECK, notes=NOTES)
@@ -77,7 +78,7 @@ async def allows(reply: LlmReply) -> bool:
 
 
 async def screen(reply: LlmReply, result: GenerationResult = RESULT) -> GenerationResult:
-    return await LlmContentModerator(llm=FakeLlmClient(reply)).screen(JOB_ID, REQUEST, result)
+    return await LlmContentModerator(llm=FakeLlmClient(reply)).screen(JOB_ID, QUERY, result)
 
 
 @pytest.mark.parametrize(
@@ -470,7 +471,7 @@ async def test_regenerated_note_is_allowed_only_on_an_explicit_allow_for_it(
     llm = FakeLlmClient(reply)
     moderator = LlmRegenerationModerator(llm=FakeLlmClient(ALLOW_TOPIC), content=LlmContentModerator(llm=llm))
 
-    assert await moderator.allows_note(JOB_ID, REQUEST, basic_note(1)) is allowed
+    assert await moderator.allows_note(JOB_ID, QUERY, basic_note(1)) is allowed
     [prompt] = llm.prompts
     assert set(json.loads(prompt.user)["notes"]) == {"1"}
 
@@ -479,7 +480,7 @@ async def test_regenerated_note_on_a_topic_longer_than_a_deck_title_is_still_scr
     llm = FakeLlmClient(ONLY_NOTE_ALLOWED)
     moderator = LlmRegenerationModerator(llm=FakeLlmClient(ALLOW_TOPIC), content=LlmContentModerator(llm=llm))
 
-    assert await moderator.allows_note(JOB_ID, replace(REQUEST, topic="Знаки " * 40), basic_note(1))
+    assert await moderator.allows_note(JOB_ID, replace(QUERY, topic="Знаки " * 40), basic_note(1))
 
 
 @pytest.mark.parametrize(
@@ -559,7 +560,7 @@ def chunk_count(notes: int) -> int:
 async def test_maximum_deck_is_screened_in_as_many_calls_as_the_startup_gate_check_budgets_for() -> None:
     classifier = PolicyClassifier()
 
-    await LlmContentModerator(llm=classifier).screen(JOB_ID, REQUEST, mixed_result(MAX_CARD_COUNT))
+    await LlmContentModerator(llm=classifier).screen(JOB_ID, QUERY, mixed_result(MAX_CARD_COUNT))
 
     assert len(classifier.prompts) == MAX_MODERATION_CHUNKS_PER_JOB
 
@@ -574,11 +575,11 @@ async def test_chunked_screening_keeps_exactly_what_one_call_for_the_whole_deck_
 ) -> None:
     result = mixed_result(count)
     chunked_classifier = PolicyClassifier()
-    chunked = await LlmContentModerator(llm=chunked_classifier).screen(JOB_ID, REQUEST, result)
+    chunked = await LlmContentModerator(llm=chunked_classifier).screen(JOB_ID, QUERY, result)
     monkeypatch.setattr(moderator, "NOTES_PER_CONTENT_CHECK", count)
     single_classifier = PolicyClassifier()
 
-    single = await LlmContentModerator(llm=single_classifier).screen(JOB_ID, REQUEST, result)
+    single = await LlmContentModerator(llm=single_classifier).screen(JOB_ID, QUERY, result)
 
     assert chunked == single
     assert chunked.notes == tuple(mixed_note(n) for n in range(1, count + 1) if not is_forbidden(n))
@@ -600,7 +601,7 @@ async def test_every_check_carries_the_deck_and_at_most_one_chunk_of_notes_numbe
     classifier = PolicyClassifier()
     result = mixed_result(count)
 
-    await LlmContentModerator(llm=classifier).screen(JOB_ID, REQUEST, result)
+    await LlmContentModerator(llm=classifier).screen(JOB_ID, QUERY, result)
 
     documents = [json.loads(prompt.user) for prompt in classifier.prompts]
     assert [list(document["notes"]) for document in documents] == [
@@ -615,7 +616,7 @@ async def test_deck_blocked_by_any_one_chunk_is_replaced_and_the_notes_are_still
         allow_all(NOTES_PER_CONTENT_CHECK), model_reply({"deck": "block", "notes": {"1": "allow"}})
     )
 
-    screened = await LlmContentModerator(llm=llm).screen(JOB_ID, REQUEST, result)
+    screened = await LlmContentModerator(llm=llm).screen(JOB_ID, QUERY, result)
 
     assert screened == GenerationResult(deck=Deck(title=REQUEST.topic), notes=result.notes)
 
@@ -627,7 +628,7 @@ async def test_refused_chunk_drops_its_own_notes_and_the_deck_and_is_logged_once
     llm = FakeLlmClient(text_reply("", LlmStop.REFUSED), allow_all(1))
 
     with caplog.at_level(logging.INFO, logger=MODERATION_LOGGER):
-        screened = await LlmContentModerator(llm=llm).screen(JOB_ID, REQUEST, result)
+        screened = await LlmContentModerator(llm=llm).screen(JOB_ID, QUERY, result)
 
     assert screened == GenerationResult(deck=Deck(title=REQUEST.topic), notes=result.notes[-1:])
     [record] = caplog.records
@@ -669,7 +670,7 @@ async def test_one_failing_chunk_fails_the_whole_screen_instead_of_shipping_the_
         caplog.at_level(logging.INFO, logger=MODERATION_LOGGER),
         pytest.raises(UpstreamUnavailableError) as raised,
     ):
-        await LlmContentModerator(llm=llm).screen(JOB_ID, REQUEST, result)
+        await LlmContentModerator(llm=llm).screen(JOB_ID, QUERY, result)
 
     assert raised.value.retry_after_seconds == PROVIDER_FAULT_RETRY_AFTER_SECONDS
     assert "content_screened" not in [record.message for record in caplog.records]
@@ -680,7 +681,7 @@ async def test_failing_chunk_keeps_the_provider_error_as_the_cause_of_the_outage
     llm = FakeLlmClient(allow_all(NOTES_PER_CONTENT_CHECK), error, allow_all(NOTES_PER_CONTENT_CHECK))
 
     with pytest.raises(UpstreamUnavailableError) as raised:
-        await LlmContentModerator(llm=llm).screen(JOB_ID, REQUEST, mixed_result(MAX_CARD_COUNT))
+        await LlmContentModerator(llm=llm).screen(JOB_ID, QUERY, mixed_result(MAX_CARD_COUNT))
 
     assert raised.value.__cause__ is error
 
@@ -699,7 +700,7 @@ async def test_failing_chunk_cancels_the_chunks_still_in_flight_instead_of_leavi
 
     async with asyncio.timeout(FAIL_FAST_SECONDS):
         with pytest.raises(UpstreamUnavailableError):
-            await LlmContentModerator(llm=llm).screen(JOB_ID, REQUEST, mixed_result(MAX_CARD_COUNT))
+            await LlmContentModerator(llm=llm).screen(JOB_ID, QUERY, mixed_result(MAX_CARD_COUNT))
 
     assert len(cancelled) == chunk_count(MAX_CARD_COUNT) - 1
 
@@ -716,7 +717,7 @@ async def test_failing_chunk_counts_once_against_the_circuit_and_cancelled_chunk
     llm = ResilientLlmClient(inner, caller, MODERATION_MAX_OUTPUT_TOKENS)
 
     with pytest.raises(UpstreamUnavailableError):
-        await LlmContentModerator(llm=llm).screen(JOB_ID, REQUEST, mixed_result(MAX_CARD_COUNT))
+        await LlmContentModerator(llm=llm).screen(JOB_ID, QUERY, mixed_result(MAX_CARD_COUNT))
     states = [breaker.state]
     with pytest.raises(UpstreamUnavailableError):
         await llm.complete(build_content_prompt(result_with(basic_note(1))))
@@ -728,9 +729,7 @@ async def test_failing_chunk_counts_once_against_the_circuit_and_cancelled_chunk
 async def test_result_without_notes_still_has_its_deck_judged_instead_of_passing_unchecked() -> None:
     llm = FakeLlmClient(model_reply({"deck": "block", "notes": {}}))
 
-    screened = await LlmContentModerator(llm=llm).screen(
-        JOB_ID, REQUEST, GenerationResult(deck=DECK, notes=())
-    )
+    screened = await LlmContentModerator(llm=llm).screen(JOB_ID, QUERY, GenerationResult(deck=DECK, notes=()))
 
     assert screened == GenerationResult(deck=Deck(title=REQUEST.topic), notes=())
     assert len(llm.prompts) == 1
