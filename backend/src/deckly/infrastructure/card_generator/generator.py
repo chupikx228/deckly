@@ -30,7 +30,6 @@ from deckly.infrastructure.llm.client import LlmClient, LlmReply, LlmStop
 logger = logging.getLogger(__name__)
 
 FIRST_SOURCE_NUMBER = 1
-MIN_CARD_COUNT = 1
 MAX_IMAGE_QUERY_CHARACTERS = 100
 WORD_SEPARATOR = " "
 
@@ -166,7 +165,7 @@ class LlmCardGenerator:
         self, _job_id: UUID, request: GenerationRequest, material: tuple[SourceMaterial, ...]
     ) -> GeneratedCards:
         handlers = tuple(self.handlers[kind] for kind in request.note_types if kind in self.handlers)
-        if request.card_count < MIN_CARD_COUNT or not handlers or not material:
+        if not handlers or not material:
             logger.warning(
                 "card_generation_skipped",
                 extra={
