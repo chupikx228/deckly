@@ -18,7 +18,7 @@ from pydantic import (
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration, JobCreated
 from deckly.application.ports import IdempotencyScope, Quota
 from deckly.domain.exceptions import JobNotFoundError
-from deckly.domain.generation import Difficulty, GenerationRequest
+from deckly.domain.generation import MAX_CARD_COUNT, MIN_CARD_COUNT, Difficulty, GenerationRequest
 from deckly.domain.job import Failed, GenerationJob, JobStage, JobStatus, Succeeded
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.text import is_uuid_v4, visible_length
@@ -39,8 +39,6 @@ UNKNOWN_ADDRESS = "unknown"
 
 MIN_TOPIC_LENGTH = 3
 MAX_TOPIC_LENGTH = 200
-MIN_CARD_COUNT = 5
-MAX_CARD_COUNT = 200
 MAX_INSTRUCTIONS_LENGTH = 500
 NUL = "\x00"
 POLL_RETRY_AFTER_SECONDS = 2

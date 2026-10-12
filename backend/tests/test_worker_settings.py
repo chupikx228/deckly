@@ -1,3 +1,5 @@
+import ast
+import inspect
 import logging
 import math
 from datetime import datetime, timedelta
@@ -17,12 +19,14 @@ from deckly.application.housekeeping import (
 )
 from deckly.config import (
     DEFAULT_MODERATION_MAX_CONCURRENCY,
+    GATED_STAGES_PER_JOB,
     MAX_MODERATION_CONCURRENCY,
     WORKER_MAX_JOBS,
     ModelProvider,
     ProviderSettings,
     SweepSettings,
 )
+from deckly.domain.generation import MAX_CARD_COUNT
 from deckly.domain.job import GenerationJob, JobStatus
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.llm.anthropic_client import AnthropicLlmClient
@@ -36,7 +40,7 @@ from deckly.infrastructure.moderation.moderator import NOTES_PER_CONTENT_CHECK
 from deckly.infrastructure.resilience import ResilientCaller
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
-from deckly.transport.generations import MAX_CARD_COUNT
+from deckly.worker import settings as worker_settings
 from deckly.worker.settings import (
     CACHE_REDIS_KEY,
     ENFORCE_JOB_RETENTION_KEY,
@@ -315,6 +319,23 @@ def test_moderation_concurrency_ceiling_is_every_chunk_of_every_job_a_worker_can
     chunks_per_job = math.ceil(MAX_CARD_COUNT / NOTES_PER_CONTENT_CHECK)
 
     assert WORKER_MAX_JOBS * chunks_per_job == MAX_MODERATION_CONCURRENCY
+
+
+def calls_in_worker_settings(callee: str) -> int:
+    tree = ast.parse(inspect.getsource(worker_settings))
+    return sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == callee
+    )
+
+
+def test_gated_stages_per_job_matches_the_call_sites_wired_through_the_moderation_gate() -> None:
+    assert calls_in_worker_settings("bounded") == GATED_STAGES_PER_JOB
+
+
+def test_every_gated_call_site_goes_through_the_one_bounded_helper() -> None:
+    assert calls_in_worker_settings("BoundedLlmClient") == 1
 
 
 async def test_housekeeping_is_registered_with_the_arq_worker_next_to_the_generation_task() -> None:

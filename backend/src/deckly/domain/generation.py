@@ -7,6 +7,8 @@ from deckly.domain.notes.registry import fields_type_for
 from deckly.domain.text import collapse_whitespace, is_blank
 
 UNGENERATABLE_NOTE_TYPES = frozenset({NoteType.IMAGE_OCCLUSION})
+MIN_CARD_COUNT = 5
+MAX_CARD_COUNT = 200
 
 
 class Difficulty(StrEnum):

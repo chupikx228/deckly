@@ -5,13 +5,13 @@ import math
 import pytest
 
 from deckly.application.exceptions import UpstreamUnavailableError
+from deckly.domain.generation import MAX_CARD_COUNT
 from deckly.infrastructure.llm.bounded import BoundedLlmClient
 from deckly.infrastructure.llm.client import LlmClient, LlmPrompt, LlmReply, LlmStop, LlmUnavailableError
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.moderation.moderator import NOTES_PER_CONTENT_CHECK, LlmContentModerator
 from deckly.infrastructure.observability.metrics import MODERATION_GATE, GateWait, Metrics
 from deckly.infrastructure.resilience import ResilientCaller, RetryPolicy, RetryRuntime
-from deckly.transport.generations import MAX_CARD_COUNT
 from tests.domain.builders import basic_note, result_with
 from tests.fakes import (
     FakeLlmClient,
