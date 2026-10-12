@@ -16,8 +16,10 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from deckly.infrastructure.media.licensing import MIN_IMAGE_SIDE
+from deckly.infrastructure.moderation.moderator import NOTES_PER_CONTENT_CHECK
 from deckly.infrastructure.observability.tracing import TraceExporter
 from deckly.infrastructure.search.parser import MIN_VISIBLE_CHARACTERS
+from deckly.transport.generations import MAX_CARD_COUNT
 
 ASYNC_POSTGRES_SCHEME = "postgresql+asyncpg"
 ENV_FILE = ".env"
@@ -29,6 +31,8 @@ MAX_JUDGED_CANDIDATES = 10
 WORKER_MAX_JOBS = 10
 DEFAULT_MODERATION_MAX_CONCURRENCY = WORKER_MAX_JOBS
 MAX_MODERATION_CONCURRENCY = 40
+MAX_MODERATION_CHUNKS_PER_JOB = math.ceil(MAX_CARD_COUNT / NOTES_PER_CONTENT_CHECK)
+GATED_STAGES_PER_JOB = 2
 MAX_MODERATION_TIMEOUT_SECONDS = 10
 REGENERATE_OVERHEAD_SECONDS = 0.5
 MEDIA_URL_MIN_VALIDITY_SECONDS = 24 * 60 * 60
@@ -144,6 +148,13 @@ class ProviderSettings(BaseSettings):
     moderation_max_concurrency: Annotated[int, Field(ge=1, le=MAX_MODERATION_CONCURRENCY)] = (
         DEFAULT_MODERATION_MAX_CONCURRENCY
     )
+
+    @property
+    def moderation_gate_worst_case_wait_seconds(self) -> int:
+        calls_ahead = WORKER_MAX_JOBS * MAX_MODERATION_CHUNKS_PER_JOB - 1
+        waves_ahead = calls_ahead // self.moderation_max_concurrency
+        longest_slot_hold = max(self.moderation_filter_deadline_seconds, self.media_judge_deadline_seconds)
+        return GATED_STAGES_PER_JOB * waves_ahead * longest_slot_hold
 
     @field_validator("model_api_key", "search_api_key")
     @classmethod
@@ -312,6 +323,13 @@ class Settings:
             message = (
                 "the search, model, media, media judge and moderation deadlines together must leave room "
                 "within the generation job timeout"
+            )
+            raise ValueError(message)
+        gate_wait = self.providers.moderation_gate_worst_case_wait_seconds
+        if provider_deadlines + gate_wait >= self.limits.generation_job_timeout_seconds:
+            message = (
+                f"the provider deadlines ({provider_deadlines}s) plus the worst-case wait for a moderation "
+                f"concurrency slot ({gate_wait}s) must leave room within the generation job timeout"
             )
             raise ValueError(message)
         if self.regenerate.budgeted_seconds > self.limits.regenerate_note_timeout_seconds:
