@@ -351,6 +351,9 @@ async def test_every_metric_the_ticket_lists_is_emitted_by_a_local_run(
         if line.startswith('deckly_generation_queue_depth{queue="generation"} ')
     ]
     assert float(depth.split()[1]) >= 1
+    assert "deckly_gate_in_flight{" not in lifecycle.scraped
+    assert "deckly_gate_wait_seconds_count{" not in lifecycle.scraped
+    assert "deckly_gate_limit{" not in lifecycle.scraped
     assert sample(worker, "deckly_generation_jobs_finished_total", outcome="succeeded", failure_code="") == 1
     assert sample(worker, "deckly_generation_job_duration_seconds_count", outcome="succeeded") == 1
     for stage in STAGE_ORDER:

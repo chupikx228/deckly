@@ -696,6 +696,9 @@ exposing metrics rather than refusing to start.
 | `deckly_provider_circuit_rejections_total`, `deckly_provider_circuit_open` | `operation`               | both    |
 | `deckly_generation_cache_lookups_total`                                    | `result`                  | worker  |
 | `deckly_generation_queue_depth`                                            | `queue`                   | API     |
+| `deckly_gate_in_flight`                                                    | `gate`                    | worker  |
+| `deckly_gate_limit`                                                        | `gate`                    | worker  |
+| `deckly_gate_wait_seconds`                                                 | `gate`, `outcome`         | worker  |
 | `deckly_rate_limit_rejections_total`                                       | `limit`                   | API     |
 
 Throughput is the rate of `jobs_finished_total`; failure rates are the `failed` share of a
@@ -703,6 +706,18 @@ histogram's `_count`; the cache hit rate is `hit` over all lookups. Queue depth 
 Redis (`ZCARD arq:queue`) on every scrape and is `NaN` when Redis does not answer, rather than a
 stale number; every API instance reports the same queue, so aggregate it with `max`. Every label
 takes a fixed set of values.
+
+`deckly_gate_in_flight{gate="moderation"}` is how many calls hold a slot of the worker's moderation
+concurrency gate right now (content and image moderation share it), and
+`deckly_gate_limit{gate="moderation"}` is its ceiling, `DECKLY_PROVIDER_MODERATION_MAX_CONCURRENCY`,
+so saturation is `deckly_gate_in_flight / deckly_gate_limit`.
+
+`deckly_gate_wait_seconds{gate="moderation",outcome}` is how long a call queued for a slot, 0 when
+one was free. `outcome` is `acquired` when the call got its slot, and `abandoned` when it was
+cancelled while still queued (its job timed out or was stopped): that observation is the time it
+had waited up to the cancellation. The worst waits are therefore in `abandoned`; watch
+`rate(..._count{outcome="abandoned"})` against the `acquired` rate. The API process never creates
+this gate, so it exposes no `gate` series.
 
 `make observability` starts Prometheus on `:9090` (compose profile `observability`, config in
 `observability/prometheus.yml`), scraping `host.docker.internal:8000` and `:9464`. `make up` does not
