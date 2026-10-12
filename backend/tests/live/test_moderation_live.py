@@ -6,11 +6,11 @@ import pytest
 
 from deckly.config import load_settings
 from deckly.domain.deck import Deck, GenerationResult
+from deckly.domain.generation import MAX_CARD_COUNT
 from deckly.domain.notes.basic import BasicFields
 from deckly.domain.notes.note import Note
 from deckly.infrastructure.moderation.moderator import LlmContentModerator
 from deckly.main import build_topic_moderator
-from deckly.transport.generations import MAX_CARD_COUNT
 from deckly.worker.settings import build_moderation_llm_client, moderation_llm_client
 from tests.domain.builders import basic_note
 from tests.fakes import fresh_observability, fresh_probe, generation_request

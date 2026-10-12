@@ -15,11 +15,11 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from deckly.domain.generation import MAX_CARD_COUNT
 from deckly.infrastructure.media.licensing import MIN_IMAGE_SIDE
 from deckly.infrastructure.moderation.moderator import NOTES_PER_CONTENT_CHECK
 from deckly.infrastructure.observability.tracing import TraceExporter
 from deckly.infrastructure.search.parser import MIN_VISIBLE_CHARACTERS
-from deckly.transport.generations import MAX_CARD_COUNT
 
 ASYNC_POSTGRES_SCHEME = "postgresql+asyncpg"
 ENV_FILE = ".env"

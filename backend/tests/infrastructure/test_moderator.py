@@ -9,6 +9,7 @@ import pytest
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.config import MAX_MODERATION_CHUNKS_PER_JOB
 from deckly.domain.deck import Deck, GenerationResult
+from deckly.domain.generation import MAX_CARD_COUNT
 from deckly.domain.job import Failed, FailureCode, Succeeded
 from deckly.domain.notes.basic import BasicFields
 from deckly.domain.notes.note import Note
@@ -41,7 +42,6 @@ from deckly.infrastructure.moderation.prompt import (
 from deckly.infrastructure.provider_faults import PROVIDER_FAULT_RETRY_AFTER_SECONDS
 from deckly.infrastructure.resilience import CircuitState, ResilientCaller, RetryPolicy
 from deckly.infrastructure.stored_result import fields_adapter
-from deckly.transport.generations import MAX_CARD_COUNT
 from tests.domain.builders import FULL_RESULT, basic_note, result_with
 from tests.fakes import (
     ADDRESS,
