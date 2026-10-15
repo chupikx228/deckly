@@ -1,12 +1,13 @@
-from collections.abc import Callable
-from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Collection
+from contextlib import AbstractAsyncContextManager, AbstractContextManager
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
 from deckly.domain.deck import GenerationResult
+from deckly.domain.document import Document, DocumentFormat
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import FailureCode, GenerationJob, JobStage, JobStatus
 from deckly.domain.media import Media
@@ -100,6 +101,21 @@ class MissingImage:
 class FetchedMedia:
     attachments: tuple[NoteMedia, ...] = ()
     missing: tuple[MissingImage, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentUpload:
+    filename: str
+    content: bytes = field(repr=False)
+
+
+type UploadReader = Callable[[], Awaitable[DocumentUpload]]
+
+
+@dataclass(frozen=True, slots=True)
+class ExpiredDocument:
+    document_id: UUID
+    storage_key: str
 
 
 class JobStore(Protocol):
@@ -196,6 +212,43 @@ class RegenerationModerator(Protocol):
     async def allows_request(self, request: RegenerationRequest) -> bool: ...
 
     async def allows_note(self, request_id: UUID, query: SourceQuery, note: Note) -> bool: ...
+
+
+class UploadLimiter(Protocol):
+    async def acquire(self, requester: Requester, now: datetime) -> None: ...
+
+
+class DocumentInspector(Protocol):
+    async def identify(self, content: bytes) -> DocumentFormat: ...
+
+
+class DocumentStorage(Protocol):
+    async def put(self, key: str, content: bytes, content_type: str) -> None: ...
+
+    async def delete(self, key: str) -> None: ...
+
+
+class DocumentStore(Protocol):
+    async def add_pending(self, document: Document) -> None: ...
+
+    async def mark_stored(self, document_id: UUID) -> None: ...
+
+    async def discard(self, document_id: UUID) -> None: ...
+
+    async def get(self, document_id: UUID, client_id: UUID) -> Document | None: ...
+
+
+class ExpiredDocuments(Protocol):
+    @property
+    def documents(self) -> tuple[ExpiredDocument, ...]: ...
+
+    async def purge(self, document_ids: Collection[UUID]) -> int: ...
+
+
+class DocumentHousekeeping(Protocol):
+    def expired(
+        self, uploaded_before: datetime, limit: int
+    ) -> AbstractAsyncContextManager[ExpiredDocuments]: ...
 
 
 class JobRun(Protocol):

@@ -5,7 +5,10 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from fastapi import APIRouter, FastAPI, Request, Response
+from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deckly.application.documents import GetDocument, UploadDocument
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
 from deckly.application.health import CheckHealth
 from deckly.application.ports import RegenerationLimiter
@@ -15,6 +18,8 @@ from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.card_generator.regenerator import LlmNoteRegenerator
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.database import create_engine, create_session_factory, verify_connection
+from deckly.infrastructure.documents.sniffing import ContentDocumentInspector
+from deckly.infrastructure.documents.store import BoundedDocumentStore, PostgresDocumentStore
 from deckly.infrastructure.health import postgres_probe, redis_probe
 from deckly.infrastructure.job_store import BoundedJobStore, PostgresJobStore
 from deckly.infrastructure.llm.client import LlmClient, LlmEndpoint
@@ -41,20 +46,30 @@ from deckly.infrastructure.search.client import SearchClient, SearchEndpoint
 from deckly.infrastructure.search.parser import CleaningSourceParser
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
-from deckly.transport import generations, health, notes
+from deckly.infrastructure.storage.client import StorageClient
+from deckly.infrastructure.upload_limit import RedisUploadLimiter, UploadWindow
+from deckly.transport import documents, generations, health, notes
 from deckly.transport.dependencies import (
     CANCEL_GENERATION_STATE,
     CHECK_HEALTH_STATE,
     CREATE_GENERATION_STATE,
+    GET_DOCUMENT_STATE,
     GET_GENERATION_STATE,
     REGENERATE_NOTE_STATE,
+    UPLOAD_DOCUMENT_STATE,
 )
 from deckly.transport.error_handlers import register_error_handlers
-from deckly.worker.settings import LLM_CLIENTS, moderation_llm_client, resilient_caller
+from deckly.worker.settings import (
+    LLM_CLIENTS,
+    build_document_storage,
+    build_storage_client,
+    moderation_llm_client,
+    resilient_caller,
+)
 
 API_PREFIX = "/v1"
 SERVICE_TITLE = "Deckly generation service"
-ROUTERS: tuple[APIRouter, ...] = (generations.router, notes.router, health.router)
+ROUTERS: tuple[APIRouter, ...] = (generations.router, notes.router, documents.router, health.router)
 SINGLE_ATTEMPT = 1
 API_SERVICE_NAME = "deckly-api"
 METRICS_EXPOSITION_STATE = "metrics_exposition"
@@ -69,6 +84,42 @@ class RegenerationClients:
     moderation_llm: LlmClient
     limiter: RegenerationLimiter
     observability: Observability
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentClients:
+    storage: StorageClient
+    session_factory: async_sessionmaker[AsyncSession]
+    redis: Redis
+    observability: Observability
+
+
+def wire_documents(app: FastAPI, settings: Settings, clients: DocumentClients) -> None:
+    store = BoundedDocumentStore(
+        PostgresDocumentStore(clients.session_factory),
+        timeout_seconds=settings.database.document_store_timeout_seconds,
+    )
+    limits = settings.limits
+    window = UploadWindow(
+        uploads_per_client=limits.document_uploads_per_window,
+        uploads_per_address=limits.document_uploads_per_address_per_window,
+        window_seconds=limits.document_upload_window_seconds,
+        command_timeout_seconds=settings.redis.connect_timeout_seconds,
+    )
+    setattr(
+        app.state,
+        UPLOAD_DOCUMENT_STATE,
+        UploadDocument(
+            limiter=RedisUploadLimiter(clients.redis, window, clients.observability.metrics),
+            inspector=ContentDocumentInspector(),
+            storage=build_document_storage(settings.providers, clients.storage, clients.observability),
+            store=store,
+            clock=utc_now,
+            new_document_id=uuid4,
+            max_bytes=limits.document_max_bytes,
+        ),
+    )
+    setattr(app.state, GET_DOCUMENT_STATE, GetDocument(store=store))
 
 
 def single_attempt(timeout_seconds: float, *, base_delay_seconds: int, max_delay_seconds: int) -> RetryPolicy:
@@ -293,6 +344,10 @@ def build_lifespan(settings: Settings, observability: Observability) -> Lifespan
                     clients.push_async_callback(moderation_llm.aclose)
                     regeneration_moderation_llm = regeneration_moderation_llm_client(settings)
                     clients.push_async_callback(regeneration_moderation_llm.aclose)
+                    storage = await clients.enter_async_context(build_storage_client(settings.providers))
+                    wire_documents(
+                        app, settings, DocumentClients(storage, session_factory, queue, observability)
+                    )
                     setattr(
                         app.state,
                         CREATE_GENERATION_STATE,

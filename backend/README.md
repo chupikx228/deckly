@@ -15,7 +15,7 @@ src/deckly/
   domain/            pure business rules; domain errors
   infrastructure/    adapters: async SQLAlchemy + asyncpg, Arq/Redis, JSON logging, web search and
                      source parsing (Tavily), the LLM card generator (Anthropic, DeepSeek or
-                     Gemini) and the retry/circuit-breaker layer
+                     Gemini), S3-compatible document storage and the retry/circuit-breaker layer
   worker/            Arq worker entrypoint, WorkerSettings and its composition root
 migrations/          Alembic (async)
 ```
@@ -42,13 +42,14 @@ Requires [uv](https://docs.astral.sh/uv/) and Docker. Run everything from `backe
 ```bash
 make install        # uv sync --locked (installs Python 3.12 if needed)
 cp .env.example .env
-make up             # Postgres on :5433, Redis on :6380
+make up             # Postgres on :5433, Redis on :6380, S3Proxy object storage on :9100
 make migrate        # alembic upgrade head
 make run            # uvicorn on :8000 with reload
 ```
 
 Every setting is required; the app refuses to start if one is missing, blank or invalid, and
-if Postgres or Redis are unreachable. The database URL must use `postgresql+asyncpg`.
+if Postgres or Redis are unreachable. The database URL must use `postgresql+asyncpg`. The object
+store is not checked at startup, so the API boots with it down and only uploads fail.
 
 The worker (`make worker`) consumes the queue that `POST /v1/generations` fills and runs
 `application/pipeline.py` (`RunGeneration`): planning → retrieving sources → parsing →
@@ -824,6 +825,92 @@ nothing is exported) or `console` (one compact JSON line per finished span on st
 logs). Exporting over OTLP to Jaeger or similar is a follow-up: it needs
 `opentelemetry-exporter-otlp-proto-http`, which there is no deployment target for yet.
 
+## Documents
+
+`POST /v1/documents` stores a PDF or `.pptx` the client uploads, and `GET /v1/documents/{id}`
+returns its metadata to the same client. The contract is in `api-contract.md`, the write order
+and the retention sweep in `engineering-guide.md` ("Document uploads", "Scheduled housekeeping").
+`application/documents.py` runs the upload; the adapters are in `infrastructure/documents/`
+(content sniffing, the `documents` table) and `infrastructure/storage/` (the object store).
+
+**Type detection** (`documents/sniffing.py`) reads the bytes, never the name or the declared
+`Content-Type`, and runs in a thread. A PDF needs a `%PDF-1.x`/`%PDF-2.x` header starting in its
+first 1024 bytes (Acrobat's tolerance for leading junk) and a `%%EOF` in its last 1024, which
+catches truncated uploads. A presentation needs the zip signature at offset 0, a central directory
+`zipfile` can read, `[Content_Types].xml` and `ppt/presentation.xml` entries, no
+`ppt/vbaProject.bin`, and the presentation main content type in `[Content_Types].xml`. That part is
+read with a 1 MiB cap and searched as bytes, not parsed as XML, and nothing else in the archive is
+decompressed. A damaged archive (bad central directory, a corrupt deflate stream, a bad checksum, an
+encrypted entry) is a `415`, not a `500`. This is a gate, not a parser: a file that passes can still
+fail text extraction, and zip-bomb limits on the full archive belong to the parser (DEC-75).
+
+**Size** (`DECKLY_LIMIT_DOCUMENT_MAX_BYTES`, 25 MiB, at most 100 MiB). The upload is held in memory
+for hashing and the PUT, so the limit is also the memory one upload can take. 25 MiB comfortably
+fits text-heavy lecture PDFs and slide decks; generation only uses the extracted text, and a deck
+past 25 MiB is almost always images that would be thrown away. On a 5 Mbit/s mobile uplink it takes
+about 40 s to send. The transport enforces it twice: a `Content-Length` over the limit plus 16 KiB
+of multipart overhead is refused before the rate limit or the body is touched, and the request body
+is read through a counter that raises as soon as it passes that bound, which also covers chunked
+uploads without a length. Starlette's multipart parser caps form fields but not file parts, so the
+counter is what keeps an oversized upload off the disk.
+
+**Rate limit** (`infrastructure/upload_limit.py`). Fixed windows like regeneration, with its own
+keys (`deckly:document-upload:client:*`, `deckly:document-upload:address:*`): 10 uploads per client
+and 50 per address per hour by default. Uploads exist to feed generations, which are capped at 20 a
+day, so 10 an hour leaves room for retries and wrong files while capping one client at 250 MB of
+upload bandwidth an hour. The address backstop shares the generation quota's bucketing (IPv6 /56).
+Both counters are incremented in one `MULTI`; a Redis that does not answer within
+`DECKLY_REDIS_CONNECT_TIMEOUT_SECONDS` fails the upload with `503`, like the generation quota.
+
+**Retention.** 24 hours from upload (`DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS`), the same window as
+job retention and idempotency keys: long enough for a user who uploaded, backgrounded the app and
+came back the next day, and no longer, because a document is the user's own content and the backend
+is not its system of record. Used documents are never swept; marking them is DEC-76's job (see the
+engineering guide).
+
+### Object storage client
+
+`infrastructure/storage/` talks to the store over raw `httpx2` with its own AWS Signature V4 signer
+(`storage/signing.py`, stdlib `hmac`/`hashlib`), path-style (`{endpoint}/{bucket}/{key}`), which
+Cloudflare R2, AWS S3 and S3Proxy all accept. Switching provider is configuration only:
+`DECKLY_PROVIDER_STORAGE_ENDPOINT_URL` (`https://<account>.r2.cloudflarestorage.com` for R2,
+`https://s3.<region>.amazonaws.com` for AWS), `DECKLY_PROVIDER_STORAGE_REGION` (`auto` for R2), the
+bucket and the key pair. Only `PUT` and `DELETE` of single objects are used; the payload is signed
+with its SHA-256, so the store rejects a body altered in transit. The signer is tested against the
+four signatures AWS publishes for its SigV4 examples, and the integration suite runs against
+S3Proxy with signature checking on, including a wrong-secret case that must be refused.
+
+Every call goes through `ResilientCaller` with its own operations (`document_upload`,
+`document_delete`), breakers and policies: uploads get a long attempt timeout and deadline (30 s,
+60 s) sized for 25 MiB, deletes a short one (5 s, 10 s) so a sweep batch fits its interval. Network
+errors, `408`/`409`/`429`/`5xx` (S3's `SlowDown` is a `503`) are retried with jittered backoff; any
+other status, a `403` for a bad key above all, is a persistent failure that counts toward the
+breaker and is not retried. A `404` on delete counts as deleted. Either way the API answers
+`503 UPSTREAM_UNAVAILABLE`, and the provider's error body is never logged or returned.
+
+This is the same choice DEC-8 and DEC-9 made for Tavily and Commons, and it adds no dependency.
+Alternatives that were rejected:
+
+- **aioboto3 / aiobotocore.** Async, and the most complete S3 client. aiobotocore pins botocore to
+  a narrow window (3.9.2: `>=1.43.101,<1.43.107`), so it fights every other package that wants
+  botocore, the dependency tree is large, and the types come from a separate `types-aiobotocore`
+  package with a lot of `Any`, which `disallow_any_unimported` would fight.
+- **boto3 behind `asyncio.to_thread`.** Synchronous: a timed-out call keeps its thread, which breaks
+  the bounded-call posture the job store has (a call that times out must stop holding resources).
+- **obstore** (Rust `object_store` bindings). Async-native and typed, but still `4 - Beta` with one
+  maintainer, ships its own retry layer that would stack on `ResilientCaller`, reports errors in
+  coarse classes that do not separate a bad key from an outage, and it was not clear that cancelling
+  the asyncio task cancels the request on the Rust side.
+
+New dependency: **`python-multipart`** (0.0.32), the parser Starlette's `request.form()` requires.
+It is maintained by the Starlette maintainers, pure Python, with no dependencies of its own, and
+`make audit` covers it.
+
+Local development uses **S3Proxy** (`andrewgaul/s3proxy:4.1.1`, filesystem backend, SigV4 checking
+on) in `docker-compose.yml`, which creates the `deckly-documents` bucket on start. MinIO's community
+edition is no longer published as an image, which is why it is not used. The integration tests
+create the bucket themselves (a signed `CreateBucket`), so CI needs only the service container.
+
 ## Production deployment
 
 Nothing in this repository deploys the service yet; these are the decisions a deployment has to
@@ -887,6 +974,22 @@ cache at another database of the local Redis rather than a second container: ins
 database number go through the same URL parsing and connection parameters, which is the code
 under test, while memory and eviction separation is a property of the Redis deployment.
 
+### Object storage
+
+- **Private bucket.** No public access and no public bucket URL: documents are read only through the
+  API. On R2 leave the `r2.dev` subdomain and custom domains off; on AWS keep Block Public Access on.
+- **Credentials scoped to the one bucket.** An R2 API token with Object Read & Write on that bucket
+  only, or an IAM user whose policy allows `s3:PutObject` and `s3:DeleteObject` on
+  `arn:aws:s3:::<bucket>/documents/*` and nothing else.
+- **No lifecycle rule is needed.** Every object has a row from before it was written, and the sweep
+  deletes the object before the row, so nothing escapes it. A rule that expires objects under
+  `documents/` is a reasonable second line only if it is longer than any document can live once
+  DEC-76 marks documents as used; with the current settings that is not yet bounded.
+- **The reverse proxy must allow the body.** At least `DECKLY_LIMIT_DOCUMENT_MAX_BYTES` plus 16 KiB
+  on `/v1/documents` (nginx's default `client_max_body_size` is 1 MiB), and a request-body read
+  timeout: uvicorn does not bound how long a client may take to send its body, so a slow sender
+  holds a connection until the proxy cuts it.
+
 ### Metrics access
 
 `/metrics` exposes throughput, provider latency and error rates and the queue depth, with no
@@ -934,7 +1037,8 @@ history runs in the `secrets` job. The numbers and the reasoning are in
 
 `make test-integration` writes to whatever `DECKLY_DATABASE_URL` and `DECKLY_REDIS_URL` name, which
 is the compose stack from `make up` unless you override them. Every test removes the
-`generation_jobs` rows it created in its teardown (`Cleanup` in `tests/integration/conftest.py`),
+`generation_jobs` rows it created in its teardown (`Cleanup` in `tests/integration/conftest.py`;
+the document tests remove their `documents` rows, stored objects and upload counters the same way),
 so a completed run, passing or failing, leaves the table as it found it. A run that is killed
 before teardown (`kill -9`, a closed terminal, a CI timeout) does not, and its rows stay.
 

@@ -116,6 +116,14 @@ jobs:
           --health-interval 2s
           --health-timeout 3s
           --health-retries 15
+      storage:
+        image: andrewgaul/s3proxy:4.1.1
+        env:
+          S3PROXY_AUTHORIZATION: aws-v2-or-v4
+          S3PROXY_IDENTITY: deckly
+          S3PROXY_CREDENTIAL: deckly-local-storage
+        ports:
+          - 9100:80
     steps:
       - uses: actions/checkout@v4
 
@@ -139,7 +147,7 @@ jobs:
       - name: Migrate
         run: make migrate
 
-      - name: Integration test (Postgres + Redis; appends to the coverage data)
+      - name: Integration test (Postgres + Redis + S3Proxy; appends to the coverage data)
         run: make test-integration
 
       - name: Coverage floors (overall, domain + application, adapters)

@@ -1,4 +1,5 @@
 import math
+import re
 from dataclasses import dataclass
 from typing import Annotated, Literal, Self
 
@@ -38,6 +39,14 @@ REGENERATE_OVERHEAD_SECONDS = 0.5
 MEDIA_URL_MIN_VALIDITY_SECONDS = 24 * 60 * 60
 MIN_JOB_RETENTION_SECONDS = 24 * 60 * 60
 MINUTES_PER_HOUR = 60
+SECONDS_PER_MINUTE = 60
+MEBIBYTE = 1024 * 1024
+MAX_DOCUMENT_BYTES = 100 * MEBIBYTE
+MIN_DOCUMENT_RETENTION_SECONDS = 60 * 60
+MAX_DOCUMENT_RETENTION_SECONDS = 7 * 24 * 60 * 60
+MAX_STORAGE_CONCURRENCY = 16
+BUCKET_NAME = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
+ROOT_PATH = "/"
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 ModelProvider = Literal["anthropic", "deepseek", "gemini"]
@@ -45,6 +54,10 @@ MAX_PORT = 65535
 FIRST_VISIBLE_ASCII = "!"
 LAST_VISIBLE_ASCII = "~"
 PositiveSeconds = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+
+
+def is_visible_ascii(value: str) -> bool:
+    return all(FIRST_VISIBLE_ASCII <= character <= LAST_VISIBLE_ASCII for character in value)
 
 
 def _settings_config(env_prefix: str) -> SettingsConfigDict:
@@ -76,6 +89,7 @@ class DatabaseSettings(BaseSettings):
     pool_timeout_seconds: PositiveInt
     health_check_timeout_seconds: PositiveSeconds
     job_store_timeout_seconds: PositiveSeconds
+    document_store_timeout_seconds: PositiveSeconds
 
     @field_validator("url")
     @classmethod
@@ -148,6 +162,21 @@ class ProviderSettings(BaseSettings):
     moderation_max_concurrency: Annotated[int, Field(ge=1, le=MAX_MODERATION_CONCURRENCY)] = (
         DEFAULT_MODERATION_MAX_CONCURRENCY
     )
+    storage_endpoint_url: AnyHttpUrl
+    storage_bucket: str
+    storage_region: str
+    storage_access_key_id: str
+    storage_secret_access_key: SecretStr
+    storage_upload_timeout_seconds: PositiveInt
+    storage_upload_deadline_seconds: PositiveInt
+    storage_delete_timeout_seconds: PositiveInt
+    storage_delete_deadline_seconds: PositiveInt
+    storage_max_attempts: PositiveInt
+    storage_retry_base_delay_seconds: PositiveInt
+    storage_retry_max_delay_seconds: PositiveInt
+    storage_circuit_failure_threshold: PositiveInt
+    storage_circuit_reset_seconds: PositiveInt
+    storage_max_concurrency: Annotated[int, Field(ge=1, le=MAX_STORAGE_CONCURRENCY)]
 
     @property
     def moderation_gate_worst_case_wait_seconds(self) -> int:
@@ -156,15 +185,43 @@ class ProviderSettings(BaseSettings):
         longest_slot_hold = max(self.moderation_filter_deadline_seconds, self.media_judge_deadline_seconds)
         return GATED_STAGES_PER_JOB * waves_ahead * longest_slot_hold
 
-    @field_validator("model_api_key", "search_api_key")
+    @field_validator("model_api_key", "search_api_key", "storage_secret_access_key")
     @classmethod
     def require_visible_ascii_key(cls, key: SecretStr) -> SecretStr:
-        if not all(
-            FIRST_VISIBLE_ASCII <= character <= LAST_VISIBLE_ASCII for character in key.get_secret_value()
-        ):
+        if not is_visible_ascii(key.get_secret_value()):
             message = "api keys may only contain visible ASCII characters"
             raise ValueError(message)
         return key
+
+    @field_validator("storage_access_key_id", "storage_region")
+    @classmethod
+    def require_visible_ascii_identifier(cls, value: str) -> str:
+        if not is_visible_ascii(value):
+            message = "storage identifiers may only contain visible ASCII characters"
+            raise ValueError(message)
+        return value
+
+    @field_validator("storage_bucket")
+    @classmethod
+    def require_bucket_name(cls, bucket: str) -> str:
+        if BUCKET_NAME.fullmatch(bucket) is None:
+            message = "the storage bucket must be 3-63 lowercase letters, digits, dots or hyphens"
+            raise ValueError(message)
+        return bucket
+
+    @field_validator("storage_endpoint_url")
+    @classmethod
+    def require_bare_endpoint(cls, url: AnyHttpUrl) -> AnyHttpUrl:
+        if (
+            url.path not in {None, ROOT_PATH}
+            or url.query is not None
+            or url.fragment is not None
+            or url.username is not None
+            or url.password is not None
+        ):
+            message = "the storage endpoint url must not carry credentials, a path, a query or a fragment"
+            raise ValueError(message)
+        return url
 
     @model_validator(mode="after")
     def require_deadline_to_fit_one_attempt(self) -> Self:
@@ -195,6 +252,16 @@ class ProviderSettings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def require_storage_deadlines_to_fit_one_attempt(self) -> Self:
+        if (
+            self.storage_upload_deadline_seconds < self.storage_upload_timeout_seconds
+            or self.storage_delete_deadline_seconds < self.storage_delete_timeout_seconds
+        ):
+            message = "storage deadlines must be at least the timeout of a single attempt"
+            raise ValueError(message)
+        return self
+
+    @model_validator(mode="after")
     def require_moderation_deadline_to_fit_one_attempt(self) -> Self:
         if self.moderation_filter_deadline_seconds < self.moderation_filter_timeout_seconds:
             message = "moderation filter deadline must be at least the timeout of a single attempt"
@@ -211,11 +278,22 @@ class LimitSettings(BaseSettings):
     regenerate_note_timeout_seconds: PositiveInt
     note_regenerations_per_window: PositiveInt
     note_regeneration_window_seconds: PositiveInt
+    document_max_bytes: Annotated[int, Field(ge=1, le=MAX_DOCUMENT_BYTES)]
+    document_uploads_per_window: PositiveInt
+    document_uploads_per_address_per_window: PositiveInt
+    document_upload_window_seconds: PositiveInt
 
     @model_validator(mode="after")
     def require_address_limit_to_be_coarser(self) -> Self:
         if self.generation_jobs_per_address_per_day < self.generation_jobs_per_day:
             message = "the per-address generation limit must be at least the per-client limit"
+            raise ValueError(message)
+        return self
+
+    @model_validator(mode="after")
+    def require_address_upload_limit_to_be_coarser(self) -> Self:
+        if self.document_uploads_per_address_per_window < self.document_uploads_per_window:
+            message = "the per-address document upload limit must be at least the per-client limit"
             raise ValueError(message)
         return self
 
@@ -252,6 +330,9 @@ class CacheSettings(BaseSettings):
     generation_result_ttl_seconds: Annotated[int, Field(gt=0, lt=MEDIA_URL_MIN_VALIDITY_SECONDS)]
     idempotency_key_ttl_seconds: PositiveInt
     job_retention_seconds: Annotated[int, Field(ge=MIN_JOB_RETENTION_SECONDS)]
+    document_retention_seconds: Annotated[
+        int, Field(ge=MIN_DOCUMENT_RETENTION_SECONDS, le=MAX_DOCUMENT_RETENTION_SECONDS)
+    ]
 
     @model_validator(mode="after")
     def require_idempotency_keys_to_expire_before_their_jobs(self) -> Self:
@@ -268,6 +349,7 @@ class SweepSettings(BaseSettings):
     running_stale_after_seconds: PositiveInt
     queued_stale_after_seconds: PositiveInt
     batch_size: PositiveInt
+    document_batch_size: PositiveInt
 
     @field_validator("interval_minutes")
     @classmethod
@@ -337,6 +419,16 @@ class Settings:
                 "the regenerate rate limit, the longer of the search and request moderation, the model and "
                 f"note moderation timeouts plus {REGENERATE_OVERHEAD_SECONDS}s of overhead must fit within "
                 "the regenerate note timeout"
+            )
+            raise ValueError(message)
+        document_sweep_seconds = (
+            math.ceil(self.sweep.document_batch_size / self.providers.storage_max_concurrency)
+            * self.providers.storage_delete_deadline_seconds
+        )
+        if document_sweep_seconds >= self.sweep.interval_minutes * SECONDS_PER_MINUTE:
+            message = (
+                f"deleting one batch of expired documents can take {document_sweep_seconds}s, which must fit "
+                "within the sweep interval"
             )
             raise ValueError(message)
         interrupted_job_settled = (

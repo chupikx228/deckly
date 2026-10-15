@@ -17,11 +17,15 @@ from deckly.application.exceptions import (
     UpstreamUnavailableError,
 )
 from deckly.domain.exceptions import (
+    DocumentNotFoundError,
+    DocumentTooLargeError,
     DomainError,
+    InvalidDocumentError,
     InvalidGenerationRequestError,
     JobAlreadyTerminalError,
     JobNotFoundError,
     TopicRejectedError,
+    UnsupportedDocumentError,
 )
 from deckly.domain.job import FailureCode
 from deckly.transport.problem import PROBLEM_JSON_MEDIA_TYPE, ErrorCode, Problem
@@ -68,6 +72,16 @@ PROBLEM_KINDS: Mapping[type[Exception], ProblemKind] = {
     ),
     NoValidContentError: ProblemKind(
         HTTPStatus.SERVICE_UNAVAILABLE, ErrorCode.NO_VALID_CONTENT, "No valid content"
+    ),
+    InvalidDocumentError: VALIDATION_FAILED,
+    DocumentNotFoundError: ProblemKind(
+        HTTPStatus.NOT_FOUND, ErrorCode.DOCUMENT_NOT_FOUND, "Document not found"
+    ),
+    DocumentTooLargeError: ProblemKind(
+        HTTPStatus.REQUEST_ENTITY_TOO_LARGE, ErrorCode.DOCUMENT_TOO_LARGE, "Document too large"
+    ),
+    UnsupportedDocumentError: ProblemKind(
+        HTTPStatus.UNSUPPORTED_MEDIA_TYPE, ErrorCode.UNSUPPORTED_DOCUMENT_TYPE, "Unsupported document type"
     ),
 }
 

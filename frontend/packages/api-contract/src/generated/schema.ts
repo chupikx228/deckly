@@ -75,6 +75,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload a PDF or PowerPoint document
+         * @description Stores one PDF or PowerPoint (.pptx) file so a later request can refer to it by its documentId. The type is decided from the file's content, never from its name or the declared Content-Type, so a renamed file of another type is 415 UNSUPPORTED_DOCUMENT_TYPE, as are legacy .ppt, macro-enabled .pptm, password-protected and damaged files. A file over the size limit (25 MiB by default) is 413 DOCUMENT_TOO_LARGE and is refused before it is stored. Uploads are rate limited per X-Client-Id and per network address, separately from the generation quota (429 RATE_LIMITED). A document nothing uses is deleted 24 hours after it was uploaded, and reading it afterwards is 404 DOCUMENT_NOT_FOUND. There is no Idempotency-Key: retrying an upload stores a second copy, which expires the same way.
+         */
+        post: operations["uploadDocument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/documents/{documentId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read an uploaded document's metadata
+         * @description Returns what was stored, never the file itself. Only the X-Client-Id that uploaded the document can read it; any other client gets 404 DOCUMENT_NOT_FOUND, exactly as for a document that never existed or has expired.
+         */
+        get: operations["getDocument"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -105,7 +145,28 @@ export interface components {
         /** @enum {string} */
         JobStage: "planning" | "retrieving_sources" | "parsing_sources" | "generating_cards" | "fetching_media" | "finalizing";
         /** @enum {string} */
-        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "UPSTREAM_UNAVAILABLE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
+        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "UPSTREAM_UNAVAILABLE" | "DOCUMENT_NOT_FOUND" | "DOCUMENT_TOO_LARGE" | "UNSUPPORTED_DOCUMENT_TYPE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
+        /**
+         * @description The type detected from the file's content.
+         * @enum {string}
+         */
+        DocumentContentType: "application/pdf" | "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+        DocumentUploadRequest: {
+            /**
+             * Format: binary
+             * @description The document, as the only part of the form. Its filename is kept for display, cut to its last path component and 255 characters, with control and invisible characters removed; a name with nothing left is 400 VALIDATION_FAILED.
+             */
+            file: string;
+        };
+        Document: {
+            /** Format: uuid */
+            documentId: string;
+            filename: string;
+            sizeBytes: number;
+            contentType: components["schemas"]["DocumentContentType"];
+            /** Format: date-time */
+            uploadedAt: string;
+        };
         /** @enum {string} */
         RejectionReason: "too_easy" | "too_hard" | "incorrect" | "duplicate" | "off_topic" | "other";
         /** @description image_occlusion is not generated yet, so a request whose noteTypes contains it is rejected with VALIDATION_FAILED whatever includeImages says. Once it is generated, it will also need includeImages: true, because an image-occlusion note is built on an image the server fetches; the if/then below already rejects it without images, and leaving includeImages out counts as false. */
@@ -284,6 +345,7 @@ export interface components {
     };
     parameters: {
         JobId: string;
+        DocumentId: string;
         /** @description Client-generated version 4 UUID in canonical form: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. Replaying the same request body with the same key returns the original job instead of starting a second one. Reusing the key with a different body returns 409 IDEMPOTENCY_KEY_CONFLICT. Bodies are compared after defaults are applied and the topic is trimmed, so key order and explicitly sent defaults do not matter. A key is honoured for 24 hours after the original request; after that the same key starts a new job, and the original job can still be polled until it is deleted. */
         IdempotencyKey: string;
         /** @description Anonymous device identifier, used for rate limiting. Version 4 UUID in canonical form only: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. */
@@ -413,6 +475,65 @@ export interface operations {
             422: components["responses"]["Problem"];
             429: components["responses"]["Problem"];
             503: components["responses"]["Problem"];
+        };
+    };
+    uploadDocument: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Anonymous device identifier, used for rate limiting. Version 4 UUID in canonical form only: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. */
+                "X-Client-Id": components["parameters"]["ClientId"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["DocumentUploadRequest"];
+            };
+        };
+        responses: {
+            /** @description The document was stored */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Document"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            413: components["responses"]["Problem"];
+            415: components["responses"]["Problem"];
+            429: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    getDocument: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Anonymous device identifier, used for rate limiting. Version 4 UUID in canonical form only: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. */
+                "X-Client-Id": components["parameters"]["ClientId"];
+            };
+            path: {
+                documentId: components["parameters"]["DocumentId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The document's metadata */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Document"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
         };
     };
     getHealth: {

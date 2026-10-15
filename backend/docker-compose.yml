@@ -28,6 +28,22 @@ services:
       timeout: 3s
       retries: 15
 
+  storage:
+    image: andrewgaul/s3proxy:4.1.1
+    entrypoint: ['sh', '-c']
+    command:
+      [
+        'mkdir -p /data/deckly-documents && exec /usr/bin/dumb-init -- /opt/s3proxy/run-docker-container.sh',
+      ]
+    environment:
+      S3PROXY_AUTHORIZATION: aws-v2-or-v4
+      S3PROXY_IDENTITY: deckly
+      S3PROXY_CREDENTIAL: deckly-local-storage
+    ports:
+      - '9100:80'
+    volumes:
+      - storage-data:/data
+
   prometheus:
     image: prom/prometheus:v3.5.0
     profiles: ['observability']
@@ -43,3 +59,4 @@ services:
 
 volumes:
   postgres-data:
+  storage-data:
