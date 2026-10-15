@@ -240,6 +240,11 @@ logged without skipping the others:
 4. **Finished jobs** older than `DECKLY_CACHE_JOB_RETENTION_SECONDS` (at least 24h, measured from
    completion) are hard-deleted; polling one afterwards returns `404 JOB_NOT_FOUND`. Unfinished
    rows are never deleted. The backend is not the system of record, so there is no archive.
+5. **Unused documents** uploaded more than `DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS` ago (default
+   24 h, between 1 h and 7 days) lose their stored object and then their row. This step has its own
+   batch size, `DECKLY_SWEEP_DOCUMENT_BATCH_SIZE`, because it holds its rows locked while it calls
+   the object store; config validation keeps one batch's worst-case deletion time (batch size over
+   `DECKLY_PROVIDER_STORAGE_MAX_CONCURRENCY`, times the delete deadline) inside the sweep interval.
 
 The sweep changes state only through `JobStore.update()`, and its transition re-checks the
 locked row: the job must still have the status it was listed with and a last change older than
@@ -249,9 +254,45 @@ looking at it therefore wins cleanly, and a worker that arrives after the sweep 
 update (for example a row whose stored stage no longer restores) is logged as
 `stale_job_not_swept` and skipped, so one bad row cannot stall every later run.
 
+The document step selects its batch with `FOR UPDATE SKIP LOCKED`, deletes each object (a missing
+object counts as deleted), and deletes in the same transaction only the rows whose object is gone.
+Object first, row second: the only half-state it can leave is a row whose object is already gone,
+which the next run finishes, never an object with no row pointing at it. A pending upload whose
+object was never confirmed (see "Document uploads") is swept the same way once it is old enough.
+
+"Unused" is `documents.used_at IS NULL`. Nothing sets `used_at` yet: the generation wiring (DEC-76)
+must set it in the same transaction that stores a job referring to the document, and must refuse a
+document that is pending or missing. It also has to decide when a used document is finally deleted;
+until it does, a used document is kept. The suggested shape is a foreign key from the job to the
+document, with the sweep's condition changed from `used_at IS NULL` to "no job refers to it", so a
+document is released when job retention deletes its last job. The condition lives in one place,
+`expired_documents_statement` in `infrastructure/documents/store.py`.
+
 A queued job whose saved request no longer validates (a contract change made it invalid after it
 was stored) is not re-validated by the sweep. The worker fails it with `GENERATION_FAILED` as
 soon as it picks it up; if it is never picked up, the queued threshold catches it.
+
+## Document uploads
+
+`POST /documents` stores the file in S3-compatible object storage (Cloudflare R2, AWS S3 or any
+store that speaks SigV4, chosen by `DECKLY_PROVIDER_STORAGE_*`) and its metadata in the
+`documents` table. The order is fixed so that no object can exist without a row pointing at it:
+
+1. The rate limit is checked before the body is read; a `Content-Length` over the limit is refused
+   before even that.
+2. The body is read through a byte counter that stops the upload as soon as it passes the size
+   limit, so an oversized body is never buffered whole.
+3. The size, the filename and the content type are checked. The type comes from the bytes, never
+   from the name or the declared `Content-Type`.
+4. A `pending` row is written, then the object, then the row becomes `stored`. If the write fails,
+   the request is `503`. A failed write may still have stored the object (the store's answer can be
+   lost after it succeeded), so the object is deleted first and the row only once that worked. If
+   the store cannot confirm the delete (it is down, which is the usual reason the write failed), the
+   row stays `pending`: invisible to readers, and removed with any object by the housekeeping sweep
+   once it is old enough. The same holds when the final update to `stored` fails.
+
+The object key is `documents/{documentId}`, never derived from the filename. The bucket must be
+private: documents are read only through the API, by the client that uploaded them.
 
 ## Error handling
 
@@ -425,7 +466,7 @@ and what not to test. The summary:
 
 Before the backend is "ready" to replace the mock the mobile app runs against today:
 
-1. All five endpoints implemented per [`api-contract.md`](api-contract.md), returning shapes
+1. All endpoints implemented per [`api-contract.md`](api-contract.md), returning shapes
    that validate against [`openapi.yaml`](openapi.yaml).
 2. Contract tests green in CI for every response, including every error `code`.
 3. Idempotency, cancellation and the "failed job is `200`, not 5xx" rule verified by tests.

@@ -3,17 +3,21 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from deckly.config import (
     DEFAULT_MODERATION_MAX_CONCURRENCY,
+    MAX_DOCUMENT_BYTES,
+    MAX_DOCUMENT_RETENTION_SECONDS,
     MAX_JUDGED_CANDIDATES,
     MAX_MEDIA_CANDIDATES,
     MAX_MEDIA_CONCURRENCY,
     MAX_MEDIA_IMAGES,
     MAX_MODERATION_CONCURRENCY,
     MAX_MODERATION_TIMEOUT_SECONDS,
+    MAX_STORAGE_CONCURRENCY,
     MEDIA_URL_MIN_VALIDITY_SECONDS,
+    MIN_DOCUMENT_RETENTION_SECONDS,
     MIN_JOB_RETENTION_SECONDS,
     AppSettings,
     CacheSettings,
@@ -50,6 +54,7 @@ def set_database_environment(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
     monkeypatch.setenv("DECKLY_DATABASE_POOL_TIMEOUT_SECONDS", "10")
     monkeypatch.setenv("DECKLY_DATABASE_HEALTH_CHECK_TIMEOUT_SECONDS", "2")
     monkeypatch.setenv("DECKLY_DATABASE_JOB_STORE_TIMEOUT_SECONDS", "5")
+    monkeypatch.setenv("DECKLY_DATABASE_DOCUMENT_STORE_TIMEOUT_SECONDS", "5")
 
 
 def test_missing_required_config_fails_fast(clean_environment: pytest.MonkeyPatch) -> None:
@@ -143,6 +148,21 @@ PROVIDER_ENVIRONMENT = {
     "DECKLY_PROVIDER_MODERATION_FILTER_TIMEOUT_SECONDS": "15",
     "DECKLY_PROVIDER_MODERATION_FILTER_DEADLINE_SECONDS": "20",
     "DECKLY_PROVIDER_MODERATION_FILTER_MAX_ATTEMPTS": "2",
+    "DECKLY_PROVIDER_STORAGE_ENDPOINT_URL": "https://storage.example.com",
+    "DECKLY_PROVIDER_STORAGE_BUCKET": "deckly-documents",
+    "DECKLY_PROVIDER_STORAGE_REGION": "auto",
+    "DECKLY_PROVIDER_STORAGE_ACCESS_KEY_ID": "access-key-id",
+    "DECKLY_PROVIDER_STORAGE_SECRET_ACCESS_KEY": "key",
+    "DECKLY_PROVIDER_STORAGE_UPLOAD_TIMEOUT_SECONDS": "30",
+    "DECKLY_PROVIDER_STORAGE_UPLOAD_DEADLINE_SECONDS": "60",
+    "DECKLY_PROVIDER_STORAGE_DELETE_TIMEOUT_SECONDS": "5",
+    "DECKLY_PROVIDER_STORAGE_DELETE_DEADLINE_SECONDS": "10",
+    "DECKLY_PROVIDER_STORAGE_MAX_ATTEMPTS": "2",
+    "DECKLY_PROVIDER_STORAGE_RETRY_BASE_DELAY_SECONDS": "1",
+    "DECKLY_PROVIDER_STORAGE_RETRY_MAX_DELAY_SECONDS": "5",
+    "DECKLY_PROVIDER_STORAGE_CIRCUIT_FAILURE_THRESHOLD": "5",
+    "DECKLY_PROVIDER_STORAGE_CIRCUIT_RESET_SECONDS": "30",
+    "DECKLY_PROVIDER_STORAGE_MAX_CONCURRENCY": "8",
 }
 LIMIT_ENVIRONMENT = {
     "DECKLY_LIMIT_GENERATION_JOBS_PER_DAY": "20",
@@ -151,6 +171,10 @@ LIMIT_ENVIRONMENT = {
     "DECKLY_LIMIT_REGENERATE_NOTE_TIMEOUT_SECONDS": "10",
     "DECKLY_LIMIT_NOTE_REGENERATIONS_PER_WINDOW": "30",
     "DECKLY_LIMIT_NOTE_REGENERATION_WINDOW_SECONDS": "3600",
+    "DECKLY_LIMIT_DOCUMENT_MAX_BYTES": "26214400",
+    "DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_WINDOW": "10",
+    "DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_ADDRESS_PER_WINDOW": "50",
+    "DECKLY_LIMIT_DOCUMENT_UPLOAD_WINDOW_SECONDS": "3600",
 }
 ROOMY_JOB_TIMEOUT_SECONDS = "336"
 REGENERATE_ENVIRONMENT = {
@@ -168,6 +192,7 @@ SWEEP_ENVIRONMENT = {
     "DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS": "900",
     "DECKLY_SWEEP_QUEUED_STALE_AFTER_SECONDS": "3600",
     "DECKLY_SWEEP_BATCH_SIZE": "500",
+    "DECKLY_SWEEP_DOCUMENT_BATCH_SIZE": "100",
 }
 JOB_STORE_TIMEOUT_SECONDS = 5
 
@@ -211,7 +236,11 @@ def test_blank_required_values_are_rejected(
         ProviderSettings()
 
 
-API_KEY_VARIABLES = ["DECKLY_PROVIDER_MODEL_API_KEY", "DECKLY_PROVIDER_SEARCH_API_KEY"]
+API_KEY_VARIABLES = [
+    "DECKLY_PROVIDER_MODEL_API_KEY",
+    "DECKLY_PROVIDER_SEARCH_API_KEY",
+    "DECKLY_PROVIDER_STORAGE_SECRET_ACCESS_KEY",
+]
 INVISIBLE_IN_KEY: dict[str, str] = {
     "newline": "\n",
     "carriage return": "\r",
@@ -265,7 +294,11 @@ def test_api_key_spanning_the_whole_visible_ascii_range_is_accepted(
 
     settings = ProviderSettings()
 
-    assert key in {settings.model_api_key.get_secret_value(), settings.search_api_key.get_secret_value()}
+    assert key in {
+        settings.model_api_key.get_secret_value(),
+        settings.search_api_key.get_secret_value(),
+        settings.storage_secret_access_key.get_secret_value(),
+    }
 
 
 @pytest.mark.parametrize("provider", ["openai", "Anthropic", ""])
@@ -884,6 +917,7 @@ def test_generation_result_ttl_is_read_from_the_environment(clean_environment: p
     clean_environment.setenv("DECKLY_CACHE_GENERATION_RESULT_TTL_SECONDS", "43200")
     clean_environment.setenv("DECKLY_CACHE_IDEMPOTENCY_KEY_TTL_SECONDS", "86400")
     clean_environment.setenv("DECKLY_CACHE_JOB_RETENTION_SECONDS", "86400")
+    clean_environment.setenv("DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS", "86400")
 
     assert CacheSettings().generation_result_ttl_seconds == 43200
 
@@ -895,6 +929,7 @@ def test_generation_result_ttl_below_the_media_validity_window_is_accepted(
     clean_environment.setenv("DECKLY_CACHE_GENERATION_RESULT_TTL_SECONDS", str(ttl_seconds))
     clean_environment.setenv("DECKLY_CACHE_IDEMPOTENCY_KEY_TTL_SECONDS", "86400")
     clean_environment.setenv("DECKLY_CACHE_JOB_RETENTION_SECONDS", "86400")
+    clean_environment.setenv("DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS", "86400")
 
     assert CacheSettings().generation_result_ttl_seconds == ttl_seconds
 
@@ -906,6 +941,7 @@ def test_generation_result_ttl_that_could_outlive_media_urls_is_rejected(
     clean_environment.setenv("DECKLY_CACHE_GENERATION_RESULT_TTL_SECONDS", ttl_seconds)
     clean_environment.setenv("DECKLY_CACHE_IDEMPOTENCY_KEY_TTL_SECONDS", "86400")
     clean_environment.setenv("DECKLY_CACHE_JOB_RETENTION_SECONDS", "86400")
+    clean_environment.setenv("DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS", "86400")
 
     with pytest.raises(ValidationError, match="generation_result_ttl_seconds"):
         CacheSettings()
@@ -915,6 +951,7 @@ def set_cache_environment(monkeypatch: pytest.MonkeyPatch, *, idempotency_ttl: s
     monkeypatch.setenv("DECKLY_CACHE_GENERATION_RESULT_TTL_SECONDS", "43200")
     monkeypatch.setenv("DECKLY_CACHE_IDEMPOTENCY_KEY_TTL_SECONDS", idempotency_ttl)
     monkeypatch.setenv("DECKLY_CACHE_JOB_RETENTION_SECONDS", retention)
+    monkeypatch.setenv("DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS", "86400")
 
 
 @pytest.mark.parametrize("retention", [str(MIN_JOB_RETENTION_SECONDS - 1), "3600", "0", "-1"])
@@ -1166,3 +1203,224 @@ def test_worker_metrics_port_must_be_a_usable_tcp_port(
 
     with pytest.raises(ValidationError, match="worker_metrics_port"):
         ObservabilitySettings()
+
+
+def provider_settings_with(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> ProviderSettings:
+    set_provider_environment(monkeypatch)
+    for name, value in overrides.items():
+        monkeypatch.setenv(name, value)
+    return ProviderSettings()
+
+
+@pytest.mark.parametrize("bucket", ["abc", "deckly-documents", "deckly.documents.v1", "a" * 63, "0bucket9"])
+def test_storage_bucket_following_the_s3_naming_rules_is_accepted(
+    clean_environment: pytest.MonkeyPatch, bucket: str
+) -> None:
+    settings = provider_settings_with(clean_environment, DECKLY_PROVIDER_STORAGE_BUCKET=bucket)
+
+    assert settings.storage_bucket == bucket
+
+
+@pytest.mark.parametrize(
+    "bucket",
+    ["ab", "a" * 64, "Deckly", "deckly_documents", "-deckly", "deckly-", "deckly/documents", "bücket"],
+)
+def test_storage_bucket_breaking_the_s3_naming_rules_is_rejected(
+    clean_environment: pytest.MonkeyPatch, bucket: str
+) -> None:
+    with pytest.raises(ValidationError, match="storage_bucket"):
+        provider_settings_with(clean_environment, DECKLY_PROVIDER_STORAGE_BUCKET=bucket)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://0123456789abcdef.r2.cloudflarestorage.com",
+        "https://s3.eu-central-1.amazonaws.com/",
+        "http://localhost:9100",
+    ],
+)
+def test_bare_storage_endpoint_of_any_s3_compatible_provider_is_accepted(
+    clean_environment: pytest.MonkeyPatch, url: str
+) -> None:
+    settings = provider_settings_with(clean_environment, DECKLY_PROVIDER_STORAGE_ENDPOINT_URL=url)
+
+    assert settings.storage_endpoint_url.path in {None, "/"}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://storage.example.com/deckly-documents",
+        "https://storage.example.com/?versioning",
+        "https://storage.example.com/#bucket",
+        "ftp://storage.example.com",
+        "storage.example.com",
+        "https://key:secret@storage.example.com",
+    ],
+)
+def test_storage_endpoint_with_a_path_query_fragment_or_other_scheme_is_rejected(
+    clean_environment: pytest.MonkeyPatch, url: str
+) -> None:
+    with pytest.raises(ValidationError, match="storage_endpoint_url"):
+        provider_settings_with(clean_environment, DECKLY_PROVIDER_STORAGE_ENDPOINT_URL=url)
+
+
+@pytest.mark.parametrize(
+    "variable", ["DECKLY_PROVIDER_STORAGE_ACCESS_KEY_ID", "DECKLY_PROVIDER_STORAGE_REGION"]
+)
+@pytest.mark.parametrize("character", ["\n", " ", "\u00e9"])
+def test_storage_identifier_outside_visible_ascii_is_rejected(
+    clean_environment: pytest.MonkeyPatch, variable: str, character: str
+) -> None:
+    with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_PROVIDER_").lower()):
+        provider_settings_with(clean_environment, **{variable: f"auto{character}x"})
+
+
+@pytest.mark.parametrize("operation", ["UPLOAD", "DELETE"])
+def test_storage_deadline_shorter_than_one_attempt_is_rejected(
+    clean_environment: pytest.MonkeyPatch, operation: str
+) -> None:
+    overrides = {
+        f"DECKLY_PROVIDER_STORAGE_{operation}_TIMEOUT_SECONDS": "10",
+        f"DECKLY_PROVIDER_STORAGE_{operation}_DEADLINE_SECONDS": "9",
+    }
+
+    with pytest.raises(ValidationError, match="storage deadlines must be at least"):
+        provider_settings_with(clean_environment, **overrides)
+
+
+@pytest.mark.parametrize("operation", ["UPLOAD", "DELETE"])
+def test_storage_deadline_equal_to_one_attempt_is_accepted(
+    clean_environment: pytest.MonkeyPatch, operation: str
+) -> None:
+    overrides = {
+        f"DECKLY_PROVIDER_STORAGE_{operation}_TIMEOUT_SECONDS": "10",
+        f"DECKLY_PROVIDER_STORAGE_{operation}_DEADLINE_SECONDS": "10",
+    }
+
+    assert provider_settings_with(clean_environment, **overrides).storage_max_attempts == 2
+
+
+@pytest.mark.parametrize("concurrency", ["0", str(MAX_STORAGE_CONCURRENCY + 1)])
+def test_storage_concurrency_outside_its_bounds_is_rejected(
+    clean_environment: pytest.MonkeyPatch, concurrency: str
+) -> None:
+    with pytest.raises(ValidationError, match="storage_max_concurrency"):
+        provider_settings_with(clean_environment, DECKLY_PROVIDER_STORAGE_MAX_CONCURRENCY=concurrency)
+
+
+def test_storage_secret_is_never_echoed_by_the_settings() -> None:
+    settings = ProviderSettings.model_construct(
+        storage_secret_access_key=SecretStr("storage-credential-value")
+    )
+
+    assert "storage-credential-value" not in repr(settings)
+
+
+def limit_settings_with(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> LimitSettings:
+    for name, value in {**LIMIT_ENVIRONMENT, **overrides}.items():
+        monkeypatch.setenv(name, value)
+    return LimitSettings()
+
+
+@pytest.mark.parametrize("max_bytes", [1, 26214400, MAX_DOCUMENT_BYTES])
+def test_document_size_limit_within_its_bounds_is_accepted(
+    clean_environment: pytest.MonkeyPatch, max_bytes: int
+) -> None:
+    settings = limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(max_bytes))
+
+    assert settings.document_max_bytes == max_bytes
+
+
+@pytest.mark.parametrize("max_bytes", ["0", "-1", str(MAX_DOCUMENT_BYTES + 1), "25MB"])
+def test_document_size_limit_outside_its_bounds_is_rejected(
+    clean_environment: pytest.MonkeyPatch, max_bytes: str
+) -> None:
+    with pytest.raises(ValidationError, match="document_max_bytes"):
+        limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_MAX_BYTES=max_bytes)
+
+
+def test_address_upload_limit_below_the_client_limit_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="per-address document upload limit"):
+        limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_ADDRESS_PER_WINDOW="9")
+
+
+def test_address_upload_limit_equal_to_the_client_limit_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = limit_settings_with(
+        clean_environment, DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_ADDRESS_PER_WINDOW="10"
+    )
+
+    assert settings.document_uploads_per_address_per_window == settings.document_uploads_per_window
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "DECKLY_LIMIT_DOCUMENT_MAX_BYTES",
+        "DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_WINDOW",
+        "DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_ADDRESS_PER_WINDOW",
+        "DECKLY_LIMIT_DOCUMENT_UPLOAD_WINDOW_SECONDS",
+    ],
+)
+def test_every_document_limit_is_required(clean_environment: pytest.MonkeyPatch, variable: str) -> None:
+    for name, value in LIMIT_ENVIRONMENT.items():
+        clean_environment.setenv(name, value)
+    clean_environment.delenv(variable)
+
+    with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_LIMIT_").lower()):
+        LimitSettings()
+
+
+@pytest.mark.parametrize("retention", [MIN_DOCUMENT_RETENTION_SECONDS, 86400, MAX_DOCUMENT_RETENTION_SECONDS])
+def test_document_retention_within_its_bounds_is_accepted(
+    clean_environment: pytest.MonkeyPatch, retention: int
+) -> None:
+    set_cache_environment(clean_environment, idempotency_ttl="86400", retention="86400")
+    clean_environment.setenv("DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS", str(retention))
+
+    assert CacheSettings().document_retention_seconds == retention
+
+
+@pytest.mark.parametrize(
+    "retention", ["0", str(MIN_DOCUMENT_RETENTION_SECONDS - 1), str(MAX_DOCUMENT_RETENTION_SECONDS + 1)]
+)
+def test_document_retention_outside_its_bounds_is_rejected(
+    clean_environment: pytest.MonkeyPatch, retention: str
+) -> None:
+    set_cache_environment(clean_environment, idempotency_ttl="86400", retention="86400")
+    clean_environment.setenv("DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS", retention)
+
+    with pytest.raises(ValidationError, match="document_retention_seconds"):
+        CacheSettings()
+
+
+def test_document_batch_that_cannot_be_deleted_within_one_sweep_interval_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match="must fit within the sweep interval"):
+        settings_from_environment(
+            clean_environment,
+            DECKLY_SWEEP_INTERVAL_MINUTES="1",
+            DECKLY_SWEEP_DOCUMENT_BATCH_SIZE="41",
+            DECKLY_PROVIDER_STORAGE_MAX_CONCURRENCY="8",
+            DECKLY_PROVIDER_STORAGE_DELETE_DEADLINE_SECONDS="10",
+        )
+
+
+def test_document_batch_deleted_just_within_one_sweep_interval_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_from_environment(
+        clean_environment,
+        DECKLY_SWEEP_INTERVAL_MINUTES="1",
+        DECKLY_SWEEP_DOCUMENT_BATCH_SIZE="40",
+        DECKLY_PROVIDER_STORAGE_MAX_CONCURRENCY="8",
+        DECKLY_PROVIDER_STORAGE_DELETE_DEADLINE_SECONDS="10",
+    )
+
+    assert settings.sweep.document_batch_size == 40

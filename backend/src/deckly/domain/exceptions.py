@@ -96,3 +96,19 @@ class DuplicateClientIdError(InvariantViolationError):
 
 class InvalidGenerationRequestError(InvariantViolationError):
     pass
+
+
+class DocumentNotFoundError(NotFoundError):
+    pass
+
+
+class InvalidDocumentError(InvariantViolationError):
+    pass
+
+
+class DocumentTooLargeError(InvalidDocumentError):
+    pass
+
+
+class UnsupportedDocumentError(InvalidDocumentError):
+    pass

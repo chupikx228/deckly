@@ -12,6 +12,8 @@ from pydantic import AnyHttpUrl, SecretStr
 from redis.asyncio import Redis
 
 from deckly.application.housekeeping import (
+    DocumentRetentionPolicy,
+    EnforceDocumentRetention,
     EnforceJobRetention,
     RetentionPolicy,
     StalenessPolicy,
@@ -40,9 +42,11 @@ from deckly.infrastructure.moderation.moderator import NOTES_PER_CONTENT_CHECK
 from deckly.infrastructure.resilience import ResilientCaller
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
+from deckly.infrastructure.storage.s3_client import S3StorageClient
 from deckly.worker import settings as worker_settings
 from deckly.worker.settings import (
     CACHE_REDIS_KEY,
+    ENFORCE_DOCUMENT_RETENTION_KEY,
     ENFORCE_JOB_RETENTION_KEY,
     HOUSEKEEPING_TASK,
     LLM_CLIENT_KEY,
@@ -51,6 +55,7 @@ from deckly.worker.settings import (
     MEDIA_JUDGE_LLM_CLIENT_KEY,
     MODERATION_LLM_CLIENT_KEY,
     SOURCE_RETRIEVER_KEY,
+    STORAGE_CLIENT_KEY,
     SWEEP_STALE_JOBS_KEY,
     WorkerContext,
     WorkerSettings,
@@ -64,6 +69,7 @@ from deckly.worker.settings import (
     run_housekeeping,
     shutdown,
 )
+from tests.documents import STORAGE_ENDPOINT, InMemoryDocumentStorage, InMemoryDocumentStore, document
 from tests.domain.builders import T0
 from tests.fakes import (
     MEDIA_LIMITS,
@@ -267,6 +273,30 @@ async def test_shutdown_closes_the_cache_redis_even_when_closing_the_model_clien
     assert cache_redis.closed
 
 
+class RecordingStorageClient(S3StorageClient):
+    closed = False
+
+    @override
+    async def aclose(self) -> None:
+        await super().aclose()
+        self.closed = True
+
+
+async def test_shutdown_closes_the_storage_client_even_when_closing_the_model_client_fails() -> None:
+    time = ManualTime()
+    caller = ResilientCaller(SEARCH_POLICY, time.breaker(), time.runtime(), probe=fresh_probe())
+    storage = RecordingStorageClient(STORAGE_ENDPOINT)
+    ctx: WorkerContext = {
+        LLM_CLIENT_KEY: ResilientLlmClient(FailingToCloseLlm(), caller, 1000),
+        STORAGE_CLIENT_KEY: storage,
+    }
+
+    with pytest.raises(RuntimeError):
+        await shutdown(ctx)
+
+    assert storage.closed
+
+
 async def test_shutdown_closes_the_moderation_clients_even_when_closing_the_model_client_fails() -> None:
     time = ManualTime()
     caller = ResilientCaller(SEARCH_POLICY, time.breaker(), time.runtime(), probe=fresh_probe())
@@ -354,32 +384,80 @@ class UnreachableHousekeeping(InMemoryJobHousekeeping):
         raise ConnectionError(message)
 
 
-async def test_housekeeping_still_enforces_retention_when_the_stale_sweep_fails(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    store = InMemoryJobStore()
-    await store.add(GenerationJob.queue(job_id(1), T0), generation_request(), scope())
+class UnreachableDocumentStore(InMemoryDocumentStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failures["expired"] = ConnectionError("database unreachable")
+
+
+def document_retention(
+    store: InMemoryDocumentStore, storage: InMemoryDocumentStorage, now: datetime
+) -> EnforceDocumentRetention:
+    return EnforceDocumentRetention(
+        housekeeping=store,
+        storage=storage,
+        policy=DocumentRetentionPolicy(retention=timedelta(days=1), batch_size=10, max_concurrency=2),
+        clock=lambda: now,
+    )
+
+
+def housekeeping_context(
+    jobs: InMemoryJobStore, job_housekeeping: InMemoryJobHousekeeping, documents: EnforceDocumentRetention
+) -> WorkerContext:
     now = T0 + timedelta(days=2)
-    ctx: WorkerContext = {
+    return {
         SWEEP_STALE_JOBS_KEY: SweepStaleJobs(
-            store=store,
-            housekeeping=UnreachableHousekeeping(store),
+            store=jobs,
+            housekeeping=job_housekeeping,
             policy=StalenessPolicy(running_after=timedelta(minutes=15), queued_after=timedelta(hours=1)),
             batch_size=10,
             clock=lambda: now,
         ),
         ENFORCE_JOB_RETENTION_KEY: EnforceJobRetention(
-            housekeeping=InMemoryJobHousekeeping(store),
+            housekeeping=InMemoryJobHousekeeping(jobs),
             policy=RetentionPolicy(idempotency_key_ttl=timedelta(days=1), job_retention=timedelta(days=1)),
             batch_size=10,
             clock=lambda: now,
         ),
+        ENFORCE_DOCUMENT_RETENTION_KEY: documents,
     }
+
+
+async def test_housekeeping_still_enforces_retention_when_the_stale_sweep_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = InMemoryJobStore()
+    await store.add(GenerationJob.queue(job_id(1), T0), generation_request(), scope())
+    documents, storage = InMemoryDocumentStore(), InMemoryDocumentStorage()
+    documents.keep(document(1))
+    ctx = housekeeping_context(
+        store, UnreachableHousekeeping(store), document_retention(documents, storage, T0 + timedelta(days=2))
+    )
+
+    with caplog.at_level(logging.ERROR, logger="deckly.worker.settings"):
+        await run_housekeeping(ctx)
+
+    assert await store.find(scope()) is None
+    assert documents.rows == {}
+    assert [(record.message, record.__dict__["step"]) for record in caplog.records] == [
+        ("housekeeping_step_failed", SWEEP_STALE_JOBS_KEY)
+    ]
+
+
+async def test_housekeeping_still_sweeps_jobs_when_document_retention_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = InMemoryJobStore()
+    await store.add(GenerationJob.queue(job_id(1), T0), generation_request(), scope())
+    retention = document_retention(
+        UnreachableDocumentStore(), InMemoryDocumentStorage(), T0 + timedelta(days=2)
+    )
+    ctx = housekeeping_context(store, InMemoryJobHousekeeping(store), retention)
 
     with caplog.at_level(logging.ERROR, logger="deckly.worker.settings"):
         await run_housekeeping(ctx)
 
     assert await store.find(scope()) is None
     assert [(record.message, record.__dict__["step"]) for record in caplog.records] == [
-        ("housekeeping_step_failed", SWEEP_STALE_JOBS_KEY)
+        ("housekeeping_step_failed", ENFORCE_DOCUMENT_RETENTION_KEY)
     ]

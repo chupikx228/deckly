@@ -14,17 +14,27 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from deckly.application.housekeeping import (
+    DocumentRetentionPolicy,
+    EnforceDocumentRetention,
     EnforceJobRetention,
     RetentionPolicy,
     StalenessPolicy,
     SweepStaleJobs,
 )
 from deckly.application.pipeline import RunGeneration
-from deckly.config import MINUTES_PER_HOUR, ModelProvider, ProviderSettings, Settings, SweepSettings
+from deckly.config import (
+    MINUTES_PER_HOUR,
+    SECONDS_PER_MINUTE,
+    ModelProvider,
+    ProviderSettings,
+    Settings,
+    SweepSettings,
+)
 from deckly.infrastructure.card_generator.generator import LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.database import create_engine, create_session_factory, verify_connection
+from deckly.infrastructure.documents.store import PostgresDocumentHousekeeping
 from deckly.infrastructure.job_store import BoundedJobStore, PostgresJobHousekeeping, PostgresJobStore
 from deckly.infrastructure.llm.anthropic_client import AnthropicLlmClient
 from deckly.infrastructure.llm.bounded import BoundedLlmClient
@@ -54,6 +64,9 @@ from deckly.infrastructure.search.client import SearchEndpoint
 from deckly.infrastructure.search.parser import CleaningSourceParser
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
+from deckly.infrastructure.storage.client import StorageClient, StorageEndpoint
+from deckly.infrastructure.storage.s3_client import S3StorageClient
+from deckly.infrastructure.storage.storage import ResilientDocumentStorage
 
 SETTINGS_KEY = "settings"
 OBSERVABILITY_KEY = "observability"
@@ -67,8 +80,9 @@ MEDIA_FETCHER_KEY = "media_fetcher"
 RUN_GENERATION_KEY = "run_generation_use_case"
 SWEEP_STALE_JOBS_KEY = "sweep_stale_jobs_use_case"
 ENFORCE_JOB_RETENTION_KEY = "enforce_job_retention_use_case"
+ENFORCE_DOCUMENT_RETENTION_KEY = "enforce_document_retention_use_case"
+STORAGE_CLIENT_KEY = "storage_client"
 HOUSEKEEPING_TASK = "run_housekeeping"
-SECONDS_PER_MINUTE = 60
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +259,68 @@ def build_media_fetcher(
     )
 
 
+def build_storage_client(providers: ProviderSettings) -> S3StorageClient:
+    return S3StorageClient(
+        StorageEndpoint(
+            endpoint_url=str(providers.storage_endpoint_url),
+            bucket=providers.storage_bucket,
+            region=providers.storage_region,
+            access_key_id=providers.storage_access_key_id,
+            secret_access_key=providers.storage_secret_access_key.get_secret_value(),
+            timeout_seconds=max(
+                providers.storage_upload_timeout_seconds, providers.storage_delete_timeout_seconds
+            ),
+        )
+    )
+
+
+def storage_policy(
+    providers: ProviderSettings, *, timeout_seconds: int, deadline_seconds: int
+) -> RetryPolicy:
+    return RetryPolicy(
+        max_attempts=providers.storage_max_attempts,
+        attempt_timeout_seconds=timeout_seconds,
+        deadline_seconds=deadline_seconds,
+        base_delay_seconds=providers.storage_retry_base_delay_seconds,
+        max_delay_seconds=providers.storage_retry_max_delay_seconds,
+    )
+
+
+def storage_caller(providers: ProviderSettings, policy: RetryPolicy, probe: ProviderProbe) -> ResilientCaller:
+    return resilient_caller(
+        policy,
+        probe,
+        failure_threshold=providers.storage_circuit_failure_threshold,
+        reset_seconds=providers.storage_circuit_reset_seconds,
+    )
+
+
+def build_document_storage(
+    providers: ProviderSettings, client: StorageClient, observability: Observability
+) -> ResilientDocumentStorage:
+    return ResilientDocumentStorage(
+        client=client,
+        upload_caller=storage_caller(
+            providers,
+            storage_policy(
+                providers,
+                timeout_seconds=providers.storage_upload_timeout_seconds,
+                deadline_seconds=providers.storage_upload_deadline_seconds,
+            ),
+            observability.probe(ProviderOperation.DOCUMENT_UPLOAD),
+        ),
+        delete_caller=storage_caller(
+            providers,
+            storage_policy(
+                providers,
+                timeout_seconds=providers.storage_delete_timeout_seconds,
+                deadline_seconds=providers.storage_delete_deadline_seconds,
+            ),
+            observability.probe(ProviderOperation.DOCUMENT_DELETE),
+        ),
+    )
+
+
 def build_cache_redis(settings: Settings) -> Redis:
     return create_bounded_pool(
         create_redis_settings(
@@ -294,6 +370,21 @@ def build_retention(housekeeping: PostgresJobHousekeeping, settings: Settings) -
     )
 
 
+def build_document_retention(
+    housekeeping: PostgresDocumentHousekeeping, storage: ResilientDocumentStorage, settings: Settings
+) -> EnforceDocumentRetention:
+    return EnforceDocumentRetention(
+        housekeeping=housekeeping,
+        storage=storage,
+        policy=DocumentRetentionPolicy(
+            retention=timedelta(seconds=settings.cache.document_retention_seconds),
+            batch_size=settings.sweep.document_batch_size,
+            max_concurrency=settings.providers.storage_max_concurrency,
+        ),
+        clock=utc_now,
+    )
+
+
 def housekeeping_cron_jobs(sweep: SweepSettings) -> tuple[CronJob, ...]:
     return (
         cron(
@@ -315,6 +406,10 @@ async def run_housekeeping(ctx: WorkerContext) -> None:
     steps: tuple[tuple[str, Callable[[], Awaitable[object]]], ...] = (
         (SWEEP_STALE_JOBS_KEY, from_context(ctx, SWEEP_STALE_JOBS_KEY, SweepStaleJobs)),
         (ENFORCE_JOB_RETENTION_KEY, from_context(ctx, ENFORCE_JOB_RETENTION_KEY, EnforceJobRetention)),
+        (
+            ENFORCE_DOCUMENT_RETENTION_KEY,
+            from_context(ctx, ENFORCE_DOCUMENT_RETENTION_KEY, EnforceDocumentRetention),
+        ),
     )
     for name, step in steps:
         try:
@@ -369,6 +464,13 @@ async def startup(ctx: WorkerContext) -> None:
     housekeeping = PostgresJobHousekeeping(session_factory)
     ctx[SWEEP_STALE_JOBS_KEY] = build_sweep(store, housekeeping, settings)
     ctx[ENFORCE_JOB_RETENTION_KEY] = build_retention(housekeeping, settings)
+    storage_client = build_storage_client(settings.providers)
+    ctx[STORAGE_CLIENT_KEY] = storage_client
+    ctx[ENFORCE_DOCUMENT_RETENTION_KEY] = build_document_retention(
+        PostgresDocumentHousekeeping(session_factory),
+        build_document_storage(settings.providers, storage_client, observability),
+        settings,
+    )
     cache_redis = build_cache_redis(settings)
     ctx[CACHE_REDIS_KEY] = cache_redis
     ctx[RUN_GENERATION_KEY] = RunGeneration(
@@ -387,6 +489,7 @@ async def startup(ctx: WorkerContext) -> None:
 async def shutdown(ctx: WorkerContext) -> None:
     engine = ctx.get(ENGINE_KEY)
     cache_redis = ctx.get(CACHE_REDIS_KEY)
+    storage_client = ctx.get(STORAGE_CLIENT_KEY)
     media = ctx.get(MEDIA_FETCHER_KEY)
     retriever = ctx.get(SOURCE_RETRIEVER_KEY)
     llm_clients = (
@@ -399,6 +502,8 @@ async def shutdown(ctx: WorkerContext) -> None:
             closing.push_async_callback(engine.dispose)
         if isinstance(cache_redis, Redis):
             closing.push_async_callback(cache_redis.aclose)
+        if isinstance(storage_client, S3StorageClient):
+            closing.push_async_callback(storage_client.aclose)
         if isinstance(media, CommonsMediaFetcher):
             closing.push_async_callback(media.aclose)
         if isinstance(retriever, WebSourceRetriever):

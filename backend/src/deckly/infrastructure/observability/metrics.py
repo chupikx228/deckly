@@ -26,6 +26,8 @@ class RateLimit(StrEnum):
     GENERATION_CLIENT = "generation_client"
     GENERATION_ADDRESS = "generation_address"
     NOTE_REGENERATION = "note_regeneration"
+    DOCUMENT_UPLOAD_CLIENT = "document_upload_client"
+    DOCUMENT_UPLOAD_ADDRESS = "document_upload_address"
 
 
 @dataclass(frozen=True, slots=True)

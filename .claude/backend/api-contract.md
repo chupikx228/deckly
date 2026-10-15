@@ -22,6 +22,10 @@ Therefore in v1 there are:
 Adding any of these silently would break the offline guarantee. If the backend needs one,
 raise it as a contract change first.
 
+Uploaded documents (`POST /documents`) are not user data the backend owns. They are short-lived
+inputs to generation, readable only by the client that uploaded them, and deleted 24 hours after
+upload unless a generation uses them.
+
 ## Conventions
 
 | Concern         | Rule                                                                                                   |
@@ -302,6 +306,59 @@ counts as a block.
   passes validation, or the content check did not allow the note it produced. The note is never
   returned. Tapping regenerate again may succeed.
 
+### `POST /v1/documents`
+
+Uploads one PDF or PowerPoint (`.pptx`) file to generate from and returns `201` with its
+metadata. The file goes in a `multipart/form-data` body as the only part, named `file`.
+`X-Client-Id` is required, under the same rules as on `POST /generations`.
+
+```json
+{
+  "documentId": "…",
+  "filename": "lecture-3.pdf",
+  "sizeBytes": 482113,
+  "contentType": "application/pdf",
+  "uploadedAt": "2026-08-14T10:30:00Z"
+}
+```
+
+- **Type is decided by content.** The server reads the file itself and never trusts its name or
+  the declared `Content-Type`. A PDF must start with a `%PDF-1.x` or `%PDF-2.x` header within its
+  first 1024 bytes and end with `%%EOF` within its last 1024. A presentation must be an Office
+  Open XML package whose main part is `ppt/presentation.xml` with the presentation content type.
+  Everything else is `415 UNSUPPORTED_DOCUMENT_TYPE`: other files renamed to `.pdf`, Word and
+  Excel files, legacy binary `.ppt`, macro-enabled `.pptm`, slide shows (`.ppsx`), templates,
+  password-protected presentations, damaged or truncated files and empty files. `contentType`
+  in the response is the detected type.
+- **Size.** At most 25 MiB (`DECKLY_LIMIT_DOCUMENT_MAX_BYTES`). A larger file is
+  `413 DOCUMENT_TOO_LARGE`, refused from the `Content-Length` header when it is sent and
+  otherwise as soon as the body passes the limit. Nothing is stored either way.
+- **Filename.** Kept for display only: cut to its last path component and 255 characters, with
+  control and invisible characters removed (including bidi overrides). A name with nothing left
+  is `400 VALIDATION_FAILED`. It is never used to name the stored object.
+- **Malformed requests** are `400 VALIDATION_FAILED`: a body that is not `multipart/form-data`,
+  no part named `file`, more than one file, or any other form field.
+- `429 RATE_LIMITED` when the client's upload budget is used up (see "Quota").
+- `503 UPSTREAM_UNAVAILABLE` when the object store or the rate-limit store fails or is too slow.
+  A failed upload leaves nothing behind that a client can read.
+- **No idempotency key.** Retrying an upload stores a second copy with a new `documentId`; the
+  copy nothing uses expires like any other.
+
+### `GET /v1/documents/{documentId}`
+
+Returns `200` with the same metadata body as the upload. It never returns the file itself.
+
+**Access.** Unlike a job, a document is scoped to the client that uploaded it: the request must
+carry that client's `X-Client-Id`. Any other client, an unknown or malformed id, a document still
+being uploaded, and one that has expired all get the same `404 DOCUMENT_NOT_FOUND`, so the
+response does not reveal whether a document exists. This differs deliberately from
+`GET /generations/{jobId}`: a document carries the user's own content and file name.
+
+**Retention.** A document that nothing uses is deleted 24 hours after it was uploaded
+(`DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS`), and reading it afterwards is `404`. Expired documents
+are removed by a scheduled task, so one can stay readable for up to one sweep interval past the
+24 hours.
+
 ### `GET /v1/health`
 
 Returns `200` with `{ "status": "ok", "version": "…" }`. Used by the client to show an
@@ -370,6 +427,15 @@ The window starts on the clock, not at the first call, so a client can make up t
 across a window boundary. Every call that passes request validation counts, including one that
 then fails upstream. Over the budget, the call is rejected with `429 RATE_LIMITED` and
 `retryAfterSeconds` until the window resets. This budget is not reported in `quota`.
+
+`POST /documents` has a third budget of its own, counted in fixed windows like regeneration: by
+default 10 uploads per hour per `X-Client-Id` (`DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_WINDOW`,
+`DECKLY_LIMIT_DOCUMENT_UPLOAD_WINDOW_SECONDS`) and, as a backstop against rotated client ids, 50 per
+hour per network address (`DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_ADDRESS_PER_WINDOW`, IPv6 grouped by
+/56). Every upload with valid headers counts, including one later refused for its size or type. The
+budget is checked before the body is read, and an upload whose `Content-Length` is already over the
+size limit is refused before it is counted. When Redis cannot be reached in time the upload is
+`503 UPSTREAM_UNAVAILABLE`, never accepted unmetered. This budget is not reported in `quota`.
 
 ## Note field shapes
 
@@ -482,22 +548,25 @@ localised and is for logs.
 }
 ```
 
-| Code                       | Status              | Meaning                                           |
-| -------------------------- | ------------------- | ------------------------------------------------- |
-| `VALIDATION_FAILED`        | 400                 | Request body failed validation                    |
-| `TOPIC_REJECTED`           | 422                 | Topic (or rejected note) violates content policy  |
-| `RATE_LIMITED`             | 429                 | A job or regeneration budget is used up; "Quota"  |
-| `JOB_NOT_FOUND`            | 404                 | Unknown job id                                    |
-| `JOB_ALREADY_TERMINAL`     | 409                 | Cancel on a finished job                          |
-| `IDEMPOTENCY_KEY_CONFLICT` | 409                 | `Idempotency-Key` reused with a different request |
-| `PROVIDER_UNAVAILABLE`     | 200 in the job body | The model or search provider failed the job       |
-| `NO_VALID_CONTENT`         | 200 in the job body | Every note was dropped; nothing safe to return    |
-| `NO_VALID_CONTENT`         | 503 on regenerate   | No valid replacement note could be produced       |
-| `GENERATION_FAILED`        | 200 in the job body | The job failed for any other reason               |
-| `UPSTREAM_UNAVAILABLE`     | 503                 | Model, search provider or quota store is down     |
-| `ROUTE_NOT_FOUND`          | 404                 | No endpoint exists at this path                   |
-| `METHOD_NOT_ALLOWED`       | 405                 | Endpoint exists but not for this HTTP method      |
-| `INTERNAL_ERROR`           | 500                 | Anything else                                     |
+| Code                        | Status              | Meaning                                           |
+| --------------------------- | ------------------- | ------------------------------------------------- |
+| `VALIDATION_FAILED`         | 400                 | Request body failed validation                    |
+| `TOPIC_REJECTED`            | 422                 | Topic (or rejected note) violates content policy  |
+| `RATE_LIMITED`              | 429                 | A job, regeneration or upload budget; "Quota"     |
+| `JOB_NOT_FOUND`             | 404                 | Unknown job id                                    |
+| `JOB_ALREADY_TERMINAL`      | 409                 | Cancel on a finished job                          |
+| `IDEMPOTENCY_KEY_CONFLICT`  | 409                 | `Idempotency-Key` reused with a different request |
+| `PROVIDER_UNAVAILABLE`      | 200 in the job body | The model or search provider failed the job       |
+| `NO_VALID_CONTENT`          | 200 in the job body | Every note was dropped; nothing safe to return    |
+| `NO_VALID_CONTENT`          | 503 on regenerate   | No valid replacement note could be produced       |
+| `GENERATION_FAILED`         | 200 in the job body | The job failed for any other reason               |
+| `UPSTREAM_UNAVAILABLE`      | 503                 | A provider, quota store or object store is down   |
+| `DOCUMENT_NOT_FOUND`        | 404                 | Unknown, foreign or expired document id           |
+| `DOCUMENT_TOO_LARGE`        | 413                 | Uploaded document is over the size limit          |
+| `UNSUPPORTED_DOCUMENT_TYPE` | 415                 | Uploaded file is not a PDF or a `.pptx`           |
+| `ROUTE_NOT_FOUND`           | 404                 | No endpoint exists at this path                   |
+| `METHOD_NOT_ALLOWED`        | 405                 | Endpoint exists but not for this HTTP method      |
+| `INTERNAL_ERROR`            | 500                 | Anything else                                     |
 
 Note the three "200 in the job body" rows: a **failed job is not an HTTP error**. `GET
 /generations/{jobId}` returns `200` with `status: "failed"` and a populated `error` object.
@@ -517,7 +586,7 @@ A failed job's `error.code` is always exactly one of these three, never any othe
 points. `UPSTREAM_UNAVAILABLE` is an HTTP `503` on a request the server could not serve at all.
 `PROVIDER_UNAVAILABLE` is inside the body of a job that was already accepted and later failed.
 
-`ROUTE_NOT_FOUND` and `JOB_NOT_FOUND` share the 404 status, so the client must branch on
+`ROUTE_NOT_FOUND`, `JOB_NOT_FOUND` and `DOCUMENT_NOT_FOUND` share the 404 status, so the client must branch on
 `code`, not on status. `ROUTE_NOT_FOUND` means the client called a path the server does not
 serve, which is a client or deployment bug, not a missing job. `METHOD_NOT_ALLOWED` responses
 carry an `Allow` header listing the methods the path does accept.
@@ -539,6 +608,8 @@ carry an `Allow` header listing the methods the path does accept.
   the cache key. A cache hit is still a job: it goes `queued → running → succeeded` and is polled
   like any other, and it still counts against the client's daily quota.
 - Generated content must be filtered for policy violations before it reaches the client.
+- An uploaded document nothing uses is deleted 24 hours after upload. The object store is never
+  exposed to the client; documents are read only through the API.
 
 ## Resolved decisions
 

@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, Double, Index, Text, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, Double, Index, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,6 +32,24 @@ class GenerationJobRow(Base):
     result: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DocumentRow(Base):
+    __tablename__ = "documents"
+    __table_args__ = (
+        UniqueConstraint("storage_key", name="uq_documents_storage_key"),
+        Index("ix_documents_unused_uploaded_at", "uploaded_at", postgresql_where=text("used_at IS NULL")),
+    )
+
+    document_id: Mapped[UUID] = mapped_column(primary_key=True)
+    client_id: Mapped[UUID]
+    storage_key: Mapped[str] = mapped_column(Text)
+    filename: Mapped[str] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    content_type: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 metadata = Base.metadata

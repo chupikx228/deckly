@@ -7,7 +7,8 @@ info:
     Generation API for the Deckly mobile app. The app is offline-first: local SQLite owns
     all user data and scheduling runs on the device. This API exists only to turn a topic
     into a set of reviewable notes. There are deliberately no deck, review, auth or sync
-    endpoints in v1.
+    endpoints in v1. Documents uploaded as generation input are short-lived: an upload nothing
+    uses is deleted after 24 hours.
 
 servers:
   - url: https://api.example.com/v1
@@ -20,6 +21,8 @@ tags:
     description: Asynchronous deck generation jobs
   - name: notes
     description: Single-note operations
+  - name: documents
+    description: Source documents uploaded as generation input
   - name: system
 
 paths:
@@ -141,6 +144,71 @@ paths:
         '503':
           $ref: '#/components/responses/Problem'
 
+  /documents:
+    post:
+      tags: [documents]
+      operationId: uploadDocument
+      summary: Upload a PDF or PowerPoint document
+      description: >
+        Stores one PDF or PowerPoint (.pptx) file so a later request can refer to it by its
+        documentId. The type is decided from the file's content, never from its name or the
+        declared Content-Type, so a renamed file of another type is 415 UNSUPPORTED_DOCUMENT_TYPE,
+        as are legacy .ppt, macro-enabled .pptm, password-protected and damaged files. A file over
+        the size limit (25 MiB by default) is 413 DOCUMENT_TOO_LARGE and is refused before it is
+        stored. Uploads are rate limited per X-Client-Id and per network address, separately from
+        the generation quota (429 RATE_LIMITED). A document nothing uses is deleted 24 hours after
+        it was uploaded, and reading it afterwards is 404 DOCUMENT_NOT_FOUND. There is no
+        Idempotency-Key: retrying an upload stores a second copy, which expires the same way.
+      parameters:
+        - $ref: '#/components/parameters/ClientId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/DocumentUploadRequest'
+      responses:
+        '201':
+          description: The document was stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '413':
+          $ref: '#/components/responses/Problem'
+        '415':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+
+  /documents/{documentId}:
+    get:
+      tags: [documents]
+      operationId: getDocument
+      summary: Read an uploaded document's metadata
+      description: >
+        Returns what was stored, never the file itself. Only the X-Client-Id that uploaded the
+        document can read it; any other client gets 404 DOCUMENT_NOT_FOUND, exactly as for a
+        document that never existed or has expired.
+      parameters:
+        - $ref: '#/components/parameters/DocumentId'
+        - $ref: '#/components/parameters/ClientId'
+      responses:
+        '200':
+          description: The document's metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+
   /health:
     get:
       tags: [system]
@@ -175,6 +243,14 @@ components:
   parameters:
     JobId:
       name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    DocumentId:
+      name: documentId
       in: path
       required: true
       schema:
@@ -263,9 +339,53 @@ components:
         - NO_VALID_CONTENT
         - GENERATION_FAILED
         - UPSTREAM_UNAVAILABLE
+        - DOCUMENT_NOT_FOUND
+        - DOCUMENT_TOO_LARGE
+        - UNSUPPORTED_DOCUMENT_TYPE
         - ROUTE_NOT_FOUND
         - METHOD_NOT_ALLOWED
         - INTERNAL_ERROR
+
+    DocumentContentType:
+      type: string
+      description: The type detected from the file's content.
+      enum:
+        - application/pdf
+        - application/vnd.openxmlformats-officedocument.presentationml.presentation
+
+    DocumentUploadRequest:
+      type: object
+      required: [file]
+      additionalProperties: false
+      properties:
+        file:
+          type: string
+          format: binary
+          description: >
+            The document, as the only part of the form. Its filename is kept for display, cut to
+            its last path component and 255 characters, with control and invisible characters
+            removed; a name with nothing left is 400 VALIDATION_FAILED.
+
+    Document:
+      type: object
+      required: [documentId, filename, sizeBytes, contentType, uploadedAt]
+      additionalProperties: false
+      properties:
+        documentId:
+          type: string
+          format: uuid
+        filename:
+          type: string
+          minLength: 1
+          maxLength: 255
+        sizeBytes:
+          type: integer
+          minimum: 1
+        contentType:
+          $ref: '#/components/schemas/DocumentContentType'
+        uploadedAt:
+          type: string
+          format: date-time
 
     RejectionReason:
       type: string

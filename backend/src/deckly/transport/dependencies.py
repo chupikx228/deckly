@@ -1,5 +1,6 @@
 from fastapi import Request
 
+from deckly.application.documents import GetDocument, UploadDocument
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
 from deckly.application.health import CheckHealth
 from deckly.application.regeneration import RegenerateNote
@@ -10,6 +11,8 @@ GET_GENERATION_STATE = "get_generation"
 CANCEL_GENERATION_STATE = "cancel_generation"
 REGENERATE_NOTE_STATE = "regenerate_note"
 CHECK_HEALTH_STATE = "check_health"
+UPLOAD_DOCUMENT_STATE = "upload_document"
+GET_DOCUMENT_STATE = "get_document"
 
 
 def wired[T](request: Request, name: str, kind: type[T]) -> T:
@@ -38,6 +41,14 @@ def regenerate_note_use_case(request: Request) -> RegenerateNote:
 
 def check_health_use_case(request: Request) -> CheckHealth:
     return wired(request, CHECK_HEALTH_STATE, CheckHealth)
+
+
+def upload_document_use_case(request: Request) -> UploadDocument:
+    return wired(request, UPLOAD_DOCUMENT_STATE, UploadDocument)
+
+
+def get_document_use_case(request: Request) -> GetDocument:
+    return wired(request, GET_DOCUMENT_STATE, GetDocument)
 
 
 def problem_responder(request: Request) -> ProblemResponder:

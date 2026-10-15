@@ -1,13 +1,21 @@
+import asyncio
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from deckly.application.exceptions import JobNoLongerStaleError
+from deckly.application.exceptions import JobNoLongerStaleError, UpstreamUnavailableError
 from deckly.application.generations import Clock
 from deckly.application.pipeline import log_context
-from deckly.application.ports import JobHousekeeping, JobStore, JobTransition
+from deckly.application.ports import (
+    DocumentHousekeeping,
+    DocumentStorage,
+    ExpiredDocument,
+    JobHousekeeping,
+    JobStore,
+    JobTransition,
+)
 from deckly.domain.job import FailureCode, GenerationJob, JobStatus
 
 logger = logging.getLogger(__name__)
@@ -97,3 +105,52 @@ class EnforceJobRetention:
             extra={"released_keys": outcome.released_keys, "purged_jobs": outcome.purged_jobs},
         )
         return outcome
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentRetentionPolicy:
+    retention: timedelta
+    batch_size: int
+    max_concurrency: int
+
+
+@dataclass(frozen=True, slots=True)
+class EnforceDocumentRetention:
+    housekeeping: DocumentHousekeeping
+    storage: DocumentStorage
+    policy: DocumentRetentionPolicy
+    clock: Clock
+
+    async def __call__(self) -> int:
+        uploaded_before = self.clock() - self.policy.retention
+        async with self.housekeeping.expired(uploaded_before, self.policy.batch_size) as expired:
+            slots = asyncio.Semaphore(self.policy.max_concurrency)
+            deleted = await asyncio.gather(*(self._delete(document, slots) for document in expired.documents))
+            removed = {
+                document.document_id
+                for document, gone in zip(expired.documents, deleted, strict=True)
+                if gone
+            }
+            purged = await expired.purge(removed)
+        logger.info(
+            "document_retention_enforced",
+            extra={"purged_documents": purged, "kept_documents": len(deleted) - purged},
+        )
+        return purged
+
+    async def _delete(self, document: ExpiredDocument, slots: asyncio.Semaphore) -> bool:
+        async with slots:
+            try:
+                await self.storage.delete(document.storage_key)
+            except UpstreamUnavailableError as error:
+                logger.warning(
+                    "document_object_not_deleted",
+                    extra={"document_id": str(document.document_id), "error": type(error).__name__},
+                )
+                return False
+            except Exception:
+                logger.exception(
+                    "document_object_not_deleted", extra={"document_id": str(document.document_id)}
+                )
+                return False
+        return True
