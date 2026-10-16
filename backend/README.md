@@ -344,6 +344,17 @@ runs alongside the search, and whichever of the two fails first cancels the othe
 hands the one note to the job's `LlmContentModerator` unchanged; a note without an explicit allow
 is `503 NO_VALID_CONTENT` and is never returned.
 
+A note of a deck generated from a document cannot be regenerated in v1 (DEC-83). The request names
+the deck's `documentId` instead of a `topic`, as in `POST /v1/generations`, and
+`RegenerateNoteRequestBody.to_domain` refuses it with `DocumentRegenerationUnsupportedError`,
+`422 DOCUMENT_REGENERATION_UNSUPPORTED`, before the use case runs: no budget is spent, nothing is
+searched and the document is not read. A job's own download and parse deadlines can exceed this
+call's 10 seconds on their own, and a web search for the file name would ground the note in
+material different from the rest of the deck, so neither is attempted. The refusal rests on the
+client sending `documentId`, because the backend stores no deck; a client that sends its own topic
+for such a deck gets an ordinary web-searched note. The design is deferred, as for
+`image_occlusion`: see "Resolved decisions", item 6, in `api-contract.md`.
+
 The call must answer within `DECKLY_LIMIT_REGENERATE_NOTE_TIMEOUT_SECONDS` (10). Each step has its
 own `DECKLY_REGENERATE_*` timeout, separate from the job settings: the rate-limit check in Redis
 (0.5 s), the search (4.0 s), the request check (`REQUEST_MODERATION_TIMEOUT_SECONDS`, 4.0 s), the

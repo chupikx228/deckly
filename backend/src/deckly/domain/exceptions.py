@@ -34,6 +34,10 @@ class TopicRejectedError(PolicyViolationError):
     pass
 
 
+class DocumentRegenerationUnsupportedError(PolicyViolationError):
+    pass
+
+
 class InvalidJobIdError(InvariantViolationError):
     pass
 

@@ -29,6 +29,7 @@ MINIMAL: dict[str, object] = {
     "rejectedNote": {"fields": {"front": "What does a red triangle warn of?", "back": "A hazard"}},
     "reason": "too_easy",
 }
+DOCUMENT_ID = "8d1c2b3a-4f5e-4d6c-8b7a-9e0f1a2b3c4d"
 REGENERATABLE_TYPES = [str(note_type) for note_type in NoteType if note_type is not NoteType.IMAGE_OCCLUSION]
 
 
@@ -50,6 +51,10 @@ def with_(**overrides: object) -> dict[str, object]:
 
 def without(field: str) -> dict[str, object]:
     return {key: value for key, value in MINIMAL.items() if key != field}
+
+
+def from_document(**overrides: object) -> dict[str, object]:
+    return {**without("topic"), "documentId": DOCUMENT_ID, **overrides}
 
 
 def rejected(fields: object, **extra: object) -> dict[str, object]:
@@ -168,6 +173,12 @@ SPEC_AND_SERVER_REJECT: dict[str, object] = {
     "fields a list": rejected(["front", "back"]),
     "fields a string": rejected("front: back"),
     "topic missing": without("topic"),
+    "topic null": with_(topic=None),
+    "documentId null": with_(documentId=None),
+    "documentId null instead of topic": from_document(documentId=None),
+    "documentId not a uuid": from_document(documentId="not-a-uuid"),
+    "documentId not a string": from_document(documentId=7),
+    "topic and documentId together": with_(documentId=DOCUMENT_ID),
     "topic at 2": with_(topic="ab"),
     "topic at 201": with_(topic="x" * 201),
     "topic not a string": with_(topic=12345),
@@ -185,6 +196,9 @@ SERVER_ONLY_REJECT: dict[str, dict[str, object]] = {
     "topic whitespace only": with_(topic="   "),
     "topic of zero-width spaces only": with_(topic="\N{ZERO WIDTH SPACE}" * 5),
     "topic with NUL": with_(topic="Road\x00signs"),
+    "documentId in upper case": from_document(documentId=DOCUMENT_ID.upper()),
+    "documentId of version 1": from_document(documentId="8d1c2b3a-4f5e-1d6c-8b7a-9e0f1a2b3c4d"),
+    "documentId without hyphens": from_document(documentId=DOCUMENT_ID.replace("-", "")),
 }
 
 
@@ -229,6 +243,72 @@ def test_request_without_a_canonical_client_id_is_validation_failed(headers: dic
 
     assert_validation_failed(post(build_client(harness), MINIMAL, headers))
     assert harness.providers.steps == []
+
+
+def test_note_of_a_document_deck_is_a_422_before_any_provider_or_the_limiter_is_called() -> None:
+    payload = from_document()
+    assert spec_errors("RegenerateNoteRequest", payload) == []
+    harness = RegenerationHarness()
+
+    response = post(build_client(harness), payload)
+
+    body = assert_problem(response, HTTPStatus.UNPROCESSABLE_ENTITY, "DOCUMENT_REGENERATION_UNSUPPORTED")
+    assert_declared(response)
+    assert "retryAfterSeconds" not in body
+    assert RETRY_AFTER_HEADER not in response.headers
+    assert harness.providers.steps == []
+    assert harness.providers.acquired == []
+    assert harness.providers.searched == []
+
+
+@pytest.mark.parametrize("note_type", REGENERATABLE_TYPES)
+@pytest.mark.parametrize("reason", [str(reason) for reason in RejectionReason])
+def test_document_deck_refusal_does_not_depend_on_the_note_type_or_the_reason(
+    note_type: str, reason: str
+) -> None:
+    harness = RegenerationHarness()
+
+    response = post(build_client(harness), from_document(noteType=note_type, reason=reason))
+
+    assert_problem(response, HTTPStatus.UNPROCESSABLE_ENTITY, "DOCUMENT_REGENERATION_UNSUPPORTED")
+    assert harness.providers.steps == []
+
+
+def test_document_deck_refusal_does_not_look_the_document_up_or_leak_its_id() -> None:
+    harness = RegenerationHarness()
+
+    response = post(build_client(harness), from_document())
+
+    assert DOCUMENT_ID not in response.text
+
+
+def test_document_deck_is_refused_even_when_every_provider_is_down() -> None:
+    harness = RegenerationHarness()
+    for step in RegenerationStep:
+        harness.providers.failures[step] = UpstreamUnavailableError(4)
+
+    response = post(build_client(harness), from_document())
+
+    assert_problem(response, HTTPStatus.UNPROCESSABLE_ENTITY, "DOCUMENT_REGENERATION_UNSUPPORTED")
+
+
+def test_malformed_note_of_a_document_deck_is_validation_failed_not_the_document_refusal() -> None:
+    harness = RegenerationHarness()
+
+    assert_validation_failed(post(build_client(harness), from_document(reason="boring")))
+    assert harness.providers.steps == []
+
+
+def test_document_deck_request_without_a_client_id_is_validation_failed() -> None:
+    assert_validation_failed(post(build_client(RegenerationHarness()), from_document(), {}))
+
+
+def test_topic_deck_is_regenerated_exactly_as_before() -> None:
+    harness = RegenerationHarness()
+
+    assert_regenerated(post(build_client(harness), MINIMAL))
+
+    assert harness.providers.steps == list(RegenerationStep)
 
 
 def test_rate_limited_client_gets_a_429_with_when_to_retry() -> None:

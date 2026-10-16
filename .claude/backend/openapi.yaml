@@ -131,7 +131,10 @@ paths:
         together against the content policy, and a request that violates it is 422 TOPIC_REJECTED. A
         503 is UPSTREAM_UNAVAILABLE when a provider or the content check is down, slow, rejects the
         request or answers with malformed data, or NO_VALID_CONTENT when no note that passes
-        validation and the content check could be produced.
+        validation and the content check could be produced. A note of a deck generated from an
+        uploaded document cannot be regenerated in v1: a request that names a documentId is 422
+        DOCUMENT_REGENERATION_UNSUPPORTED, refused before the regeneration budget is touched and
+        before any search or document read (DEC-83).
       parameters:
         - $ref: '#/components/parameters/ClientId'
       requestBody:
@@ -358,6 +361,7 @@ components:
         - DOCUMENT_ENCRYPTED
         - DOCUMENT_HAS_NO_TEXT
         - DOCUMENT_REJECTED
+        - DOCUMENT_REGENERATION_UNSUPPORTED
         - UPSTREAM_UNAVAILABLE
         - DOCUMENT_NOT_FOUND
         - DOCUMENT_TOO_LARGE
@@ -727,16 +731,30 @@ components:
 
     RegenerateNoteRequest:
       type: object
-      required: [topic, language, noteType, rejectedNote, reason]
+      required: [language, noteType, rejectedNote, reason]
       additionalProperties: false
       description: >
         noteType image_occlusion is rejected with VALIDATION_FAILED, because the note is built on an
-        image the request does not carry.
+        image the request does not carry. Exactly one of topic and documentId: a request with both,
+        or with neither, is VALIDATION_FAILED, and so is either one sent as null. A request that
+        names a documentId is well formed but always refused with 422
+        DOCUMENT_REGENERATION_UNSUPPORTED.
+      oneOf:
+        - required: [topic]
+        - required: [documentId]
       properties:
         topic:
           type: string
           minLength: 3
           maxLength: 200
+        documentId:
+          type: string
+          format: uuid
+          description: >
+            The documentId the deck's generation job was created with. It tells the server the
+            deck was generated from an uploaded document, whose note cannot be regenerated in v1.
+            The server does not look the document up, so an unknown, foreign or expired id gets
+            the same 422. Canonical form only: a lowercase, hyphenated version 4 UUID.
         language:
           type: string
         noteType:

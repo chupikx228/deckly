@@ -9,6 +9,7 @@ from starlette.exceptions import HTTPException
 
 from deckly.application.exceptions import RateLimitedError, UpstreamUnavailableError
 from deckly.domain.exceptions import (
+    DocumentRegenerationUnsupportedError,
     DomainError,
     JobAlreadyTerminalError,
     JobNotFoundError,
@@ -51,6 +52,12 @@ def build_client(error_factory: Callable[[], Exception], base_url: str = PROBLEM
         (JobNotFoundError(), HTTPStatus.NOT_FOUND, "JOB_NOT_FOUND", "job-not-found"),
         (JobAlreadyTerminalError(), HTTPStatus.CONFLICT, "JOB_ALREADY_TERMINAL", "job-already-terminal"),
         (TopicRejectedError(), HTTPStatus.UNPROCESSABLE_ENTITY, "TOPIC_REJECTED", "topic-rejected"),
+        (
+            DocumentRegenerationUnsupportedError(),
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            "DOCUMENT_REGENERATION_UNSUPPORTED",
+            "document-regeneration-unsupported",
+        ),
         (RateLimitedError(60), HTTPStatus.TOO_MANY_REQUESTS, "RATE_LIMITED", "rate-limited"),
         (
             UpstreamUnavailableError(30),
