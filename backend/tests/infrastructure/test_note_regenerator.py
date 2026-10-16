@@ -10,7 +10,7 @@ from deckly.domain.notes.basic import BasicFields
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.regeneration import RegenerationRequest, RejectionReason
-from deckly.domain.source import Source
+from deckly.domain.source import WebSource
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.card_generator.regeneration_prompt import (
     MAX_REJECTED_CARD_CHARACTERS,
@@ -28,11 +28,11 @@ pytestmark = pytest.mark.anyio
 TOPIC = "Road signs"
 MATERIAL = (
     SourceMaterial(
-        source=Source(title="Traffic regulations", url="https://example.com/rules", retrieved_at=T0),
+        source=WebSource(title="Traffic regulations", url="https://example.com/rules", retrieved_at=T0),
         text="A red triangle warns of a hazard ahead. A red circle prohibits.",
     ),
     SourceMaterial(
-        source=Source(title="Road sign catalogue", url="https://example.com/signs"),
+        source=WebSource(title="Road sign catalogue", url="https://example.com/signs"),
         text="The stop sign is a red octagon.",
     ),
 )

@@ -31,7 +31,7 @@ const succeededJob = {
         clientId: 'b1a2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
         noteType: NOTE_TYPE.BASIC,
         fields: { front: 'What does a red triangle mean?', back: 'A warning sign' },
-        sources: [{ title: 'Traffic regulations', url: 'https://example.com/signs' }],
+        sources: [{ kind: 'web', title: 'Traffic regulations', url: 'https://example.com/signs' }],
       },
     ],
   },

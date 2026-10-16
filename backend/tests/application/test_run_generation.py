@@ -7,7 +7,12 @@ from uuid import UUID
 
 import pytest
 
-from deckly.application.exceptions import UpstreamUnavailableError
+from deckly.application.exceptions import (
+    DocumentHasNoTextError,
+    EncryptedDocumentError,
+    UnreadableDocumentError,
+    UpstreamUnavailableError,
+)
 from deckly.application.ports import ImageQuery, JobTransition, NoteMedia
 from deckly.domain.exceptions import InvalidJobTransitionError, JobAlreadyTerminalError
 from deckly.domain.generation import GenerationRequest
@@ -190,6 +195,14 @@ FAILURES: dict[str, tuple[Callable[[], Exception], FailureCode]] = {
         lambda: JobAlreadyTerminalError("confused adapter"),
         FailureCode.GENERATION_FAILED,
     ),
+    "unreadable document": (lambda: UnreadableDocumentError("damaged"), FailureCode.DOCUMENT_UNREADABLE),
+    "encrypted document": (lambda: EncryptedDocumentError("locked"), FailureCode.DOCUMENT_ENCRYPTED),
+    "document without text": (lambda: DocumentHasNoTextError("scanned"), FailureCode.DOCUMENT_HAS_NO_TEXT),
+}
+DOCUMENT_FAILURES = {
+    UnreadableDocumentError("damaged"): FailureCode.DOCUMENT_UNREADABLE,
+    EncryptedDocumentError("locked"): FailureCode.DOCUMENT_ENCRYPTED,
+    DocumentHasNoTextError("scanned"): FailureCode.DOCUMENT_HAS_NO_TEXT,
 }
 
 
@@ -208,6 +221,22 @@ async def test_port_failure_fails_the_job_at_its_stage_without_raising_or_callin
     assert isinstance(job.state, Failed)
     assert (job.state.code, job.stage) == (code, stage)
     assert harness.providers.calls == calls_through(stage)
+
+
+@pytest.mark.parametrize(("error", "code"), DOCUMENT_FAILURES.items(), ids=lambda value: type(value).__name__)
+async def test_document_the_user_must_fix_is_an_expected_failure_logged_as_a_warning(
+    caplog: pytest.LogCaptureFixture, error: Exception, code: FailureCode
+) -> None:
+    harness = Harness()
+    job_id = await create(harness, WITH_IMAGES)
+    harness.providers.failures[JobStage.PARSING_SOURCES] = error
+
+    with caplog.at_level(logging.INFO, logger=PIPELINE_LOGGER):
+        await harness.run(job_id)
+
+    [record] = [record for record in caplog.records if record.getMessage() == "generation_failed"]
+    assert record.levelno == logging.WARNING
+    assert record.__dict__["failure_code"] == code
 
 
 async def test_unexpected_port_error_is_logged_with_its_traceback_and_job_id(

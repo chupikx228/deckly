@@ -145,7 +145,7 @@ export interface components {
         /** @enum {string} */
         JobStage: "planning" | "retrieving_sources" | "parsing_sources" | "generating_cards" | "fetching_media" | "finalizing";
         /** @enum {string} */
-        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "UPSTREAM_UNAVAILABLE" | "DOCUMENT_NOT_FOUND" | "DOCUMENT_TOO_LARGE" | "UNSUPPORTED_DOCUMENT_TYPE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
+        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "DOCUMENT_UNREADABLE" | "DOCUMENT_ENCRYPTED" | "DOCUMENT_HAS_NO_TEXT" | "UPSTREAM_UNAVAILABLE" | "DOCUMENT_NOT_FOUND" | "DOCUMENT_TOO_LARGE" | "UNSUPPORTED_DOCUMENT_TYPE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
         /**
          * @description The type detected from the file's content.
          * @enum {string}
@@ -218,7 +218,7 @@ export interface components {
             updatedAt: string;
             /** @description Present only when status is "succeeded". */
             result?: components["schemas"]["GenerationResult"] | null;
-            /** @description Present only when status is "failed". Its code is always one of PROVIDER_UNAVAILABLE (an upstream model or search provider failed), NO_VALID_CONTENT (every note was dropped during validation) or GENERATION_FAILED (anything else). */
+            /** @description Present only when status is "failed". Its code is always one of PROVIDER_UNAVAILABLE (an upstream model or search provider failed), NO_VALID_CONTENT (every note was dropped during validation), DOCUMENT_UNREADABLE (an uploaded document is damaged or over a safety limit), DOCUMENT_ENCRYPTED (an uploaded PDF needs a password), DOCUMENT_HAS_NO_TEXT (an uploaded document has no extractable text, such as a scan) or GENERATION_FAILED (anything else). */
             error?: components["schemas"]["Problem"] | null;
         };
         GenerationResult: {
@@ -283,12 +283,40 @@ export interface components {
              */
             licenseUrl: string;
         };
-        Source: {
+        /** @description Where a note's content comes from: a web page, or a page or slide of a document the client uploaded. Branch on kind; a client must ignore a source whose kind it does not know. */
+        Source: components["schemas"]["WebSource"] | components["schemas"]["DocumentSource"];
+        WebSource: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "web";
             title: string;
             /** Format: uri */
             url: string;
             /** Format: date-time */
             retrievedAt?: string;
+        };
+        DocumentSource: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "document";
+            /** @description The uploaded document's file name. */
+            title: string;
+            /**
+             * Format: uuid
+             * @description The documentId returned by POST /documents.
+             */
+            documentId: string;
+            /**
+             * @description page for a PDF, slide for a presentation.
+             * @enum {string}
+             */
+            unit: "page" | "slide";
+            /** @description The 1-based page or slide the material comes from, as the document's own viewer numbers it. */
+            number: number;
         };
         /** @description noteType image_occlusion is rejected with VALIDATION_FAILED, because the note is built on an image the request does not carry. */
         RegenerateNoteRequest: {

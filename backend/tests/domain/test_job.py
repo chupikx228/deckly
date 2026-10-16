@@ -178,6 +178,9 @@ def test_failure_vocabulary_is_the_contract_one() -> None:
         "PROVIDER_UNAVAILABLE",
         "NO_VALID_CONTENT",
         "GENERATION_FAILED",
+        "DOCUMENT_UNREADABLE",
+        "DOCUMENT_ENCRYPTED",
+        "DOCUMENT_HAS_NO_TEXT",
     }
 
 

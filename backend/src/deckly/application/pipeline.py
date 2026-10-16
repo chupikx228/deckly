@@ -8,8 +8,11 @@ from uuid import UUID
 
 from deckly.application.correlation import JOB_ID, correlated
 from deckly.application.exceptions import (
+    DocumentHasNoTextError,
+    EncryptedDocumentError,
     JobStoppedError,
     NoValidContentError,
+    UnreadableDocumentError,
     UnreadableJobRequestError,
     UpstreamUnavailableError,
 )
@@ -44,8 +47,19 @@ logger = logging.getLogger(__name__)
 FAILURE_CODES: Mapping[type[Exception], FailureCode] = {
     UpstreamUnavailableError: FailureCode.PROVIDER_UNAVAILABLE,
     NoValidContentError: FailureCode.NO_VALID_CONTENT,
+    UnreadableDocumentError: FailureCode.DOCUMENT_UNREADABLE,
+    EncryptedDocumentError: FailureCode.DOCUMENT_ENCRYPTED,
+    DocumentHasNoTextError: FailureCode.DOCUMENT_HAS_NO_TEXT,
 }
-EXPECTED_FAILURES = frozenset({FailureCode.PROVIDER_UNAVAILABLE, FailureCode.NO_VALID_CONTENT})
+EXPECTED_FAILURES = frozenset(
+    {
+        FailureCode.PROVIDER_UNAVAILABLE,
+        FailureCode.NO_VALID_CONTENT,
+        FailureCode.DOCUMENT_UNREADABLE,
+        FailureCode.DOCUMENT_ENCRYPTED,
+        FailureCode.DOCUMENT_HAS_NO_TEXT,
+    }
+)
 
 
 def failure_code_for(error: Exception) -> FailureCode:

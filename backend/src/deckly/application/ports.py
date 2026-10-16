@@ -13,7 +13,7 @@ from deckly.domain.job import FailureCode, GenerationJob, JobStage, JobStatus
 from deckly.domain.media import Media
 from deckly.domain.notes.note import Note
 from deckly.domain.regeneration import RegenerationRequest
-from deckly.domain.source import Source, SourceQuery
+from deckly.domain.source import Source, SourceQuery, WebSource
 
 type JobTransition = Callable[[GenerationJob], GenerationJob]
 
@@ -58,7 +58,7 @@ class Quota:
 
 @dataclass(frozen=True, slots=True)
 class RetrievedPage:
-    source: Source
+    source: WebSource
     content: str
 
 
@@ -225,7 +225,13 @@ class DocumentInspector(Protocol):
 class DocumentStorage(Protocol):
     async def put(self, key: str, content: bytes, content_type: str) -> None: ...
 
+    async def get(self, key: str, max_bytes: int) -> bytes: ...
+
     async def delete(self, key: str) -> None: ...
+
+
+class DocumentParser(Protocol):
+    async def parse(self, document: Document, content: bytes) -> tuple[SourceMaterial, ...]: ...
 
 
 class DocumentStore(Protocol):

@@ -99,7 +99,9 @@ def test_every_reason_regenerates_a_note_matching_the_spec(reason: str) -> None:
     body = assert_regenerated(post(build_client(harness), payload))
 
     assert body["clientId"] == str(harness.providers.note.client_id)
-    assert body["sources"] == [{"title": "Traffic regulations", "url": "https://example.com/rules"}]
+    assert body["sources"] == [
+        {"kind": "web", "title": "Traffic regulations", "url": "https://example.com/rules"}
+    ]
     [(_, request, _)] = harness.providers.regenerated
     assert str(request.reason) == reason
 

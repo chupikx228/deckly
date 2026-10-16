@@ -94,6 +94,15 @@ FAILURE_KINDS: Mapping[FailureCode, ProblemKind] = {
     FailureCode.GENERATION_FAILED: ProblemKind(
         HTTPStatus.OK, ErrorCode.GENERATION_FAILED, "Generation failed"
     ),
+    FailureCode.DOCUMENT_UNREADABLE: ProblemKind(
+        HTTPStatus.OK, ErrorCode.DOCUMENT_UNREADABLE, "Document unreadable"
+    ),
+    FailureCode.DOCUMENT_ENCRYPTED: ProblemKind(
+        HTTPStatus.OK, ErrorCode.DOCUMENT_ENCRYPTED, "Document encrypted"
+    ),
+    FailureCode.DOCUMENT_HAS_NO_TEXT: ProblemKind(
+        HTTPStatus.OK, ErrorCode.DOCUMENT_HAS_NO_TEXT, "Document has no text"
+    ),
 }
 
 

@@ -22,7 +22,7 @@ from deckly.domain.notes.cloze import ClozeFields, cloze_numbers
 from deckly.domain.notes.multiple_choice import MultipleChoiceFields
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE
-from deckly.domain.source import Source
+from deckly.domain.source import WebSource
 from deckly.domain.text import is_blank, utf16_length
 from deckly.infrastructure.card_generator.generator import MAX_IMAGE_QUERY_CHARACTERS, LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
@@ -70,11 +70,11 @@ GENERATOR_LOGGER = "deckly.infrastructure.card_generator.generator"
 HANDLED_TYPES = tuple(NOTE_TYPE_HANDLERS)
 MATERIAL = (
     SourceMaterial(
-        source=Source(title="Traffic regulations", url="https://example.com/rules", retrieved_at=T0),
+        source=WebSource(title="Traffic regulations", url="https://example.com/rules", retrieved_at=T0),
         text="A red triangle warns of a hazard ahead. A red circle prohibits.",
     ),
     SourceMaterial(
-        source=Source(title="Road sign catalogue", url="https://example.com/signs"),
+        source=WebSource(title="Road sign catalogue", url="https://example.com/signs"),
         text="The stop sign is a red octagon.",
     ),
 )
@@ -645,7 +645,7 @@ async def test_field_made_only_of_unstorable_characters_is_blank_and_dropped() -
 async def test_material_source_title_with_a_nul_is_cleaned_before_it_is_cited() -> None:
     material = (
         SourceMaterial(
-            source=Source(title="Traffic\x00 regulations", url="https://example.com/rules"), text="facts"
+            source=WebSource(title="Traffic\x00 regulations", url="https://example.com/rules"), text="facts"
         ),
     )
     llm = FakeLlmClient(model_reply(document(basic(1))))
@@ -659,7 +659,7 @@ async def test_material_source_title_with_a_nul_is_cleaned_before_it_is_cited() 
 async def test_lone_surrogates_and_nul_in_the_source_material_never_reach_the_provider() -> None:
     material = (
         SourceMaterial(
-            source=Source(title="Traffic\ud800 regulations", url="https://example.com/rules"),
+            source=WebSource(title="Traffic\ud800 regulations", url="https://example.com/rules"),
             text="A red triangle\udfff warns\x00 of a hazard.",
         ),
     )
@@ -1011,7 +1011,10 @@ async def test_prompt_offers_only_the_requested_types_and_numbers_the_material_w
     assert offered == {NoteType.BASIC, NoteType.CLOZE}
     assert all(f'<source number="{number}">' in prompt.user for number in (1, 2))
     assert all(entry.text in prompt.user for entry in MATERIAL)
-    assert all(entry.source.url not in prompt.system + prompt.user for entry in MATERIAL)
+    assert all(
+        isinstance(entry.source, WebSource) and entry.source.url not in prompt.system + prompt.user
+        for entry in MATERIAL
+    )
     assert "json" in prompt.system.lower()
 
 

@@ -6,8 +6,13 @@ import httpx2
 import pytest
 
 from deckly.application.exceptions import UpstreamUnavailableError
+from deckly.domain.exceptions import DocumentNotFoundError
 from deckly.infrastructure.resilience import CircuitOpenError, ResilientCaller, RetryPolicy
-from deckly.infrastructure.storage.client import StorageRejectedError, StorageUnavailableError
+from deckly.infrastructure.storage.client import (
+    StorageObjectMissingError,
+    StorageRejectedError,
+    StorageUnavailableError,
+)
 from deckly.infrastructure.storage.s3_client import S3StorageClient
 from deckly.infrastructure.storage.storage import ResilientDocumentStorage
 from tests.documents import FAKE_STORAGE_CREDENTIAL, STORAGE_ENDPOINT, pdf_bytes
@@ -126,7 +131,9 @@ def resilient(handler: Handler, time: ManualTime, failure_threshold: int = 5) ->
     def caller() -> ResilientCaller:
         return ResilientCaller(POLICY, time.breaker(failure_threshold), time.runtime(), probe=fresh_probe())
 
-    return ResilientDocumentStorage(client=client(handler), upload_caller=caller(), delete_caller=caller())
+    return ResilientDocumentStorage(
+        client=client(handler), upload_caller=caller(), delete_caller=caller(), download_caller=caller()
+    )
 
 
 async def test_transient_failure_is_retried_once_then_succeeds() -> None:
@@ -167,3 +174,88 @@ async def test_repeated_rejections_open_the_circuit_so_later_calls_fail_fast() -
         await storage.put(KEY, b"x", "application/pdf")
 
     assert len(recorder.requests) == 2
+
+
+class Serving:
+    def __init__(self, content: bytes, *failures: int) -> None:
+        self.content = content
+        self.failures = list(failures)
+        self.requests: list[httpx2.Request] = []
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        self.requests.append(request)
+        if self.failures:
+            return httpx2.Response(self.failures.pop(0), text="<Error><Code>Secret detail</Code></Error>")
+        return httpx2.Response(HTTPStatus.OK, content=self.content)
+
+
+async def test_get_reads_the_object_with_a_signed_request_to_the_bucket_path() -> None:
+    serving = Serving(pdf_bytes())
+
+    async with client(serving) as storage:
+        content = await storage.get_object(KEY, max_bytes=len(pdf_bytes()))
+
+    assert content == pdf_bytes()
+    [request] = serving.requests
+    assert request.method == "GET"
+    assert request.url.path == OBJECT_PATH
+    assert request.headers["x-amz-content-sha256"] == hashlib.sha256(b"").hexdigest()
+    assert request.headers["authorization"].startswith(
+        "AWS4-HMAC-SHA256 Credential=fake-access-key-id/20260814/auto/s3/aws4_request, "
+        "SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature="
+    )
+
+
+async def test_get_of_an_object_larger_than_the_cap_is_rejected() -> None:
+    async with client(Serving(pdf_bytes())) as storage:
+        with pytest.raises(StorageRejectedError, match="more than"):
+            await storage.get_object(KEY, max_bytes=len(pdf_bytes()) - 1)
+
+
+async def test_get_of_a_missing_object_is_missing_not_rejected() -> None:
+    async with client(Serving(b"", HTTPStatus.NOT_FOUND)) as storage:
+        with pytest.raises(StorageObjectMissingError):
+            await storage.get_object(KEY, max_bytes=1024)
+
+
+async def test_rejected_get_never_echoes_the_provider_body() -> None:
+    async with client(Serving(b"", HTTPStatus.FORBIDDEN)) as storage:
+        with pytest.raises(StorageRejectedError) as raised:
+            await storage.get_object(KEY, max_bytes=1024)
+
+    assert str(raised.value) == f"Object storage answered {HTTPStatus.FORBIDDEN}"
+
+
+async def test_get_from_unreachable_storage_is_an_outage() -> None:
+    async with client(unreachable) as storage:
+        with pytest.raises(StorageUnavailableError):
+            await storage.get_object(KEY, max_bytes=1024)
+
+
+async def test_transient_get_failure_is_retried_then_returns_the_object() -> None:
+    serving = Serving(pdf_bytes(), HTTPStatus.SERVICE_UNAVAILABLE)
+
+    content = await resilient(serving, ManualTime()).get(KEY, max_bytes=len(pdf_bytes()))
+
+    assert content == pdf_bytes()
+    assert len(serving.requests) == 2
+
+
+async def test_object_gone_from_storage_is_a_missing_document_that_never_opens_the_circuit() -> None:
+    serving = Serving(b"", *([HTTPStatus.NOT_FOUND] * 3))
+    storage = resilient(serving, ManualTime(), failure_threshold=2)
+
+    for _ in range(3):
+        with pytest.raises(DocumentNotFoundError):
+            await storage.get(KEY, max_bytes=1024)
+
+    assert len(serving.requests) == 3
+
+
+async def test_oversized_object_is_upstream_unavailable_without_a_retry() -> None:
+    serving = Serving(pdf_bytes())
+
+    with pytest.raises(UpstreamUnavailableError):
+        await resilient(serving, ManualTime()).get(KEY, max_bytes=8)
+
+    assert len(serving.requests) == 1

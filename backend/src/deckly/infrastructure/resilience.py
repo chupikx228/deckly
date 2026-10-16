@@ -66,6 +66,7 @@ class ProviderOperation(StrEnum):
     REGENERATION_NOTE_MODERATION = "regeneration_note_moderation"
     DOCUMENT_UPLOAD = "document_upload"
     DOCUMENT_DELETE = "document_delete"
+    DOCUMENT_DOWNLOAD = "document_download"
 
 
 class AttemptOutcome(StrEnum):

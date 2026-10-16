@@ -268,7 +268,9 @@ def build_storage_client(providers: ProviderSettings) -> S3StorageClient:
             access_key_id=providers.storage_access_key_id,
             secret_access_key=providers.storage_secret_access_key.get_secret_value(),
             timeout_seconds=max(
-                providers.storage_upload_timeout_seconds, providers.storage_delete_timeout_seconds
+                providers.storage_upload_timeout_seconds,
+                providers.storage_delete_timeout_seconds,
+                providers.storage_download_timeout_seconds,
             ),
         )
     )
@@ -317,6 +319,15 @@ def build_document_storage(
                 deadline_seconds=providers.storage_delete_deadline_seconds,
             ),
             observability.probe(ProviderOperation.DOCUMENT_DELETE),
+        ),
+        download_caller=storage_caller(
+            providers,
+            storage_policy(
+                providers,
+                timeout_seconds=providers.storage_download_timeout_seconds,
+                deadline_seconds=providers.storage_download_deadline_seconds,
+            ),
+            observability.probe(ProviderOperation.DOCUMENT_DOWNLOAD),
         ),
     )
 

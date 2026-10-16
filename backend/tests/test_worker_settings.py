@@ -147,6 +147,8 @@ def provider_settings(provider: ModelProvider) -> ProviderSettings:
         storage_upload_deadline_seconds=10,
         storage_delete_timeout_seconds=2,
         storage_delete_deadline_seconds=4,
+        storage_download_timeout_seconds=3,
+        storage_download_deadline_seconds=6,
         storage_max_attempts=2,
         storage_retry_base_delay_seconds=1,
         storage_retry_max_delay_seconds=2,

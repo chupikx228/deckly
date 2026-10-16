@@ -7,7 +7,7 @@ from uuid import UUID
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.ports import RetrievedPage
 from deckly.domain.exceptions import InvalidSourceError
-from deckly.domain.source import Source, SourceQuery
+from deckly.domain.source import SourceQuery, WebSource
 from deckly.domain.text import strip_unstorable
 from deckly.infrastructure.resilience import MIN_RETRY_AFTER_SECONDS, CallSize, ResilientCaller
 from deckly.infrastructure.search.cleaning import clean_title, visible_words
@@ -33,7 +33,7 @@ def language_hint(tag: str) -> str | None:
 
 def page_from(hit: SearchHit, retrieved_at: datetime) -> RetrievedPage | None:
     try:
-        source = Source(title=clean_title(hit.title), url=hit.url, retrieved_at=retrieved_at)
+        source = WebSource(title=clean_title(hit.title), url=hit.url, retrieved_at=retrieved_at)
     except InvalidSourceError:
         return None
     return RetrievedPage(source=source, content=hit.content)

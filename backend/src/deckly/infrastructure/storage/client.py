@@ -19,6 +19,8 @@ class StorageClient(Protocol):
 
     async def delete_object(self, key: str) -> None: ...
 
+    async def get_object(self, key: str, max_bytes: int) -> bytes: ...
+
     async def aclose(self) -> None: ...
 
 
@@ -31,4 +33,8 @@ class StorageUnavailableError(StorageError, TransientError):
 
 
 class StorageRejectedError(StorageError, PersistentError):
+    pass
+
+
+class StorageObjectMissingError(StorageError):
     pass

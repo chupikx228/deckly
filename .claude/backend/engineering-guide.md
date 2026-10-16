@@ -294,6 +294,15 @@ store that speaks SigV4, chosen by `DECKLY_PROVIDER_STORAGE_*`) and its metadata
 The object key is `documents/{documentId}`, never derived from the filename. The bucket must be
 private: documents are read only through the API, by the client that uploaded them.
 
+### Reading an upload
+
+A generation reads a document by fetching its object (`DocumentStorage.get`, capped at the size
+recorded at upload) and handing the bytes to the `DocumentParser` port, which returns ordinary
+`SourceMaterial` cited by `DocumentSource` (document id, `page` or `slide`, 1-based number). Every
+size, ratio, page and time limit on that path lives in the parser, not in upload-time sniffing:
+sniffing decides the type, the parser decides whether the content can be read safely. Wiring it
+into the pipeline is DEC-76.
+
 ## Error handling
 
 - One error model: RFC 9457 `application/problem+json` with a stable machine-readable `code`.
