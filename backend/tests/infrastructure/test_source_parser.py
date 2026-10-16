@@ -7,7 +7,7 @@ import pytest
 from deckly.application.correlation import JOB_ID as JOB_ID_FIELD
 from deckly.application.correlation import correlated
 from deckly.application.ports import RetrievedPage, SourceMaterial
-from deckly.domain.source import Source
+from deckly.domain.source import WebSource
 from deckly.infrastructure.search.cleaning import MAX_TITLE_CHARACTERS
 from deckly.infrastructure.search.parser import MIN_VISIBLE_CHARACTERS, CleaningSourceParser
 from tests.domain.builders import JOB_ID, T0
@@ -17,11 +17,11 @@ from tests.logs import captured_json_logs
 pytestmark = pytest.mark.anyio
 
 MAX_CHARACTERS = 200
-SOURCE = Source(title="Road signs", url="https://example.com/signs", retrieved_at=T0)
+SOURCE = WebSource(title="Road signs", url="https://example.com/signs", retrieved_at=T0)
 TEXT = "A red triangle warns of danger ahead. A blue circle gives a mandatory instruction."
 PAGE = RetrievedPage(source=SOURCE, content=TEXT)
 OTHER_PAGE = RetrievedPage(
-    source=Source(title="Signs", url="https://example.org/signs", retrieved_at=T0),
+    source=WebSource(title="Signs", url="https://example.org/signs", retrieved_at=T0),
     content="An octagon means stop. A diamond marks a priority road for the driver.",
 )
 SURROGATE_CATEGORY = "Cs"
@@ -196,6 +196,7 @@ async def test_every_material_entry_satisfies_the_prompt_and_storage_invariants(
             assert "</source>" not in value.lower()
             assert all(unicodedata.category(character) != SURROGATE_CATEGORY for character in value)
         assert "\n" not in entry.source.title
+        assert isinstance(entry.source, WebSource)
         assert entry.source.retrieved_at == T0
 
 

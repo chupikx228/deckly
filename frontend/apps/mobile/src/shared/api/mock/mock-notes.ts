@@ -1,11 +1,17 @@
-import { NOTE_TYPE, type GeneratedNote, type GenerationRequest } from '@deckly/api-contract';
+import {
+  NOTE_TYPE,
+  type GeneratedNote,
+  type GenerationRequest,
+  type Source,
+} from '@deckly/api-contract';
 
 import { createId } from '@/shared/lib';
 
 const CLOZE_YEARS = ['1969', '1789', '1945', '1917', '1492'];
 
-const mockSources = (topic: string) => [
+const mockSources = (topic: string): Source[] => [
   {
+    kind: 'web',
     title: `${topic} — reference`,
     url: 'https://example.com/reference',
     retrievedAt: new Date().toISOString(),

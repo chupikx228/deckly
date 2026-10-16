@@ -1,10 +1,10 @@
 from dataclasses import replace
 from datetime import UTC
 from functools import cache
-from typing import Self
+from typing import Annotated, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Discriminator, Tag, TypeAdapter
 
 from deckly.domain.deck import Deck, GenerationResult
 from deckly.domain.exceptions import DomainError
@@ -13,7 +13,23 @@ from deckly.domain.notes.fields import NoteFields
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import fields_type_for
-from deckly.domain.source import Source
+from deckly.domain.source import DocumentSource, Source, WebSource
+
+WEB_SOURCE_TAG = "web"
+DOCUMENT_SOURCE_TAG = "document"
+DOCUMENT_SOURCE_KEY = "document_id"
+
+
+def stored_source_tag(value: object) -> str:
+    if isinstance(value, DocumentSource) or (isinstance(value, dict) and DOCUMENT_SOURCE_KEY in value):
+        return DOCUMENT_SOURCE_TAG
+    return WEB_SOURCE_TAG
+
+
+type StoredSource = Annotated[
+    Annotated[WebSource, Tag(WEB_SOURCE_TAG)] | Annotated[DocumentSource, Tag(DOCUMENT_SOURCE_TAG)],
+    Discriminator(stored_source_tag),
+]
 
 
 @cache
@@ -22,9 +38,9 @@ def fields_adapter(note_type: NoteType) -> TypeAdapter[NoteFields]:
 
 
 def retrieved_in_utc(source: Source) -> Source:
-    if source.retrieved_at is None:
-        return source
-    return replace(source, retrieved_at=source.retrieved_at.astimezone(UTC))
+    if isinstance(source, WebSource) and source.retrieved_at is not None:
+        return replace(source, retrieved_at=source.retrieved_at.astimezone(UTC))
+    return source
 
 
 class StoredNote(BaseModel):
@@ -33,7 +49,7 @@ class StoredNote(BaseModel):
     client_id: UUID
     note_type: NoteType
     fields: dict[str, object]
-    sources: tuple[Source, ...]
+    sources: tuple[StoredSource, ...]
     media: tuple[Media, ...]
     tags: tuple[str, ...]
 

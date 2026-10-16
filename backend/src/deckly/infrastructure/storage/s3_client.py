@@ -12,6 +12,7 @@ from deckly.infrastructure.resilience import RETRY_AFTER_HEADER, is_transient_st
 from deckly.infrastructure.storage.client import (
     StorageEndpoint,
     StorageError,
+    StorageObjectMissingError,
     StorageRejectedError,
     StorageUnavailableError,
 )
@@ -39,6 +40,16 @@ def status_error(response: httpx2.Response) -> StorageError:
         retry_after = parse_retry_after(response.headers.get(RETRY_AFTER_HEADER))
         return StorageUnavailableError(message, retry_after_seconds=retry_after)
     return StorageRejectedError(message)
+
+
+async def capped_body(response: httpx2.Response, max_bytes: int) -> bytes:
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        body.extend(chunk)
+        if len(body) > max_bytes:
+            message = f"{PROVIDER} answered with more than {max_bytes} bytes"
+            raise StorageRejectedError(message)
+    return bytes(body)
 
 
 class S3StorageClient:
@@ -71,6 +82,26 @@ class S3StorageClient:
         response = await self._send(self._canonical("DELETE", key, {}, EMPTY_PAYLOAD_SHA256), b"")
         if not response.is_success and response.status_code != HTTPStatus.NOT_FOUND:
             raise status_error(response)
+
+    async def get_object(self, key: str, max_bytes: int) -> bytes:
+        request = self._canonical("GET", key, {}, EMPTY_PAYLOAD_SHA256)
+        signed = signature_headers(request, self._credentials, self._clock())
+        try:
+            async with self._client.stream(
+                request.method, encode_path(request.path), headers={**request.headers, **signed}
+            ) as response:
+                if response.status_code == HTTPStatus.NOT_FOUND:
+                    message = f"{PROVIDER} has no object at the requested key"
+                    raise StorageObjectMissingError(message)
+                if not response.is_success:
+                    raise status_error(response)
+                return await capped_body(response, max_bytes)
+        except httpx2.TransportError as error:
+            message = f"{PROVIDER} could not be reached: {type(error).__name__}"
+            raise StorageUnavailableError(message) from error
+        except httpx2.HTTPError as error:
+            message = f"{PROVIDER} request failed: {type(error).__name__}"
+            raise StorageRejectedError(message) from error
 
     async def aclose(self) -> None:
         await self._client.aclose()

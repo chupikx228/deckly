@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deckly.application.pipeline import RunGeneration
 from deckly.domain.job import Failed, FailureCode, GenerationJob, Succeeded
 from deckly.domain.notes.note_type import NoteType
-from deckly.domain.source import Source
+from deckly.domain.source import WebSource
 from deckly.domain.text import is_web_url
 from deckly.infrastructure.card_generator.generator import LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
@@ -94,12 +94,12 @@ async def test_stored_notes_keep_well_formed_sources_that_trace_back_to_the_fetc
     assert isinstance(stored.state, Succeeded)
     [stored_note] = stored.state.result.notes
     assert stored_note.sources == (
-        Source(
+        WebSource(
             title="Знаки приоритета — Википедия",
             url="https://ru.wikipedia.org/wiki/Знаки",
             retrieved_at=RETRIEVED_AT.astimezone(UTC),
         ),
-        Source(
+        WebSource(
             title="Stop sign",
             url="https://example.com/stop?lang=en#top",
             retrieved_at=RETRIEVED_AT.astimezone(UTC),

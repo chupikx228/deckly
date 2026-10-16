@@ -114,6 +114,11 @@ class InMemoryDocumentStorage:
             raise self.put_failure
         self.objects[key] = (content, content_type)
 
+    async def get(self, key: str, max_bytes: int) -> bytes:
+        content, _ = self.objects[key]
+        assert len(content) <= max_bytes
+        return content
+
     async def delete(self, key: str) -> None:
         failure = self.undeletable.get(key)
         if failure is not None:

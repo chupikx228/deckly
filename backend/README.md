@@ -598,6 +598,8 @@ reaches the classifier as a JSON document, so it cannot break out of its delimit
   `NOTES_PER_CONTENT_CHECK` (50), each chunk with the deck and its notes numbered from 1, and
   every chunk of a job runs at once: at most four calls at the 200-card maximum, one call at 50
   cards or fewer. A note is kept only on an explicit `"allow"`; a missing or unreadable verdict drops it.
+  The classifier sees each note's type, fields and tags, never its sources, so notes written from
+  an uploaded document are screened exactly like notes written from web pages.
   A deck title that is not allowed by every chunk is replaced with the topic. A refused chunk drops
   its own notes and the deck title. If any chunk fails, the whole filter fails like a single call
   would (`provider_unavailable`), and the other chunks are cancelled, so no partial deck ships.
@@ -868,6 +870,97 @@ came back the next day, and no longer, because a document is the user's own cont
 is not its system of record. Used documents are never swept; marking them is DEC-76's job (see the
 engineering guide).
 
+### Parsing
+
+`infrastructure/documents/parser.py` (`DocumentTextParser`) implements the `DocumentParser` port:
+it turns a stored document's bytes into `SourceMaterial`, one entry per page or slide that has
+text, each cited by a `DocumentSource` (`documentId`, `unit` `page` or `slide`, 1-based `number`,
+the file name as `title`). The entries have exactly the shape web search produces, so the card
+generator and the content filter need no changes, and they go through the same cleaning
+(`search/cleaning.py`): control and invisible characters are stripped, `<source>`-shaped markers in
+the text and in the file name are defused, a unit more than a tenth binary garbage is skipped (a
+font without a Unicode map extracts as garbage). Units without text are skipped without shifting
+the numbering. Text is cut at a word boundary once `max_characters` is used, and later units are
+never read; a document with fewer than 50 visible characters in total fails with
+`DOCUMENT_HAS_NO_TEXT`. Extraction runs in a thread, bounded by a wall-clock deadline checked
+between units and, for PDFs, before every content-stream operator. It is not connected to the
+pipeline yet: DEC-76 does that, sets `max_characters` and the deadline from settings and removes
+the two `vulture` entries that keep the unwired port and adapter from being reported as unused.
+
+`ResilientDocumentStorage.get` (`GET` on the object store, its own `document_download` breaker and policy,
+`DECKLY_PROVIDER_STORAGE_DOWNLOAD_*`) streams the object with a cap of the size recorded at upload,
+so an object that grew in the store is refused rather than read. An object that is gone is
+`DocumentNotFoundError` and does not count toward the breaker.
+
+**PDF: `pypdf`** (new dependency, 6.20.1, BSD-3, pure Python, no dependencies of its own, typed,
+released every one to three weeks). Compared with:
+
+- **pdfplumber**: better layout and table extraction from character positions, which flashcard
+  input does not need, at the cost of four dependencies (pdfminer.six pinned to one release,
+  Pillow, pypdfium2, cryptography), three of them native, and pdfminer's speed.
+- **pypdfium2** (Chromium's PDFium): the fastest and the best text order, but a crash in its C++
+  takes the worker process and every job in it down with it, and its memory cannot be bounded from
+  Python.
+- **PyMuPDF**: AGPL, ruled out.
+
+pypdf follows content-stream order, which for most producers is column by column; tables come out
+row by row without structure. A malformed file raises instead of crashing the process, and pypdf
+ships its own limits against hostile files, which are tightened here (`documents/pdf.py`):
+
+| Limit                                                                     | Value  | Why                                                                                                                                                                      |
+| ------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Decoded size of one stream (Flate, LZW, RunLength, JBIG2, Brotli, arrays) | 16 MiB | Real page content is under 1 MB; pypdf's default is 75 MB                                                                                                                |
+| Decoded page content, all pages together                                  | 64 MiB | pypdf keeps decoded streams; 500 pages of 16 MiB would be 8 GB                                                                                                           |
+| Pages in the page tree                                                    | 5,000  | pypdf flattens the whole tree before the first page: 99,000 empty pages in 14 MiB took 23 s and 326 MiB before this cap, 4 s and 47 MiB after (both under `tracemalloc`) |
+| Form XObject invocations per page                                         | 500    | pypdf re-parses a form at every `Do`                                                                                                                                     |
+| Pages read                                                                | 500    | Past the character budget of any job                                                                                                                                     |
+
+A tiny PDF that replays one heavy form on one page ran for 37 s in testing even with these limits,
+so the deadline is also checked from pypdf's per-operator callback: the run stops within one
+form's work of the deadline instead of at the end of the page. pypdf's own warnings, one per
+damaged object, are not logged (an adversarial file could flood the log); the `document_parsed`
+line records the outcome per unit.
+
+Encryption: a PDF whose user password is empty (it only restricts editing or printing) is opened
+and read. One that needs a password is `DOCUMENT_ENCRYPTED`. AES decryption needs `cryptography`,
+which is not a dependency, so an AES-encrypted PDF is `DOCUMENT_ENCRYPTED` even when it would open
+without a password; adding it is the fix if failure metrics show users hitting this. Upload-time
+sniffing does not detect encrypted PDFs, so this is where they are caught.
+
+**PPTX: the standard library, not python-pptx.** python-pptx 1.0.2 (August 2024) reads every part
+of the archive into memory when it opens a file (`pptx/opc/serialized.py`: `{name: z.read(name)
+for name in z.namelist()}`), so a zip bomb exhausts memory before any check runs, and a normal
+deck has all its images inflated for nothing. It would also add Pillow, XlsxWriter and lxml.
+`documents/pptx.py` reads only the parts it needs, with `zipfile` and a streaming `pyexpat`
+parser: slide order from `p:sldIdLst` in `ppt/presentation.xml` through its relationships, text
+from `a:t` with a line per `a:p` and `a:br`, speaker notes from the notes body placeholder
+attributed to their slide. Slide numbers count hidden slides, as PowerPoint does. Slide number,
+date, footer and header placeholders, field text (`a:fld`) and `mc:Fallback` copies are left out;
+tables are kept. Transitional and Strict OOXML namespaces are both read. SmartArt and chart text
+are not extracted (python-pptx does not extract them either). Relationships with an external
+target, or one that leaves the archive, are ignored, and a slide that cannot be resolved makes the
+document unreadable.
+
+Archive limits (`documents/archive.py`), every one a `DOCUMENT_UNREADABLE`:
+
+| Limit                                  | Value  | Why                                                                                                                                                                                 |
+| -------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Entries                                | 10,000 | A 300-slide deck has about 1,500. Counted from the central-directory signatures before `zipfile` indexes the archive: 200,000 empty entries in 16 MiB cost 109 MiB and 5 s to index |
+| Size of one part read                  | 8 MiB  | Slide XML is 10–200 KB; an extreme 1,000-shape slide is about 2 MB                                                                                                                  |
+| Size of all parts read                 | 64 MiB | Also bounds one large slide listed again and again                                                                                                                                  |
+| Inflation ratio of a part over 100 KiB | 100:1  | Apache POI's `ZipSecureFile` defaults (0.01 minimum inflate ratio, 100 KiB grace); XML compresses 5–20:1                                                                            |
+
+Media and embedded files are never inflated. Every part is read with `read(cap + 1)`; CPython also
+stops at the size the directory declares and checks the CRC, and rejects overlapping entries, so a
+header that understates a part's size can only cut it short. XML that declares a DOCTYPE or an
+entity is refused outright (OOXML never has one), which rules out entity expansion on top of
+expat's own amplification limits.
+
+The adversarial fixtures are built in code (`tests/document_files.py`): a 256 MiB honest zip bomb
+in under 1 MiB, a part that lies about its size, parts that together pass the archive limit, a
+slide listed 500 times, a 256 MiB Flate stream, a page tree past its limit and a one-page form
+replay. The bomb tests also assert peak memory with `tracemalloc`.
+
 ### Object storage client
 
 `infrastructure/storage/` talks to the store over raw `httpx2` with its own AWS Signature V4 signer
@@ -875,7 +968,7 @@ engineering guide).
 Cloudflare R2, AWS S3 and S3Proxy all accept. Switching provider is configuration only:
 `DECKLY_PROVIDER_STORAGE_ENDPOINT_URL` (`https://<account>.r2.cloudflarestorage.com` for R2,
 `https://s3.<region>.amazonaws.com` for AWS), `DECKLY_PROVIDER_STORAGE_REGION` (`auto` for R2), the
-bucket and the key pair. Only `PUT` and `DELETE` of single objects are used; the payload is signed
+bucket and the key pair. Only `PUT`, `GET` and `DELETE` of single objects are used; the payload is signed
 with its SHA-256, so the store rejects a body altered in transit. The signer is tested against the
 four signatures AWS publishes for its SigV4 examples, and the integration suite runs against
 S3Proxy with signature checking on, including a wrong-secret case that must be refused.

@@ -10,6 +10,18 @@ class NoValidContentError(ApplicationError):
     pass
 
 
+class UnreadableDocumentError(ApplicationError):
+    pass
+
+
+class EncryptedDocumentError(UnreadableDocumentError):
+    pass
+
+
+class DocumentHasNoTextError(ApplicationError):
+    pass
+
+
 class JobStoppedError(ApplicationError):
     pass
 

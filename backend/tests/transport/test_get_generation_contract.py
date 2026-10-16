@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import timedelta
 from http import HTTPStatus
 from itertools import accumulate
@@ -19,6 +20,7 @@ from deckly.transport.generations import CLIENT_ID_HEADER, POLL_RETRY_AFTER_SECO
 from deckly.transport.problem import PROBLEM_JSON_MEDIA_TYPE
 from tests.domain.builders import (
     AUDIO,
+    DOCUMENT_SOURCE,
     FIELDS_BY_TYPE,
     FULL_RESULT,
     IMAGE_ID,
@@ -26,6 +28,8 @@ from tests.domain.builders import (
     MOSCOW,
     T0,
     at,
+    basic_note,
+    result_with,
 )
 from tests.fakes import Harness
 from tests.transport.openapi import spec_errors
@@ -261,10 +265,56 @@ def test_optional_media_and_source_fields_are_omitted_rather_than_null() -> None
         },
     ]
     assert note["sources"] == [
-        {"title": "Traffic code", "url": "https://example.com/code", "retrievedAt": "2026-08-14T10:30:20Z"},
-        {"title": "Traffic regulations", "url": "https://example.com/rules"},
+        {
+            "kind": "web",
+            "title": "Traffic code",
+            "url": "https://example.com/code",
+            "retrievedAt": "2026-08-14T10:30:20Z",
+        },
+        {"kind": "web", "title": "Traffic regulations", "url": "https://example.com/rules"},
     ]
     assert note["tags"] == ["signs"]
+
+
+def test_note_citing_a_document_carries_its_slide_and_validates_against_the_spec() -> None:
+    note = replace(basic_note(1), sources=(DOCUMENT_SOURCE, *basic_note(1).sources))
+
+    result = assert_polled(poll_stored(succeeded(result_with(note))))["result"]
+
+    assert isinstance(result, dict)
+    [body] = result["notes"]
+    assert spec_errors("GeneratedNote", body) == []
+    assert body["sources"] == [
+        {
+            "kind": "document",
+            "title": "road-signs.pptx",
+            "documentId": "00000000-0000-4000-8000-0000000000d1",
+            "unit": "slide",
+            "number": 3,
+        },
+        {"kind": "web", "title": "Traffic regulations", "url": "https://example.com/rules"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"kind": "document", "title": "deck.pptx", "documentId": "00000000-0000-4000-8000-0000000000d1"},
+        {"kind": "document", "title": "deck.pptx", "url": "https://example.com", "unit": "page", "number": 1},
+        {"kind": "web", "title": "deck.pptx", "documentId": "00000000-0000-4000-8000-0000000000d1"},
+        {"title": "Traffic regulations", "url": "https://example.com/rules"},
+        {
+            "kind": "document",
+            "title": "d",
+            "documentId": "00000000-0000-4000-8000-0000000000d1",
+            "unit": "page",
+            "number": 0,
+        },
+    ],
+    ids=["no location", "url instead of a document", "web without a url", "no kind", "page zero"],
+)
+def test_spec_rejects_sources_that_mix_or_miss_their_kind_shape(source: dict[str, object]) -> None:
+    assert spec_errors("Source", source) != []
 
 
 def test_deck_without_a_description_omits_it_and_keeps_empty_collections() -> None:

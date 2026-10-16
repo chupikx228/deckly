@@ -6,7 +6,7 @@ from deckly.application.ports import SourceMaterial
 from deckly.config import load_settings
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.notes.note_type import NoteType
-from deckly.domain.source import Source
+from deckly.domain.source import WebSource
 from deckly.infrastructure.card_generator.generator import LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.worker.settings import build_llm_client
@@ -16,7 +16,7 @@ pytestmark = [pytest.mark.live, pytest.mark.anyio]
 
 MATERIAL = (
     SourceMaterial(
-        source=Source(title="Road sign basics", url="https://example.com/road-sign-basics"),
+        source=WebSource(title="Road sign basics", url="https://example.com/road-sign-basics"),
         text=(
             "Warning signs are triangles with a red border and warn drivers of a hazard ahead. "
             "Prohibitory signs are circles with a red border and forbid an action, such as entering "

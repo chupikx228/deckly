@@ -13,9 +13,13 @@ from pydantic import AnyHttpUrl, SecretStr
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.housekeeping import DocumentRetentionPolicy, EnforceDocumentRetention
 from deckly.config import Settings
-from deckly.domain.document import Document, DocumentFormat
+from deckly.domain.document import Document, DocumentFormat, storage_key
+from deckly.domain.exceptions import DocumentNotFoundError
+from deckly.domain.source import CitationUnit, DocumentSource
+from deckly.infrastructure.documents.parser import DocumentTextParser
 from deckly.infrastructure.documents.store import (
     DocumentStatus,
     PostgresDocumentHousekeeping,
@@ -35,6 +39,7 @@ from deckly.worker.settings import (
     shutdown,
     startup,
 )
+from tests.document_files import TOPIC_TEXT, text_pdf
 from tests.documents import InMemoryDocumentStorage, pdf_bytes, pptx_bytes
 from tests.fakes import fresh_observability
 from tests.integration.conftest import TEST_PEER_ADDRESSES, open_queue_pool
@@ -265,6 +270,9 @@ class StorageProbe:
     async def put(self, key: str, content: bytes, content_type: str) -> None:
         await self.storage.put(key, content, content_type)
 
+    async def get(self, key: str, max_bytes: int) -> bytes:
+        return await self.storage.get(key, max_bytes)
+
     async def delete(self, key: str) -> None:
         self.deleted.append(key)
         await asyncio.sleep(self.pause_seconds)
@@ -299,6 +307,41 @@ async def probe(settings: Settings) -> AsyncIterator[StorageProbe]:
         yield storage
     finally:
         await storage.client.aclose()
+
+
+async def test_stored_document_reads_back_byte_for_byte_and_parses_into_cited_material(
+    documents: DocumentCleanup, probe: StorageProbe
+) -> None:
+    client_id = documents.client_id()
+    lecture = replace(ancient_document(client_id, SWEPT_AT), size_bytes=len(text_pdf(TOPIC_TEXT)))
+    documents.keys.add(lecture.storage_key)
+    await probe.put(lecture.storage_key, text_pdf(TOPIC_TEXT), lecture.document_format)
+
+    content = await probe.get(lecture.storage_key, lecture.size_bytes)
+    material = await DocumentTextParser(max_characters=4000, deadline_seconds=30).parse(lecture, content)
+
+    assert content == text_pdf(TOPIC_TEXT)
+    assert [entry.source for entry in material] == [
+        DocumentSource(
+            title=lecture.filename, document_id=lecture.document_id, unit=CitationUnit.PAGE, number=1
+        )
+    ]
+
+
+async def test_reading_an_object_that_is_not_stored_is_a_missing_document(probe: StorageProbe) -> None:
+    with pytest.raises(DocumentNotFoundError):
+        await probe.get(storage_key(uuid4()), 1024)
+
+
+async def test_object_larger_than_its_recorded_size_is_refused(
+    documents: DocumentCleanup, probe: StorageProbe
+) -> None:
+    key = storage_key(uuid4())
+    documents.keys.add(key)
+    await probe.put(key, pdf_bytes(), DocumentFormat.PDF)
+
+    with pytest.raises(UpstreamUnavailableError):
+        await probe.get(key, len(pdf_bytes()) - 1)
 
 
 async def test_sweep_deletes_old_unused_documents_and_keeps_recent_and_used_ones(

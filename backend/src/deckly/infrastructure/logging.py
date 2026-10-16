@@ -11,7 +11,7 @@ from deckly.application.correlation import current_correlation
 TRACE_ID = "trace_id"
 SPAN_ID = "span_id"
 CAPTURED_LIBRARY_LOGGERS = ("uvicorn", "uvicorn.error", "arq")
-SILENCED_LIBRARY_LOGGERS = ("uvicorn.access",)
+SILENCED_LIBRARY_LOGGERS = ("uvicorn.access", "pypdf")
 URL_LOGGING_LIBRARY_LOGGERS = ("httpx", "httpx2", "httpcore", "httpcore2")
 
 RESERVED_RECORD_ATTRIBUTES: Final = frozenset(

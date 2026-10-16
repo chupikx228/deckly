@@ -231,6 +231,7 @@ client polls every 2 seconds by default and gives up after 5 minutes.
       "media": [],
       "sources": [
         {
+          "kind": "web",
           "title": "Traffic regulations",
           "url": "https://…",
           "retrievedAt": "2026-08-14T10:30:20Z"
@@ -483,8 +484,18 @@ verify a card before saving it.
 - `sources` is never empty. A note the backend cannot source is **dropped**, the same
   repair-or-drop posture as any other invalid note: only that note is removed, and the job
   still succeeds with the notes that remain.
-- Each source has a non-blank `title` and an `http(s)` `url`. `retrievedAt`, when present,
-  carries an explicit offset.
+- Every source has a `kind` and a non-blank `title`. The client branches on `kind` and ignores a
+  source whose `kind` it does not know, so new kinds can be added without breaking old builds.
+- `kind: "web"` is a web page: an `http(s)` `url`, and `retrievedAt`, when present, carries an
+  explicit offset.
+- `kind: "document"` is a page or slide of a document the client uploaded: `documentId` (as
+  returned by `POST /documents`), `title` (the file name), `unit` (`page` for a PDF, `slide` for a
+  presentation) and `number`, 1-based as the document's own viewer numbers it. A note may cite
+  several pages, or a page and a web source.
+
+```json
+{ "kind": "document", "title": "lecture-3.pdf", "documentId": "…", "unit": "page", "number": 12 }
+```
 
 ## Media
 
@@ -559,6 +570,9 @@ localised and is for logs.
 | `PROVIDER_UNAVAILABLE`      | 200 in the job body | The model or search provider failed the job       |
 | `NO_VALID_CONTENT`          | 200 in the job body | Every note was dropped; nothing safe to return    |
 | `NO_VALID_CONTENT`          | 503 on regenerate   | No valid replacement note could be produced       |
+| `DOCUMENT_UNREADABLE`       | 200 in the job body | Uploaded document is damaged or over a limit      |
+| `DOCUMENT_ENCRYPTED`        | 200 in the job body | Uploaded PDF needs a password to open             |
+| `DOCUMENT_HAS_NO_TEXT`      | 200 in the job body | Uploaded document has no extractable text         |
 | `GENERATION_FAILED`         | 200 in the job body | The job failed for any other reason               |
 | `UPSTREAM_UNAVAILABLE`      | 503                 | A provider, quota store or object store is down   |
 | `DOCUMENT_NOT_FOUND`        | 404                 | Unknown, foreign or expired document id           |
@@ -568,19 +582,33 @@ localised and is for logs.
 | `METHOD_NOT_ALLOWED`        | 405                 | Endpoint exists but not for this HTTP method      |
 | `INTERNAL_ERROR`            | 500                 | Anything else                                     |
 
-Note the three "200 in the job body" rows: a **failed job is not an HTTP error**. `GET
+Note the "200 in the job body" rows: a **failed job is not an HTTP error**. `GET
 /generations/{jobId}` returns `200` with `status: "failed"` and a populated `error` object.
 Returning a 5xx for a failed job would make the client's polling logic conflate a transport
 problem with a generation problem.
 
-A failed job's `error.code` is always exactly one of these three, never any other code:
+A failed job's `error.code` is always exactly one of these, never any other code:
 
 - `PROVIDER_UNAVAILABLE` — an upstream model or search provider failed or timed out, and
   retrying did not help. The same request may succeed later.
 - `NO_VALID_CONTENT` — generation ran, but every note was dropped during validation (see
   "Sources" and "Note field shapes"), so there is nothing safe to return. A result is never
   returned with zero notes.
+- `DOCUMENT_UNREADABLE` — the uploaded document the job reads cannot be parsed: it is damaged,
+  or it trips a safety limit (an archive that inflates far past its size, too many pages or
+  parts, embedded DTDs, extraction that runs too long). Re-exporting the file usually fixes it.
+- `DOCUMENT_ENCRYPTED` — the uploaded PDF needs a password to open. A PDF that only restricts
+  editing or printing opens without one and is read normally, except one encrypted with AES,
+  which this service does not decrypt yet and also reports here. The user should remove the
+  protection and upload again.
+- `DOCUMENT_HAS_NO_TEXT` — the uploaded document has fewer than 50 visible characters of
+  extractable text: a scan or photos without a text layer, slides that are only pictures, or an
+  empty file. There is no OCR. Pages and slides without text are skipped silently as long as the
+  document as a whole has text.
 - `GENERATION_FAILED` — the catch-all for any other failure.
+
+The three `DOCUMENT_*` codes appear only on jobs that generate from an uploaded document (DEC-76);
+a client must still handle any of them on any failed job.
 
 `PROVIDER_UNAVAILABLE` and `UPSTREAM_UNAVAILABLE` describe the same kind of outage at different
 points. `UPSTREAM_UNAVAILABLE` is an HTTP `503` on a request the server could not serve at all.

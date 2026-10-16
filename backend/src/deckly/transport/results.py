@@ -1,4 +1,4 @@
-from typing import Self
+from typing import Literal, Self
 from uuid import UUID
 
 from pydantic import Field
@@ -12,7 +12,7 @@ from deckly.domain.notes.image_occlusion import ImageOcclusionFields, OcclusionR
 from deckly.domain.notes.multiple_choice import MultipleChoiceFields
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
-from deckly.domain.source import Source
+from deckly.domain.source import CitationUnit, DocumentSource, Source, WebSource
 from deckly.transport.body import ResponseBody, UtcDateTime, is_none
 
 
@@ -131,14 +131,38 @@ class MediaBody(ResponseBody):
         )
 
 
-class SourceBody(ResponseBody):
+class WebSourceBody(ResponseBody):
+    kind: Literal["web"] = "web"
     title: str
     url: str
     retrieved_at: UtcDateTime | None = Field(default=None, alias="retrievedAt", exclude_if=is_none)
 
     @classmethod
-    def from_source(cls, source: Source) -> Self:
+    def from_source(cls, source: WebSource) -> Self:
         return cls(title=source.title, url=source.url, retrieved_at=source.retrieved_at)
+
+
+class DocumentSourceBody(ResponseBody):
+    kind: Literal["document"] = "document"
+    title: str
+    document_id: UUID = Field(alias="documentId")
+    unit: CitationUnit
+    number: int
+
+    @classmethod
+    def from_source(cls, source: DocumentSource) -> Self:
+        return cls(title=source.title, document_id=source.document_id, unit=source.unit, number=source.number)
+
+
+type SourceBody = WebSourceBody | DocumentSourceBody
+
+
+def source_body(source: Source) -> SourceBody:
+    match source:
+        case WebSource():
+            return WebSourceBody.from_source(source)
+        case DocumentSource():
+            return DocumentSourceBody.from_source(source)
 
 
 class NoteBody(ResponseBody):
@@ -156,7 +180,7 @@ class NoteBody(ResponseBody):
             note_type=note.note_type,
             fields=fields_body(note.fields),
             media=tuple(MediaBody.from_media(item) for item in note.media),
-            sources=tuple(SourceBody.from_source(source) for source in note.sources),
+            sources=tuple(source_body(source) for source in note.sources),
             tags=note.tags,
         )
 

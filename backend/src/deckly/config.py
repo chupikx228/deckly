@@ -171,6 +171,8 @@ class ProviderSettings(BaseSettings):
     storage_upload_deadline_seconds: PositiveInt
     storage_delete_timeout_seconds: PositiveInt
     storage_delete_deadline_seconds: PositiveInt
+    storage_download_timeout_seconds: PositiveInt
+    storage_download_deadline_seconds: PositiveInt
     storage_max_attempts: PositiveInt
     storage_retry_base_delay_seconds: PositiveInt
     storage_retry_max_delay_seconds: PositiveInt
@@ -256,6 +258,7 @@ class ProviderSettings(BaseSettings):
         if (
             self.storage_upload_deadline_seconds < self.storage_upload_timeout_seconds
             or self.storage_delete_deadline_seconds < self.storage_delete_timeout_seconds
+            or self.storage_download_deadline_seconds < self.storage_download_timeout_seconds
         ):
             message = "storage deadlines must be at least the timeout of a single attempt"
             raise ValueError(message)

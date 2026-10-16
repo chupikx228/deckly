@@ -27,11 +27,22 @@ export const problemSchema = z.object({
   retryAfterSeconds: z.number().int().optional(),
 });
 
-export const sourceSchema = z.object({
+export const webSourceSchema = z.object({
+  kind: z.literal('web'),
   title: z.string(),
   url: z.url(),
   retrievedAt: z.iso.datetime().optional(),
 });
+
+export const documentSourceSchema = z.object({
+  kind: z.literal('document'),
+  title: z.string(),
+  documentId: z.uuid(),
+  unit: z.enum(['page', 'slide']),
+  number: z.number().int().min(1),
+});
+
+export const sourceSchema = z.discriminatedUnion('kind', [webSourceSchema, documentSourceSchema]);
 
 export const attributionSchema = z.object({
   author: z.string(),

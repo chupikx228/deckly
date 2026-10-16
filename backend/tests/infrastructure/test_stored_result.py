@@ -6,9 +6,9 @@ import pytest
 
 from deckly.domain.deck import GenerationResult
 from deckly.domain.notes.note_type import NoteType
-from deckly.domain.source import Source
+from deckly.domain.source import WebSource
 from deckly.infrastructure.stored_result import dump_result, load_result
-from tests.domain.builders import FULL_RESULT, at, basic_note, note_of, result_with
+from tests.domain.builders import DOCUMENT_SOURCE, FULL_RESULT, at, basic_note, note_of, result_with
 
 GOLDEN_RESULT = GenerationResult(
     deck=FULL_RESULT.deck,
@@ -144,11 +144,13 @@ def test_attributed_image_survives_a_trip_through_json_text() -> None:
 
 def test_retrieved_at_with_a_sub_minute_utc_offset_keeps_its_instant() -> None:
     retrieved_at = at(20).astimezone(SUB_MINUTE_OFFSET)
-    source = Source(title="Traffic code", url="https://example.com/code", retrieved_at=retrieved_at)
+    source = WebSource(title="Traffic code", url="https://example.com/code", retrieved_at=retrieved_at)
 
     [restored] = load_result(dump_result(result_with(replace(basic_note(1), sources=(source,))))).notes
 
-    assert restored.sources[0].retrieved_at == retrieved_at
+    [restored_source] = restored.sources
+    assert isinstance(restored_source, WebSource)
+    assert restored_source.retrieved_at == retrieved_at
 
 
 @pytest.mark.parametrize(
@@ -186,3 +188,50 @@ CORRUPT_DOCUMENTS: dict[str, object] = {
 def test_corrupt_document_is_rejected_as_a_value_error(document: object) -> None:
     with pytest.raises(ValueError, match=r".+"):
         load_result(document)
+
+
+STORED_DOCUMENT_SOURCE: dict[str, object] = {
+    "title": "road-signs.pptx",
+    "document_id": "00000000-0000-4000-8000-0000000000d1",
+    "unit": "slide",
+    "number": 3,
+}
+MIXED_SOURCES_NOTE = replace(basic_note(1), sources=(DOCUMENT_SOURCE, *basic_note(1).sources))
+
+
+def test_document_source_is_stored_as_its_own_shape_next_to_web_sources() -> None:
+    stored = dump_result(result_with(MIXED_SOURCES_NOTE))
+
+    assert stored["notes"] == [
+        {
+            **BASIC_NOTE,
+            "fields": {"front": "front 1", "back": "back"},
+            "sources": [STORED_DOCUMENT_SOURCE, SOURCE],
+        }
+    ]
+
+
+def test_document_and_web_sources_survive_a_trip_through_json_text() -> None:
+    result = result_with(MIXED_SOURCES_NOTE)
+
+    assert load_result(json.loads(json.dumps(dump_result(result)))) == result
+
+
+CORRUPT_DOCUMENT_SOURCES = {
+    "page zero": {**STORED_DOCUMENT_SOURCE, "number": 0},
+    "unknown unit": {**STORED_DOCUMENT_SOURCE, "unit": "chapter"},
+    "id that is not a uuid v4": {
+        **STORED_DOCUMENT_SOURCE,
+        "document_id": "00000000-0000-1000-8000-000000000001",
+    },
+    "blank title": {**STORED_DOCUMENT_SOURCE, "title": " "},
+    "no unit": {key: value for key, value in STORED_DOCUMENT_SOURCE.items() if key != "unit"},
+}
+
+
+@pytest.mark.parametrize(
+    "source", list(CORRUPT_DOCUMENT_SOURCES.values()), ids=list(CORRUPT_DOCUMENT_SOURCES)
+)
+def test_corrupt_stored_document_source_is_rejected_as_a_value_error(source: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match=r".+"):
+        load_result(with_notes({**BASIC_NOTE, "sources": [source]}))

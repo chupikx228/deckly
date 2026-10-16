@@ -338,6 +338,9 @@ components:
         - PROVIDER_UNAVAILABLE
         - NO_VALID_CONTENT
         - GENERATION_FAILED
+        - DOCUMENT_UNREADABLE
+        - DOCUMENT_ENCRYPTED
+        - DOCUMENT_HAS_NO_TEXT
         - UPSTREAM_UNAVAILABLE
         - DOCUMENT_NOT_FOUND
         - DOCUMENT_TOO_LARGE
@@ -511,7 +514,10 @@ components:
           description: >
             Present only when status is "failed". Its code is always one of
             PROVIDER_UNAVAILABLE (an upstream model or search provider failed), NO_VALID_CONTENT
-            (every note was dropped during validation) or GENERATION_FAILED (anything else).
+            (every note was dropped during validation), DOCUMENT_UNREADABLE (an uploaded document is
+            damaged or over a safety limit), DOCUMENT_ENCRYPTED (an uploaded PDF needs a password),
+            DOCUMENT_HAS_NO_TEXT (an uploaded document has no extractable text, such as a scan) or
+            GENERATION_FAILED (anything else).
 
     GenerationResult:
       type: object
@@ -636,9 +642,25 @@ components:
           description: The licence deed.
 
     Source:
+      description: >
+        Where a note's content comes from: a web page, or a page or slide of a document the client
+        uploaded. Branch on kind; a client must ignore a source whose kind it does not know.
+      oneOf:
+        - $ref: '#/components/schemas/WebSource'
+        - $ref: '#/components/schemas/DocumentSource'
+      discriminator:
+        propertyName: kind
+        mapping:
+          web: '#/components/schemas/WebSource'
+          document: '#/components/schemas/DocumentSource'
+
+    WebSource:
       type: object
-      required: [title, url]
+      required: [kind, title, url]
       properties:
+        kind:
+          type: string
+          const: web
         title:
           type: string
         url:
@@ -647,6 +669,31 @@ components:
         retrievedAt:
           type: string
           format: date-time
+
+    DocumentSource:
+      type: object
+      required: [kind, title, documentId, unit, number]
+      properties:
+        kind:
+          type: string
+          const: document
+        title:
+          type: string
+          description: The uploaded document's file name.
+        documentId:
+          type: string
+          format: uuid
+          description: The documentId returned by POST /documents.
+        unit:
+          type: string
+          enum: [page, slide]
+          description: page for a PDF, slide for a presentation.
+        number:
+          type: integer
+          minimum: 1
+          description: >
+            The 1-based page or slide the material comes from, as the document's own viewer
+            numbers it.
 
     RegenerateNoteRequest:
       type: object

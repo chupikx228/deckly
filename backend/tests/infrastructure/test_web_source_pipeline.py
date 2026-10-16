@@ -7,7 +7,7 @@ import pytest
 from deckly.application.pipeline import RunGeneration
 from deckly.domain.job import Failed, FailureCode, GenerationJob, Succeeded
 from deckly.domain.notes.note_type import NoteType
-from deckly.domain.source import Source
+from deckly.domain.source import Source, WebSource
 from deckly.infrastructure.card_generator.generator import LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.llm.client import LlmReply
@@ -80,6 +80,10 @@ class Pipeline:
         return finished
 
 
+def url_of(source: Source) -> str | None:
+    return source.url if isinstance(source, WebSource) else None
+
+
 async def test_notes_carry_sources_that_trace_back_to_the_fetched_pages() -> None:
     handler = answering(
         tavily_result("Warning signs", "https://example.com/warning", PAGE_TEXT),
@@ -90,8 +94,10 @@ async def test_notes_carry_sources_that_trace_back_to_the_fetched_pages() -> Non
     job = await Pipeline(handler, llm).finish()
 
     assert isinstance(job.state, Succeeded)
-    warning = Source(title="Warning signs", url="https://example.com/warning", retrieved_at=RETRIEVED_AT)
-    priority = Source(title="Priority signs", url="https://example.org/priority", retrieved_at=RETRIEVED_AT)
+    warning = WebSource(title="Warning signs", url="https://example.com/warning", retrieved_at=RETRIEVED_AT)
+    priority = WebSource(
+        title="Priority signs", url="https://example.org/priority", retrieved_at=RETRIEVED_AT
+    )
     assert [n.sources for n in job.state.result.notes] == [(warning,), (priority, warning)]
     prompt = llm.prompts[0].user
     assert PAGE_TEXT in prompt
@@ -110,7 +116,7 @@ async def test_citation_numbers_follow_the_material_that_survived_parsing_not_th
 
     assert isinstance(job.state, Succeeded)
     [kept] = job.state.result.notes
-    assert [source.url for source in kept.sources] == ["https://example.com/warning"]
+    assert [url_of(source) for source in kept.sources] == ["https://example.com/warning"]
     assert "file.zip" not in llm.prompts[0].user
 
 
@@ -121,7 +127,7 @@ async def test_citation_of_material_that_does_not_exist_drops_the_note_not_the_j
     job = await Pipeline(handler, llm).finish()
 
     assert isinstance(job.state, Succeeded)
-    assert [n.sources[0].url for n in job.state.result.notes] == ["https://example.com/warning"]
+    assert [url_of(n.sources[0]) for n in job.state.result.notes] == ["https://example.com/warning"]
 
 
 async def test_search_timeout_fails_the_job_as_provider_unavailable() -> None:

@@ -28,7 +28,7 @@ from deckly.domain.notes.multiple_choice import MultipleChoiceFields
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE, fields_type_for
-from tests.domain.builders import SOURCES, client_id, unregister
+from tests.domain.builders import DOCUMENT_SOURCE, SOURCES, client_id, note_of, unregister
 
 FRONT_BACK_TYPES: list[type[FrontBackFields]] = [BasicFields, BasicReversedFields, BasicTypeInFields]
 BLANKS = [
@@ -483,6 +483,22 @@ def test_note_without_a_source_is_rejected() -> None:
 
 def test_missing_source_is_an_invalid_note_so_only_that_note_is_dropped() -> None:
     assert issubclass(MissingSourceError, InvalidNoteError)
+
+
+@pytest.mark.parametrize("note_type", list(NoteType))
+def test_note_of_every_type_may_cite_only_a_document(note_type: NoteType) -> None:
+    note = replace(note_of(1, note_type), sources=(DOCUMENT_SOURCE,))
+
+    assert note.sources == (DOCUMENT_SOURCE,)
+
+
+@pytest.mark.parametrize("note_type", list(NoteType))
+def test_note_of_every_type_may_cite_a_document_and_the_web_together(note_type: NoteType) -> None:
+    web = note_of(1, note_type).sources
+
+    note = replace(note_of(1, note_type), sources=(DOCUMENT_SOURCE, *web))
+
+    assert note.sources == (DOCUMENT_SOURCE, *web)
 
 
 def test_note_rejects_a_client_id_that_is_not_uuid_v4() -> None:

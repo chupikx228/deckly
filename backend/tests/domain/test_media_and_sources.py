@@ -5,7 +5,7 @@ import pytest
 
 from deckly.domain.exceptions import InvalidGenerationRequestError, InvalidMediaError, InvalidSourceError
 from deckly.domain.media import Attribution, Media, MediaKind
-from deckly.domain.source import Source, SourceQuery
+from deckly.domain.source import CitationUnit, DocumentSource, SourceQuery, WebSource
 from tests.domain.builders import T0, client_id
 
 IMAGE_URL = "https://cdn.example.com/sign.png"
@@ -122,7 +122,7 @@ def test_attribution_with_a_non_web_url_is_rejected(field: str, url: str) -> Non
 
 
 def test_source_with_offset_timestamp_is_accepted() -> None:
-    source = Source(title="Traffic regulations", url="https://example.com/rules", retrieved_at=T0)
+    source = WebSource(title="Traffic regulations", url="https://example.com/rules", retrieved_at=T0)
 
     assert source.retrieved_at == T0
 
@@ -130,18 +130,20 @@ def test_source_with_offset_timestamp_is_accepted() -> None:
 @pytest.mark.parametrize("url", BAD_URLS)
 def test_source_with_a_non_web_url_is_rejected(url: str) -> None:
     with pytest.raises(InvalidSourceError):
-        Source(title="Traffic regulations", url=url)
+        WebSource(title="Traffic regulations", url=url)
 
 
 @pytest.mark.parametrize("title", ["", " \n"])
 def test_source_with_a_blank_title_is_rejected(title: str) -> None:
     with pytest.raises(InvalidSourceError):
-        Source(title=title, url="https://example.com/rules")
+        WebSource(title=title, url="https://example.com/rules")
 
 
 def test_source_retrieved_without_an_offset_is_rejected() -> None:
     with pytest.raises(InvalidSourceError):
-        Source(title="Traffic regulations", url="https://example.com", retrieved_at=T0.replace(tzinfo=None))
+        WebSource(
+            title="Traffic regulations", url="https://example.com", retrieved_at=T0.replace(tzinfo=None)
+        )
 
 
 @pytest.mark.parametrize("topic", ["", "   ", "\n\t", "\u200b", "\N{HANGUL FILLER}"], ids=repr)
@@ -152,3 +154,42 @@ def test_source_query_with_a_blank_topic_is_rejected(topic: str) -> None:
 
 def test_source_query_with_a_visible_topic_is_accepted() -> None:
     assert SourceQuery(topic=" x ", language="ru").topic == " x "
+
+
+DOCUMENT_ID = UUID("00000000-0000-4000-8000-000000000001")
+DOCUMENT_SOURCE = DocumentSource(
+    title="lecture-1.pdf", document_id=DOCUMENT_ID, unit=CitationUnit.PAGE, number=1
+)
+
+
+@pytest.mark.parametrize("unit", list(CitationUnit))
+def test_document_source_cites_a_page_or_slide_from_one(unit: CitationUnit) -> None:
+    source = replace(DOCUMENT_SOURCE, unit=unit, number=12)
+
+    assert (source.unit, source.number) == (unit, 12)
+
+
+@pytest.mark.parametrize("number", [0, -1], ids=repr)
+def test_document_source_numbered_below_one_is_rejected(number: int) -> None:
+    with pytest.raises(InvalidSourceError, match="at least 1"):
+        replace(DOCUMENT_SOURCE, number=number)
+
+
+def test_document_source_numbered_with_a_boolean_is_rejected() -> None:
+    with pytest.raises(InvalidSourceError):
+        replace(DOCUMENT_SOURCE, number=True)
+
+
+@pytest.mark.parametrize("title", ["", " \n", "\u200b"], ids=repr)
+def test_document_source_with_a_blank_title_is_rejected(title: str) -> None:
+    with pytest.raises(InvalidSourceError, match="title"):
+        replace(DOCUMENT_SOURCE, title=title)
+
+
+def test_document_source_whose_id_is_not_a_uuid_v4_is_rejected() -> None:
+    with pytest.raises(InvalidSourceError, match="UUID v4"):
+        replace(DOCUMENT_SOURCE, document_id=UUID("00000000-0000-1000-8000-000000000001"))
+
+
+def test_document_sources_of_different_pages_are_distinct_citations() -> None:
+    assert len({DOCUMENT_SOURCE, replace(DOCUMENT_SOURCE, number=2), DOCUMENT_SOURCE}) == 2
