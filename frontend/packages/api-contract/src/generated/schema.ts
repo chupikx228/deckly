@@ -13,7 +13,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Start a deck generation job */
+        /**
+         * Start a deck generation job
+         * @description A job generates either from a topic, researched on the web, or from a document the same X-Client-Id uploaded with POST /documents, named by its documentId; a request carries exactly one of the two. A documentId that is unknown, belongs to another client, is still being uploaded or has expired is 404 DOCUMENT_NOT_FOUND, checked before the quota is used. The request is screened against the content policy (the topic, or the document's file name, together with the instructions) and one that violates it is 422 TOPIC_REJECTED. A document's text is screened again by the worker before any card is written from it; a document that violates the policy fails the job with DOCUMENT_REJECTED.
+         */
         post: operations["createGeneration"];
         delete?: never;
         options?: never;
@@ -86,7 +89,7 @@ export interface paths {
         put?: never;
         /**
          * Upload a PDF or PowerPoint document
-         * @description Stores one PDF or PowerPoint (.pptx) file so a later request can refer to it by its documentId. The type is decided from the file's content, never from its name or the declared Content-Type, so a renamed file of another type is 415 UNSUPPORTED_DOCUMENT_TYPE, as are legacy .ppt, macro-enabled .pptm, password-protected and damaged files. A file over the size limit (25 MiB by default) is 413 DOCUMENT_TOO_LARGE and is refused before it is stored. Uploads are rate limited per X-Client-Id and per network address, separately from the generation quota (429 RATE_LIMITED). A document nothing uses is deleted 24 hours after it was uploaded, and reading it afterwards is 404 DOCUMENT_NOT_FOUND. There is no Idempotency-Key: retrying an upload stores a second copy, which expires the same way. The server also bounds how many uploads it handles at once; one that arrives while every slot is taken is refused at once as 503 UPSTREAM_UNAVAILABLE with Retry-After, before it is counted against the upload budget, and can simply be retried.
+         * @description Stores one PDF or PowerPoint (.pptx) file so a later request can refer to it by its documentId. The type is decided from the file's content, never from its name or the declared Content-Type, so a renamed file of another type is 415 UNSUPPORTED_DOCUMENT_TYPE, as are legacy .ppt, macro-enabled .pptm, password-protected and damaged files. A file over the size limit (25 MiB by default) is 413 DOCUMENT_TOO_LARGE and is refused before it is stored. Uploads are rate limited per X-Client-Id and per network address, separately from the generation quota (429 RATE_LIMITED). A document nothing uses expires 24 hours after it was uploaded, and reading it afterwards is 404 DOCUMENT_NOT_FOUND. A document a generation job used stays readable for as long as that job can be polled. There is no Idempotency-Key: retrying an upload stores a second copy, which expires the same way. The server also bounds how many uploads it handles at once; one that arrives while every slot is taken is refused at once as 503 UPSTREAM_UNAVAILABLE with Retry-After, before it is counted against the upload budget, and can simply be retried.
          */
         post: operations["uploadDocument"];
         delete?: never;
@@ -145,7 +148,7 @@ export interface components {
         /** @enum {string} */
         JobStage: "planning" | "retrieving_sources" | "parsing_sources" | "generating_cards" | "fetching_media" | "finalizing";
         /** @enum {string} */
-        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "DOCUMENT_UNREADABLE" | "DOCUMENT_ENCRYPTED" | "DOCUMENT_HAS_NO_TEXT" | "UPSTREAM_UNAVAILABLE" | "DOCUMENT_NOT_FOUND" | "DOCUMENT_TOO_LARGE" | "UNSUPPORTED_DOCUMENT_TYPE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
+        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "DOCUMENT_UNREADABLE" | "DOCUMENT_ENCRYPTED" | "DOCUMENT_HAS_NO_TEXT" | "DOCUMENT_REJECTED" | "UPSTREAM_UNAVAILABLE" | "DOCUMENT_NOT_FOUND" | "DOCUMENT_TOO_LARGE" | "UNSUPPORTED_DOCUMENT_TYPE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
         /**
          * @description The type detected from the file's content.
          * @enum {string}
@@ -169,10 +172,15 @@ export interface components {
         };
         /** @enum {string} */
         RejectionReason: "too_easy" | "too_hard" | "incorrect" | "duplicate" | "off_topic" | "other";
-        /** @description image_occlusion is not generated yet, so a request whose noteTypes contains it is rejected with VALIDATION_FAILED whatever includeImages says. Once it is generated, it will also need includeImages: true, because an image-occlusion note is built on an image the server fetches; the if/then below already rejects it without images, and leaving includeImages out counts as false. */
+        /** @description Exactly one of topic and documentId: a request with both, or with neither, is VALIDATION_FAILED, and so is either one sent as null. image_occlusion is not generated yet, so a request whose noteTypes contains it is rejected with VALIDATION_FAILED whatever includeImages says. Once it is generated, it will also need includeImages: true, because an image-occlusion note is built on an image the server fetches; the if/then below already rejects it without images, and leaving includeImages out counts as false. */
         GenerationRequest: {
             /** @description Length is checked after trimming leading and trailing whitespace, so a blank or whitespace-only topic is rejected. The trimmed value is what the server uses. The server also requires at least 3 visible characters. Whitespace, control characters, format characters such as zero-width space or BOM, combining marks, and characters that render blank (Hangul fillers, the blank Braille pattern U+2800) do not count toward that minimum, so "a\u200Bb" and "a b" are rejected. Must not contain NUL (U+0000). */
-            topic: string;
+            topic?: string;
+            /**
+             * Format: uuid
+             * @description The documentId POST /documents returned to the same X-Client-Id. Canonical form only: a lowercase, hyphenated version 4 UUID. Cards are written from the document's text and cite its pages or slides.
+             */
+            documentId?: string;
             /**
              * @description BCP 47 tag. The language of the cards, not of the interface. Checked for well-formed syntax only, not against the language subtag registry.
              * @example ru
@@ -195,7 +203,7 @@ export interface components {
             includeImages: boolean;
             /** @description Must not contain NUL (U+0000). */
             instructions?: string;
-        };
+        } & (unknown | unknown);
         GenerationJobCreated: {
             /** Format: uuid */
             jobId: string;
@@ -218,7 +226,7 @@ export interface components {
             updatedAt: string;
             /** @description Present only when status is "succeeded". */
             result?: components["schemas"]["GenerationResult"] | null;
-            /** @description Present only when status is "failed". Its code is always one of PROVIDER_UNAVAILABLE (an upstream model or search provider failed), NO_VALID_CONTENT (every note was dropped during validation), DOCUMENT_UNREADABLE (an uploaded document is damaged or over a safety limit), DOCUMENT_ENCRYPTED (an uploaded PDF needs a password), DOCUMENT_HAS_NO_TEXT (an uploaded document has no extractable text, such as a scan) or GENERATION_FAILED (anything else). */
+            /** @description Present only when status is "failed". Its code is always one of PROVIDER_UNAVAILABLE (an upstream model or search provider failed), NO_VALID_CONTENT (every note was dropped during validation), DOCUMENT_UNREADABLE (an uploaded document is damaged or over a safety limit), DOCUMENT_ENCRYPTED (an uploaded PDF needs a password), DOCUMENT_HAS_NO_TEXT (an uploaded document has no extractable text, such as a scan), DOCUMENT_NOT_FOUND (the uploaded document was gone from storage when the job read it), DOCUMENT_REJECTED (the uploaded document's text violates the content policy) or GENERATION_FAILED (anything else). */
             error?: components["schemas"]["Problem"] | null;
         };
         GenerationResult: {
@@ -413,6 +421,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
             409: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
             429: components["responses"]["Problem"];

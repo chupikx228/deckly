@@ -114,6 +114,7 @@ export const healthSchema = z.object({
 
 export const generationRequestSchema = z.object({
   topic: z.string().min(3).max(200),
+  documentId: z.string().uuid().optional(),
   language: z.string().min(2),
   cardCount: z.number().int().min(5).max(200),
   difficulty: difficultySchema.optional(),
