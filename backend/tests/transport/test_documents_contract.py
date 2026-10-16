@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import Iterator, MutableMapping
 from http import HTTPStatus
@@ -6,8 +7,10 @@ import httpx2
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.types import Message
 
 from deckly.application.exceptions import UpstreamUnavailableError
+from deckly.infrastructure.upload_gate import UPLOAD_CAPACITY_RETRY_AFTER_SECONDS
 from deckly.main import API_PREFIX
 from deckly.transport import documents
 from deckly.transport.documents import MULTIPART_OVERHEAD_BYTES, body_limit
@@ -312,6 +315,142 @@ def test_storage_outage_is_503_and_leaves_nothing_behind(
     body = assert_problem(response, HTTPStatus.SERVICE_UNAVAILABLE, "UPSTREAM_UNAVAILABLE")
     assert isinstance(body["retryAfterSeconds"], int)
     assert_nothing_stored(harness)
+
+
+def test_upload_over_the_server_wide_cap_is_503_with_a_retry_hint_and_spends_no_budget() -> None:
+    taken = DocumentHarness(concurrency=1)
+    asyncio.run(taken.slots.acquire())
+
+    with TestClient(documents_app(taken), raise_server_exceptions=False) as saturated:
+        response = upload(saturated, pdf_bytes())
+
+    body = assert_problem(response, HTTPStatus.SERVICE_UNAVAILABLE, "UPSTREAM_UNAVAILABLE")
+    assert body["retryAfterSeconds"] == UPLOAD_CAPACITY_RETRY_AFTER_SECONDS
+    assert response.headers[RETRY_AFTER_HEADER] == str(UPLOAD_CAPACITY_RETRY_AFTER_SECONDS) == "5"
+    assert taken.reads == 0
+    assert taken.limiter.used[CLIENT_ID] == 0
+    assert_nothing_stored(taken)
+
+
+BOUNDARY = "trickle"
+TRICKLE_INTERVAL_SECONDS = 0.02
+TEST_READ_TIMEOUT_SECONDS = 0.25
+
+
+def multipart_prefix(filename: str = "lecture.pdf") -> bytes:
+    return (
+        f"--{BOUNDARY}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        "Content-Type: application/pdf\r\n\r\n"
+    ).encode()
+
+
+def multipart_suffix() -> bytes:
+    return f"\r\n--{BOUNDARY}--\r\n".encode()
+
+
+async def post_over_asgi(
+    app: FastAPI, chunks: Iterator[bytes], pause_seconds: float
+) -> tuple[int, dict[str, str]]:
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": ENDPOINT,
+        "raw_path": ENDPOINT.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"x-client-id", str(CLIENT_ID).encode()),
+            (b"content-type", f"multipart/form-data; boundary={BOUNDARY}".encode()),
+        ],
+        "client": ("203.0.113.7", 50000),
+        "server": ("testserver", 80),
+    }
+    pending = iter(chunks)
+    upcoming = next(pending, None)
+    answer: dict[str, int] = {}
+    problem = bytearray()
+
+    async def receive() -> Message:
+        nonlocal upcoming
+        await asyncio.sleep(pause_seconds)
+        chunk, upcoming = upcoming, next(pending, None)
+        if chunk is None:
+            return {"type": "http.disconnect"}
+        return {"type": "http.request", "body": chunk, "more_body": upcoming is not None}
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.start":
+            answer["status"] = message["status"]
+        else:
+            problem.extend(message.get("body", b""))
+
+    await app(scope, receive, send)
+    return answer["status"], {"body": problem.decode()}
+
+
+def endless_trickle() -> Iterator[bytes]:
+    yield multipart_prefix() + b"%PDF-1.7\n"
+    while True:
+        yield b"x"
+
+
+async def whole_upload_over_asgi(app: FastAPI, content: bytes) -> int:
+    done = iter([multipart_prefix() + content + multipart_suffix()])
+    status, _ = await post_over_asgi(app, done, pause_seconds=0)
+    return status
+
+
+@pytest.mark.anyio
+async def test_client_trickling_bytes_is_cut_off_at_the_read_deadline_and_its_slot_is_freed() -> None:
+    held = DocumentHarness(concurrency=1, read_timeout_seconds=TEST_READ_TIMEOUT_SECONDS)
+    app = documents_app(held)
+    started = asyncio.get_running_loop().time()
+
+    slow = asyncio.create_task(post_over_asgi(app, endless_trickle(), TRICKLE_INTERVAL_SECONDS))
+    await asyncio.sleep(TEST_READ_TIMEOUT_SECONDS / 2)
+    assert held.slots.locked()
+    assert not slow.done()
+    status, _ = await asyncio.wait_for(slow, TEST_READ_TIMEOUT_SECONDS * 4)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert status == HTTPStatus.BAD_REQUEST
+    assert TEST_READ_TIMEOUT_SECONDS <= elapsed < TEST_READ_TIMEOUT_SECONDS * 4
+    assert not held.slots.locked()
+    assert held.limiter.used[CLIENT_ID] == 1
+    assert_nothing_stored(held)
+    assert await whole_upload_over_asgi(app, pdf_bytes()) == HTTPStatus.CREATED
+    assert len(held.storage.objects) == 1
+
+
+@pytest.mark.anyio
+async def test_deadline_is_for_the_whole_body_not_the_gap_between_chunks() -> None:
+    held = DocumentHarness(concurrency=1, read_timeout_seconds=TEST_READ_TIMEOUT_SECONDS)
+    app = documents_app(held)
+    chunks = iter([multipart_prefix(), pdf_bytes(), multipart_suffix()])
+
+    status, _ = await post_over_asgi(app, chunks, pause_seconds=TEST_READ_TIMEOUT_SECONDS / 2)
+
+    assert status == HTTPStatus.BAD_REQUEST
+    assert not held.slots.locked()
+    assert_nothing_stored(held)
+
+
+@pytest.mark.anyio
+async def test_slow_upload_that_finishes_inside_the_deadline_is_stored() -> None:
+    held = DocumentHarness(concurrency=1, read_timeout_seconds=TEST_READ_TIMEOUT_SECONDS)
+    app = documents_app(held)
+    chunks = iter([multipart_prefix(), pdf_bytes(), multipart_suffix()])
+
+    status, _ = await post_over_asgi(app, chunks, pause_seconds=TEST_READ_TIMEOUT_SECONDS / 8)
+
+    assert status == HTTPStatus.CREATED
+    assert not held.slots.locked()
+    assert len(held.storage.objects) == 1
 
 
 def test_rate_limit_store_outage_is_503_not_a_free_pass(client: TestClient, harness: DocumentHarness) -> None:

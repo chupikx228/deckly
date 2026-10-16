@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from functools import partial
 from http import HTTPStatus
 from typing import Annotated, Self
@@ -16,6 +18,8 @@ from deckly.domain.exceptions import DocumentNotFoundError, DocumentTooLargeErro
 from deckly.transport.body import ResponseBody, UtcDateTime
 from deckly.transport.dependencies import get_document_use_case, upload_document_use_case
 from deckly.transport.generations import CLIENT_ID_HEADER, HYPHENATED_UUID, CanonicalUuid, address_of
+
+logger = logging.getLogger(__name__)
 
 DOCUMENT_FIELD = "file"
 MULTIPART_OVERHEAD_BYTES = 16 * 1024
@@ -74,17 +78,22 @@ def capped(receive: Receive, limit: int) -> Receive:
     return capped_receive
 
 
-async def read_upload(request: Request, limit: int) -> DocumentUpload:
+async def read_upload(request: Request, limit: int, timeout_seconds: float) -> DocumentUpload:
     capped_request = Request(request.scope, receive=capped(request.receive, limit))
     try:
-        async with capped_request.form(max_files=MAX_UPLOAD_FILES, max_fields=MAX_UPLOAD_FIELDS) as form:
-            upload = form.get(DOCUMENT_FIELD)
-            if not isinstance(upload, UploadFile):
-                message = f"the request must carry exactly one file in the {DOCUMENT_FIELD!r} field"
-                raise InvalidDocumentError(message)
-            return DocumentUpload(filename=upload.filename or "", content=await upload.read())
+        async with asyncio.timeout(timeout_seconds):
+            async with capped_request.form(max_files=MAX_UPLOAD_FILES, max_fields=MAX_UPLOAD_FIELDS) as form:
+                upload = form.get(DOCUMENT_FIELD)
+                if not isinstance(upload, UploadFile):
+                    message = f"the request must carry exactly one file in the {DOCUMENT_FIELD!r} field"
+                    raise InvalidDocumentError(message)
+                return DocumentUpload(filename=upload.filename or "", content=await upload.read())
     except ClientDisconnect as error:
         message = "the client disconnected before the upload finished"
+        raise InvalidDocumentError(message) from error
+    except TimeoutError as error:
+        logger.warning("upload_read_timed_out", extra={"timeout_seconds": timeout_seconds})
+        message = f"the upload was not received within {timeout_seconds} seconds"
         raise InvalidDocumentError(message) from error
 
 
@@ -108,7 +117,9 @@ async def upload_document(
     limit = body_limit(upload.max_bytes)
     reject_declared_oversize(request, limit)
     requester = Requester(client_id=client_id, address=address)
-    return DocumentBody.from_document(await upload(requester, partial(read_upload, request, limit)))
+    return DocumentBody.from_document(
+        await upload(requester, partial(read_upload, request, limit, upload.read_timeout_seconds))
+    )
 
 
 @router.get("/documents/{document_id}")

@@ -1,3 +1,4 @@
+import asyncio
 import io
 import zipfile
 from collections import Counter
@@ -13,8 +14,11 @@ from deckly.application.ports import DocumentUpload, ExpiredDocument, Requester
 from deckly.domain.document import Document, DocumentFormat
 from deckly.infrastructure.documents.sniffing import ContentDocumentInspector
 from deckly.infrastructure.documents.store import DocumentStatus
+from deckly.infrastructure.observability.metrics import DOCUMENT_UPLOAD_GATE
 from deckly.infrastructure.storage.client import StorageEndpoint
+from deckly.infrastructure.upload_gate import RejectingUploadGate
 from tests.domain.builders import T0
+from tests.fakes import fresh_metrics
 
 PRESENTATION_MAIN = "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
 MACRO_PRESENTATION_MAIN = "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml"
@@ -25,6 +29,8 @@ UPLOAD_LIMIT = 10
 UPLOAD_RETRY_AFTER_SECONDS = 1800
 STORAGE_RETRY_AFTER_SECONDS = 5
 MAX_TEST_DOCUMENT_BYTES = 64 * 1024
+TEST_UPLOAD_CONCURRENCY = 8
+TEST_UPLOAD_READ_TIMEOUT_SECONDS = 30.0
 ADDRESS = "203.0.113.7"
 CLIENT_ID = UUID("0b6f7c1e-4a3d-4f2e-9c8b-7a6d5e4f3a21")
 OTHER_CLIENT_ID = UUID("1c7a8d2f-5b4e-4a3f-8d9c-8b7e6f5a4b32")
@@ -224,14 +230,21 @@ def storage_outage() -> UpstreamUnavailableError:
 
 class DocumentHarness:
     def __init__(
-        self, max_bytes: int = MAX_TEST_DOCUMENT_BYTES, storage: InMemoryDocumentStorage | None = None
+        self,
+        max_bytes: int = MAX_TEST_DOCUMENT_BYTES,
+        storage: InMemoryDocumentStorage | None = None,
+        concurrency: int = TEST_UPLOAD_CONCURRENCY,
+        read_timeout_seconds: float = TEST_UPLOAD_READ_TIMEOUT_SECONDS,
     ) -> None:
+        self.metrics = fresh_metrics()
+        self.slots = asyncio.Semaphore(concurrency)
         self.limiter = InMemoryUploadLimiter()
         self.storage = storage or InMemoryDocumentStorage()
         self.store = InMemoryDocumentStore()
         self.reads = 0
         ids = sequential_document_ids()
         self.upload = UploadDocument(
+            gate=RejectingUploadGate(self.slots, DOCUMENT_UPLOAD_GATE, self.metrics),
             limiter=self.limiter,
             inspector=ContentDocumentInspector(),
             storage=self.storage,
@@ -239,6 +252,7 @@ class DocumentHarness:
             clock=lambda: T0,
             new_document_id=lambda: next(ids),
             max_bytes=max_bytes,
+            read_timeout_seconds=read_timeout_seconds,
         )
         self.get = GetDocument(store=self.store)
 

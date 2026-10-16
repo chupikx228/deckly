@@ -6,9 +6,13 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from deckly.config import (
+    DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY,
+    DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS,
     DEFAULT_MODERATION_MAX_CONCURRENCY,
     MAX_DOCUMENT_BYTES,
     MAX_DOCUMENT_RETENTION_SECONDS,
+    MAX_DOCUMENT_UPLOAD_CONCURRENCY,
+    MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS,
     MAX_JUDGED_CANDIDATES,
     MAX_MEDIA_CANDIDATES,
     MAX_MEDIA_CONCURRENCY,
@@ -1376,6 +1380,62 @@ def test_every_document_limit_is_required(clean_environment: pytest.MonkeyPatch,
 
     with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_LIMIT_").lower()):
         LimitSettings()
+
+
+def test_document_upload_concurrency_defaults_to_eight(clean_environment: pytest.MonkeyPatch) -> None:
+    settings = limit_settings_with(clean_environment)
+
+    assert settings.document_upload_max_concurrency == DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY == 8
+
+
+@pytest.mark.parametrize(
+    "value", [1, DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY, MAX_DOCUMENT_UPLOAD_CONCURRENCY]
+)
+def test_document_upload_concurrency_within_its_bounds_is_accepted(
+    clean_environment: pytest.MonkeyPatch, value: int
+) -> None:
+    settings = limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY=str(value))
+
+    assert settings.document_upload_max_concurrency == value
+
+
+@pytest.mark.parametrize("value", ["0", "-1", str(MAX_DOCUMENT_UPLOAD_CONCURRENCY + 1), "2.5", "many", ""])
+def test_document_upload_concurrency_outside_its_bounds_is_rejected(
+    clean_environment: pytest.MonkeyPatch, value: str
+) -> None:
+    with pytest.raises(ValidationError, match="document_upload_max_concurrency"):
+        limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY=value)
+
+
+def test_document_upload_read_timeout_defaults_to_two_minutes(clean_environment: pytest.MonkeyPatch) -> None:
+    settings = limit_settings_with(clean_environment)
+
+    assert (
+        settings.document_upload_read_timeout_seconds == DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS == 120
+    )
+
+
+@pytest.mark.parametrize(
+    "value", [1, DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS, MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS]
+)
+def test_document_upload_read_timeout_within_its_bounds_is_accepted(
+    clean_environment: pytest.MonkeyPatch, value: int
+) -> None:
+    settings = limit_settings_with(
+        clean_environment, DECKLY_LIMIT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS=str(value)
+    )
+
+    assert settings.document_upload_read_timeout_seconds == value
+
+
+@pytest.mark.parametrize(
+    "value", ["0", "-1", str(MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS + 1), "2.5", "slow", ""]
+)
+def test_document_upload_read_timeout_outside_its_bounds_is_rejected(
+    clean_environment: pytest.MonkeyPatch, value: str
+) -> None:
+    with pytest.raises(ValidationError, match="document_upload_read_timeout_seconds"):
+        limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS=value)
 
 
 @pytest.mark.parametrize("retention", [MIN_DOCUMENT_RETENTION_SECONDS, 86400, MAX_DOCUMENT_RETENTION_SECONDS])

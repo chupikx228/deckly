@@ -42,6 +42,10 @@ MINUTES_PER_HOUR = 60
 SECONDS_PER_MINUTE = 60
 MEBIBYTE = 1024 * 1024
 MAX_DOCUMENT_BYTES = 100 * MEBIBYTE
+DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY = 8
+MAX_DOCUMENT_UPLOAD_CONCURRENCY = 32
+DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS = 120
+MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS = 900
 MIN_DOCUMENT_RETENTION_SECONDS = 60 * 60
 MAX_DOCUMENT_RETENTION_SECONDS = 7 * 24 * 60 * 60
 MAX_STORAGE_CONCURRENCY = 16
@@ -285,6 +289,12 @@ class LimitSettings(BaseSettings):
     document_uploads_per_window: PositiveInt
     document_uploads_per_address_per_window: PositiveInt
     document_upload_window_seconds: PositiveInt
+    document_upload_max_concurrency: Annotated[int, Field(ge=1, le=MAX_DOCUMENT_UPLOAD_CONCURRENCY)] = (
+        DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY
+    )
+    document_upload_read_timeout_seconds: Annotated[
+        int, Field(ge=1, le=MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS)
+    ] = DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS
 
     @model_validator(mode="after")
     def require_address_limit_to_be_coarser(self) -> Self:
