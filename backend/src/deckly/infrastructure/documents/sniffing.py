@@ -4,8 +4,10 @@ import re
 import zipfile
 import zlib
 
+from deckly.application.exceptions import UnreadableDocumentError
 from deckly.domain.document import DocumentFormat
 from deckly.domain.exceptions import UnsupportedDocumentError
+from deckly.infrastructure.documents.archive import check_directory_records
 
 PDF_HEADER = re.compile(rb"%PDF-[12]\.[0-9]")
 PDF_HEADER_WINDOW = 1024
@@ -44,6 +46,7 @@ def declared_content_types(archive: zipfile.ZipFile) -> bytes | None:
 
 
 def presentation_content_types(content: bytes) -> bytes | None:
+    check_directory_records(content)
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
         names = frozenset(archive.namelist())
         if CONTENT_TYPES_ENTRY not in names or PRESENTATION_ENTRY not in names or MACRO_ENTRY in names:
@@ -56,7 +59,7 @@ def is_pptx(content: bytes) -> bool:
         return False
     try:
         declared = presentation_content_types(content)
-    except UNREADABLE_ARCHIVE_ERRORS:
+    except (UnreadableDocumentError, *UNREADABLE_ARCHIVE_ERRORS):
         return False
     return declared is not None and PRESENTATION_MAIN_TYPE in declared
 

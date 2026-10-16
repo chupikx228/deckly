@@ -28,6 +28,12 @@ def check_entry(entry: zipfile.ZipInfo) -> None:
         raise UnreadableDocumentError(message)
 
 
+def check_directory_records(content: bytes) -> None:
+    directory_records = content.count(CENTRAL_DIRECTORY_SIGNATURE)
+    if directory_records > MAX_ARCHIVE_ENTRIES:
+        raise too_many_entries(directory_records)
+
+
 class BoundedArchive:
     def __init__(self, archive: zipfile.ZipFile) -> None:
         entries = archive.infolist()
@@ -39,9 +45,7 @@ class BoundedArchive:
 
     @classmethod
     def of(cls, content: bytes) -> Self:
-        directory_records = content.count(CENTRAL_DIRECTORY_SIGNATURE)
-        if directory_records > MAX_ARCHIVE_ENTRIES:
-            raise too_many_entries(directory_records)
+        check_directory_records(content)
         return cls(zipfile.ZipFile(io.BytesIO(content)))
 
     def __enter__(self) -> Self:
