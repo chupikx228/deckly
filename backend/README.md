@@ -891,10 +891,16 @@ The assumed budget is a 1 GiB API container with about 200 MiB of baseline (Fast
 SQLAlchemy, the HTTP clients) and half of what remains kept free for the other endpoints and for
 garbage collection: roughly 400 MiB, and 400 / 50 = 8. A slot is sized for a full 25 MiB body, but an
 upload only holds what it has received so far, so a typical few-MiB lecture deck costs far less and 8
-slots is conservative for the usual mix. **The cap and `DECKLY_LIMIT_DOCUMENT_MAX_BYTES` are tied:**
-the worst case is cap x 2 x the size limit, so raising the size limit to 100 MiB with a cap of 8 puts
-the worst case at 1.6 GiB; lower the cap in step. The limit is per process, so with several workers or
-replicas the server-wide ceiling is their number times the cap.
+slots is conservative for the usual mix. **The cap and `DECKLY_LIMIT_DOCUMENT_MAX_BYTES` are tied, and
+the tie is enforced at startup:** the process refuses to start when cap x size limit x 2 exceeds
+`DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES` (default 400 MiB, the budget above), and the error
+names the three values and the settings to change. With the defaults 8 x 25 MiB x 2 is exactly the
+budget, which passes. Raising the size limit to 100 MiB with a cap of 8 puts the worst case at 1.6 GiB,
+so the budget, the cap or the limit has to move with it. The 2 is the margin measured above and is not a
+setting. The budget is an assumption about the container, not something the process reads from it:
+set it to what the container can actually spare. **The check assumes a single process.** The limit and
+the budget are per process, so with several workers or replicas sharing one container's memory, divide
+the budget by their number (or lower the cap) yourself; the check cannot see them.
 
 _Reject, not queue._ An upload is a user waiting at a screen, and a slot is held for as long as the
 client takes to send the body, up to about 40 s on a 5 Mbit/s uplink, plus the object-store PUT (60 s

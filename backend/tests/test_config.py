@@ -7,8 +7,10 @@ from pydantic import SecretStr, ValidationError
 
 from deckly.config import (
     DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY,
+    DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES,
     DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS,
     DEFAULT_MODERATION_MAX_CONCURRENCY,
+    DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN,
     MAX_DOCUMENT_BYTES,
     MAX_DOCUMENT_PARSE_DEADLINE_SECONDS,
     MAX_DOCUMENT_RETENTION_SECONDS,
@@ -22,6 +24,7 @@ from deckly.config import (
     MAX_MODERATION_CONCURRENCY,
     MAX_MODERATION_TIMEOUT_SECONDS,
     MAX_STORAGE_CONCURRENCY,
+    MEBIBYTE,
     MEDIA_URL_MIN_VALIDITY_SECONDS,
     MIN_DOCUMENT_RETENTION_SECONDS,
     MIN_JOB_RETENTION_SECONDS,
@@ -186,6 +189,7 @@ LIMIT_ENVIRONMENT = {
     "DECKLY_LIMIT_DOCUMENT_MAX_SOURCE_CHARACTERS": "40000",
     "DECKLY_LIMIT_DOCUMENT_PARSE_DEADLINE_SECONDS": "1",
 }
+SHIPPED_DOCUMENT_MAX_BYTES = 25 * MEBIBYTE
 ROOMY_JOB_TIMEOUT_SECONDS = "336"
 REGENERATE_ENVIRONMENT = {
     "DECKLY_REGENERATE_RATE_LIMIT_TIMEOUT_SECONDS": "0.5",
@@ -639,6 +643,7 @@ def test_shipped_env_example_passes_every_startup_check(
 
     settings = load_settings()
 
+    assert settings.limits.document_upload_memory_budget_bytes == DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES
     assert (
         settings.limits.generation_job_timeout_seconds
         > settings.topic_deadlines_seconds + settings.providers.moderation_gate_worst_case_wait_seconds
@@ -1407,11 +1412,15 @@ def limit_settings_with(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Li
     return LimitSettings()
 
 
-@pytest.mark.parametrize("max_bytes", [1, 26214400, MAX_DOCUMENT_BYTES])
+@pytest.mark.parametrize("max_bytes", [1, SHIPPED_DOCUMENT_MAX_BYTES, MAX_DOCUMENT_BYTES])
 def test_document_size_limit_within_its_bounds_is_accepted(
     clean_environment: pytest.MonkeyPatch, max_bytes: int
 ) -> None:
-    settings = limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(max_bytes))
+    settings = limit_settings_with(
+        clean_environment,
+        DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(max_bytes),
+        DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY="1",
+    )
 
     assert settings.document_max_bytes == max_bytes
 
@@ -1507,7 +1516,13 @@ def test_document_upload_concurrency_defaults_to_eight(clean_environment: pytest
 def test_document_upload_concurrency_within_its_bounds_is_accepted(
     clean_environment: pytest.MonkeyPatch, value: int
 ) -> None:
-    settings = limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY=str(value))
+    settings = limit_settings_with(
+        clean_environment,
+        DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY=str(value),
+        DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES=str(
+            value * SHIPPED_DOCUMENT_MAX_BYTES * DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN
+        ),
+    )
 
     assert settings.document_upload_max_concurrency == value
 
@@ -1599,3 +1614,102 @@ def test_document_batch_deleted_just_within_one_sweep_interval_is_accepted(
     )
 
     assert settings.sweep.document_batch_size == 40
+
+
+def test_document_upload_memory_budget_defaults_to_the_documented_four_hundred_mebibytes(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = limit_settings_with(clean_environment)
+
+    assert settings.document_upload_memory_budget_bytes == DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES
+    assert DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES == 400 * MEBIBYTE
+
+
+def test_document_upload_memory_safety_margin_is_the_measured_two_times() -> None:
+    assert DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN == 2
+
+
+def test_default_cap_and_size_limit_exactly_fill_the_default_memory_budget_and_are_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = limit_settings_with(clean_environment)
+
+    assert (
+        settings.document_upload_max_concurrency
+        * settings.document_max_bytes
+        * DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN
+        == settings.document_upload_memory_budget_bytes
+    )
+
+
+def test_one_byte_past_the_memory_budget_is_rejected(clean_environment: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValidationError, match="exceeds the upload memory budget"):
+        limit_settings_with(
+            clean_environment,
+            DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(SHIPPED_DOCUMENT_MAX_BYTES + 1),
+        )
+
+
+def test_one_byte_under_the_memory_budget_is_accepted(clean_environment: pytest.MonkeyPatch) -> None:
+    settings = limit_settings_with(
+        clean_environment, DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(SHIPPED_DOCUMENT_MAX_BYTES - 1)
+    )
+
+    assert settings.document_max_bytes == SHIPPED_DOCUMENT_MAX_BYTES - 1
+
+
+def test_raising_the_size_limit_to_its_maximum_at_the_default_cap_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="exceeds the upload memory budget"):
+        limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(MAX_DOCUMENT_BYTES))
+
+
+def test_raising_the_cap_to_its_maximum_at_the_default_size_limit_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="exceeds the upload memory budget"):
+        limit_settings_with(
+            clean_environment,
+            DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY=str(MAX_DOCUMENT_UPLOAD_CONCURRENCY),
+        )
+
+
+def test_raising_the_budget_makes_room_for_a_larger_size_limit(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = limit_settings_with(
+        clean_environment,
+        DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(MAX_DOCUMENT_BYTES),
+        DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES=str(
+            DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY
+            * MAX_DOCUMENT_BYTES
+            * DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN
+        ),
+    )
+
+    assert settings.document_max_bytes == MAX_DOCUMENT_BYTES
+
+
+def test_memory_budget_error_reports_every_term_and_the_single_process_assumption(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError) as raised:
+        limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(MAX_DOCUMENT_BYTES))
+
+    message = str(raised.value)
+    assert "cap (8)" in message
+    assert f"size limit ({MAX_DOCUMENT_BYTES} bytes)" in message
+    assert "safety margin (2)" in message
+    assert f"is {8 * MAX_DOCUMENT_BYTES * 2} bytes" in message
+    assert f"budget ({DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES} bytes)" in message
+    assert "DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES" in message
+    assert "assumes a single process" in message
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "400MiB", ""])
+def test_document_upload_memory_budget_outside_its_bounds_is_rejected(
+    clean_environment: pytest.MonkeyPatch, value: str
+) -> None:
+    with pytest.raises(ValidationError, match="document_upload_memory_budget_bytes"):
+        limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES=value)
