@@ -45,6 +45,8 @@ MEBIBYTE = 1024 * 1024
 MAX_DOCUMENT_BYTES = 100 * MEBIBYTE
 DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY = 8
 MAX_DOCUMENT_UPLOAD_CONCURRENCY = 32
+DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES = 400 * MEBIBYTE
+DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN = 2
 DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS = 120
 MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS = 900
 MAX_DOCUMENT_SOURCE_CHARACTERS = 200_000
@@ -306,6 +308,7 @@ class LimitSettings(BaseSettings):
     document_upload_read_timeout_seconds: Annotated[
         int, Field(ge=1, le=MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS)
     ] = DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS
+    document_upload_memory_budget_bytes: PositiveInt = DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES
     document_max_source_characters: Annotated[
         int, Field(ge=MIN_VISIBLE_CHARACTERS, le=MAX_DOCUMENT_SOURCE_CHARACTERS)
     ]
@@ -322,6 +325,26 @@ class LimitSettings(BaseSettings):
     def require_address_upload_limit_to_be_coarser(self) -> Self:
         if self.document_uploads_per_address_per_window < self.document_uploads_per_window:
             message = "the per-address document upload limit must be at least the per-client limit"
+            raise ValueError(message)
+        return self
+
+    @model_validator(mode="after")
+    def require_concurrent_uploads_to_fit_the_memory_budget(self) -> Self:
+        worst_case_bytes = (
+            self.document_upload_max_concurrency
+            * self.document_max_bytes
+            * DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN
+        )
+        if worst_case_bytes > self.document_upload_memory_budget_bytes:
+            message = (
+                f"the upload concurrency cap ({self.document_upload_max_concurrency}) times the document "
+                f"size limit ({self.document_max_bytes} bytes) times the safety margin "
+                f"({DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN}) is {worst_case_bytes} bytes, which exceeds the "
+                f"upload memory budget ({self.document_upload_memory_budget_bytes} bytes); lower "
+                "DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY or DECKLY_LIMIT_DOCUMENT_MAX_BYTES, or raise "
+                "DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES; the check assumes a single process, so "
+                "divide the budget by the number of workers or replicas sharing one container"
+            )
             raise ValueError(message)
         return self
 
