@@ -37,7 +37,7 @@ async def topic_verdicts(topics: tuple[str, ...]) -> list[tuple[bool, float]]:
     try:
         for topic in topics:
             started = time.monotonic()
-            allowed = await moderator.allows(generation_request(topic))
+            allowed = await moderator.allows(generation_request(topic), None)
             verdicts.append((allowed, time.monotonic() - started))
     finally:
         await llm.aclose()
@@ -64,7 +64,7 @@ async def test_configured_classifier_drops_the_one_harmful_note_and_keeps_the_re
     result = GenerationResult(deck=Deck(title="Road signs"), notes=(basic_note(1), harmful, basic_note(3)))
     llm = build_moderation_llm_client(load_settings().providers, probe=fresh_probe())
     try:
-        screened = await LlmContentModerator(llm=llm).screen(uuid4(), source_query(), result)
+        screened = await LlmContentModerator(llm=llm).screen(uuid4(), source_query().topic, result)
     finally:
         await llm.aclose()
 
@@ -97,9 +97,7 @@ async def test_configured_classifier_screens_a_maximum_size_deck_within_the_filt
     llm = build_moderation_llm_client(providers, probe=fresh_probe())
     try:
         started = time.monotonic()
-        screened = await LlmContentModerator(llm=llm).screen(
-            uuid4(), source_query(MULTIPLICATION_TOPIC), result
-        )
+        screened = await LlmContentModerator(llm=llm).screen(uuid4(), MULTIPLICATION_TOPIC, result)
         elapsed = time.monotonic() - started
     finally:
         await llm.aclose()

@@ -35,7 +35,17 @@ def lifecycle(lines: list[LogLine]) -> list[tuple[object, ...]]:
     ]
 
 
+SOURCE_LABELLED_METRICS = (
+    "deckly_generation_jobs_admitted",
+    "deckly_generation_jobs_finished",
+    "deckly_generation_job_duration",
+    "deckly_generation_stage_duration",
+)
+
+
 def sample(harness: Harness, name: str, **labels: str) -> float | None:
+    if name.startswith(SOURCE_LABELLED_METRICS):
+        labels = {"source": "topic", **labels}
     return harness.observability.metrics.registry.get_sample_value(name, labels)
 
 
@@ -179,7 +189,12 @@ async def test_a_job_the_worker_finds_already_finished_is_counted_as_skipped() -
 
     await harness.run(job_id)
 
-    assert sample(harness, "deckly_generation_jobs_finished_total", outcome="skipped", failure_code="") == 1
+    assert (
+        sample(
+            harness, "deckly_generation_jobs_finished_total", outcome="skipped", failure_code="", source=""
+        )
+        == 1
+    )
 
 
 async def test_an_interrupted_job_is_recorded_as_failed_even_though_the_cancellation_propagates() -> None:

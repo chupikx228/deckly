@@ -205,8 +205,6 @@ ignore_names = [
     "on_shutdown",
     "allow_abort_jobs",
     "AUDIO",
-    "DocumentParser",
-    "DocumentTextParser",
 ]
 
 [tool.coverage.run]

@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import replace
+from datetime import timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -24,6 +25,7 @@ from tests.fakes import FakeTopicModerator
 from tests.reserved_clients import purge_abandoned_test_jobs, reserved_client_id
 
 COMMAND_TIMEOUT_SECONDS = 2
+DOCUMENT_RETENTION = timedelta(hours=24)
 TEST_PEER_ADDRESSES = ("testclient", "127.0.0.1")
 
 

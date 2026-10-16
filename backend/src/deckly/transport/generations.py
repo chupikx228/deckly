@@ -13,6 +13,7 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
+    model_validator,
 )
 
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration, JobCreated
@@ -154,7 +155,8 @@ type LanguageTag = Annotated[str, AfterValidator(require_language_tag)]
 class GenerationRequestBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    topic: Topic
+    topic: Topic | None = None
+    document_id: CanonicalUuid | None = Field(alias="documentId", default=None)
     language: LanguageTag
     card_count: int = Field(alias="cardCount", ge=MIN_CARD_COUNT, le=MAX_CARD_COUNT, strict=True)
     difficulty: Difficulty = Difficulty.INTERMEDIATE
@@ -167,17 +169,25 @@ class GenerationRequestBody(BaseModel):
     def reject_nul_in_instructions(cls, value: str | None) -> str | None:
         return value if value is None else reject_nul(value)
 
-    @field_validator("instructions", mode="before")
+    @field_validator("topic", "document_id", "instructions", mode="before")
     @classmethod
     def reject_explicit_null(cls, value: object) -> object:
         if value is None:
-            message = "instructions must be a string when present"
+            message = "must not be null when present; leave the field out instead"
             raise ValueError(message)
         return value
+
+    @model_validator(mode="after")
+    def require_exactly_one_source(self) -> Self:
+        if (self.topic is None) == (self.document_id is None):
+            message = "exactly one of topic and documentId is required"
+            raise ValueError(message)
+        return self
 
     def to_domain(self) -> GenerationRequest:
         return GenerationRequest(
             topic=self.topic,
+            document_id=self.document_id,
             language=self.language,
             card_count=self.card_count,
             difficulty=self.difficulty,

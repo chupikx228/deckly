@@ -22,13 +22,14 @@ from deckly.infrastructure.job_store import PostgresJobStore
 from deckly.main import API_PREFIX, create_app
 from tests.domain.builders import FULL_RESULT, T0, basic_note, result_with
 from tests.fakes import (
+    FakeDocuments,
     FakeProviders,
     InMemoryResultCache,
     RecordingJobQueue,
     fresh_telemetry,
     generation_request,
 )
-from tests.integration.conftest import Cleanup
+from tests.integration.conftest import DOCUMENT_RETENTION, Cleanup
 from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
 
@@ -55,6 +56,7 @@ def pipeline(store: JobStore, providers: FakeProviders) -> RunGeneration:
         cache=InMemoryResultCache(),
         retriever=providers,
         parser=providers,
+        documents=FakeDocuments().sourcing(),
         generator=providers,
         moderator=providers,
         media=providers,
@@ -66,7 +68,9 @@ def pipeline(store: JobStore, providers: FakeProviders) -> RunGeneration:
 async def run_in_its_own_pool(settings: Settings, providers: FakeProviders, job_id: UUID) -> None:
     engine = create_engine(str(settings.database.url), pool_size=1, max_overflow=0, pool_timeout_seconds=10)
     try:
-        await pipeline(PostgresJobStore(create_session_factory(engine)), providers)(job_id)
+        await pipeline(
+            PostgresJobStore(create_session_factory(engine), document_retention=DOCUMENT_RETENTION), providers
+        )(job_id)
     finally:
         await engine.dispose()
 
@@ -106,7 +110,7 @@ def test_generation_created_through_the_api_runs_and_polls_back_as_succeeded(
 async def test_result_postgres_cannot_store_fails_the_job_instead_of_leaving_it_running(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = await queued_in(store, cleanup)
     providers = FakeProviders()
     providers.result = result_with(
@@ -125,7 +129,7 @@ async def test_result_postgres_cannot_store_fails_the_job_instead_of_leaving_it_
 async def test_cancel_during_generation_stops_the_pipeline_through_postgres(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = await queued_in(store, cleanup)
     providers = FakeProviders()
     cancel = CancelGeneration(
@@ -150,7 +154,7 @@ async def test_cancel_during_generation_stops_the_pipeline_through_postgres(
 async def test_worker_interruption_is_recorded_as_generation_failed_in_postgres(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = await queued_in(store, cleanup)
     providers = FakeProviders()
     reached = asyncio.Event()

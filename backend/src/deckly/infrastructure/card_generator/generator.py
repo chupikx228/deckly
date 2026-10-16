@@ -30,8 +30,15 @@ from deckly.infrastructure.llm.client import LlmClient, LlmReply, LlmStop
 logger = logging.getLogger(__name__)
 
 FIRST_SOURCE_NUMBER = 1
+NO_SUBJECT = ""
 MAX_IMAGE_QUERY_CHARACTERS = 100
 WORD_SEPARATOR = " "
+
+
+def subject_of(request: GenerationRequest, material: tuple[SourceMaterial, ...]) -> str:
+    if request.topic is not None:
+        return request.topic
+    return material[0].source.title if material else NO_SUBJECT
 
 
 class DropReason(StrEnum):
@@ -174,7 +181,8 @@ class LlmCardGenerator:
                     "material_entries": len(material),
                 },
             )
-            return GeneratedCards(result=GenerationResult(deck=repair_deck(None, request.topic), notes=()))
+            deck = repair_deck(None, subject_of(request, material))
+            return GeneratedCards(result=GenerationResult(deck=deck, notes=()))
         reply = await self.llm.complete(build_prompt(request, material, handlers))
         document = EMPTY_DOCUMENT if reply.stop is LlmStop.REFUSED else extract_document(reply.text)
         drops: Counter[DropReason] = Counter()
@@ -193,7 +201,8 @@ class LlmCardGenerator:
             },
         )
         result = GenerationResult(
-            deck=repair_deck(document.deck, request.topic), notes=tuple(draft.note for draft in drafts)
+            deck=repair_deck(document.deck, subject_of(request, material)),
+            notes=tuple(draft.note for draft in drafts),
         )
         return GeneratedCards(result=result, image_queries=queries)
 

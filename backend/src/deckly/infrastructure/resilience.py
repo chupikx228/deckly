@@ -56,6 +56,7 @@ class CallSize(StrEnum):
 class ProviderOperation(StrEnum):
     CARD_GENERATION = "card_generation"
     CONTENT_MODERATION = "content_moderation"
+    DOCUMENT_MODERATION = "document_moderation"
     TOPIC_MODERATION = "topic_moderation"
     IMAGE_MODERATION = "image_moderation"
     WEB_SEARCH = "web_search"

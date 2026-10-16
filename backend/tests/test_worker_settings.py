@@ -21,7 +21,7 @@ from deckly.application.housekeeping import (
 )
 from deckly.config import (
     DEFAULT_MODERATION_MAX_CONCURRENCY,
-    GATED_STAGES_PER_JOB,
+    DOCUMENT_GATED_STAGES_PER_JOB,
     MAX_MODERATION_CONCURRENCY,
     WORKER_MAX_JOBS,
     ModelProvider,
@@ -379,7 +379,7 @@ def calls_in_worker_settings(callee: str) -> int:
 
 
 def test_gated_stages_per_job_matches_the_call_sites_wired_through_the_moderation_gate() -> None:
-    assert calls_in_worker_settings("bounded") == GATED_STAGES_PER_JOB
+    assert calls_in_worker_settings("bounded") == DOCUMENT_GATED_STAGES_PER_JOB
 
 
 def test_every_gated_call_site_goes_through_the_one_bounded_helper() -> None:

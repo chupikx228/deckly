@@ -13,6 +13,7 @@ from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.llm.client import LlmReply
 from tests.domain.builders import T0, at
 from tests.fakes import (
+    FakeDocuments,
     FakeLlmClient,
     FakeProviders,
     InMemoryJobStore,
@@ -61,6 +62,7 @@ class Pipeline:
             cache=InMemoryResultCache(),
             retriever=self.retriever,
             parser=parser,
+            documents=FakeDocuments().sourcing(),
             generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),
             moderator=providers,
             media=providers,

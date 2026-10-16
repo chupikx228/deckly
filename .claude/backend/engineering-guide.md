@@ -240,8 +240,9 @@ logged without skipping the others:
 4. **Finished jobs** older than `DECKLY_CACHE_JOB_RETENTION_SECONDS` (at least 24h, measured from
    completion) are hard-deleted; polling one afterwards returns `404 JOB_NOT_FOUND`. Unfinished
    rows are never deleted. The backend is not the system of record, so there is no archive.
-5. **Unused documents** uploaded more than `DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS` ago (default
-   24 h, between 1 h and 7 days) lose their stored object and then their row. This step has its own
+5. **Expired documents**, uploaded more than `DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS` ago (default
+   24 h, between 1 h and 7 days) and referred to by no job, lose their stored object and then their
+   row. This step has its own
    batch size, `DECKLY_SWEEP_DOCUMENT_BATCH_SIZE`, because it holds its rows locked while it calls
    the object store; config validation keeps one batch's worst-case deletion time (batch size over
    `DECKLY_PROVIDER_STORAGE_MAX_CONCURRENCY`, times the delete deadline) inside the sweep interval.
@@ -260,13 +261,16 @@ Object first, row second: the only half-state it can leave is a row whose object
 which the next run finishes, never an object with no row pointing at it. A pending upload whose
 object was never confirmed (see "Document uploads") is swept the same way once it is old enough.
 
-"Unused" is `documents.used_at IS NULL`. Nothing sets `used_at` yet: the generation wiring (DEC-76)
-must set it in the same transaction that stores a job referring to the document, and must refuse a
-document that is pending or missing. It also has to decide when a used document is finally deleted;
-until it does, a used document is kept. The suggested shape is a foreign key from the job to the
-document, with the sweep's condition changed from `used_at IS NULL` to "no job refers to it", so a
-document is released when job retention deletes its last job. The condition lives in one place,
-`expired_documents_statement` in `infrastructure/documents/store.py`.
+"Expired" is `is_expired` in `infrastructure/documents/store.py`: uploaded before the cutoff and
+no `generation_jobs` row refers to it. `generation_jobs.document_id` is a foreign key with `ON DELETE
+RESTRICT`, so the database itself refuses to delete a document a job still uses, and a used document
+is released on the first sweep after job retention deletes its last job. Admission, the worker's
+read and `GET /documents/{id}` use the complement, `is_usable` (uploaded within the window, or
+referred to by a job); the sweep holds its batch `FOR UPDATE`, which the admission's claim and the
+foreign-key check both wait on, so a document cannot gain a reference while the sweep deletes it.
+`used_at` is set once, on first use, in the transaction that stores the job, and is not part of
+either condition. A document has no fixed maximum lifetime: a client that keeps generating from it
+before its last job is purged keeps it, each time spending a generation unit.
 
 A queued job whose saved request no longer validates (a contract change made it invalid after it
 was stored) is not re-validated by the sweep. The worker fails it with `GENERATION_FAILED` as
@@ -304,8 +308,10 @@ A generation reads a document by fetching its object (`DocumentStorage.get`, cap
 recorded at upload) and handing the bytes to the `DocumentParser` port, which returns ordinary
 `SourceMaterial` cited by `DocumentSource` (document id, `page` or `slide`, 1-based number). Every
 size, ratio, page and time limit on that path lives in the parser, not in upload-time sniffing:
-sniffing decides the type, the parser decides whether the content can be read safely. Wiring it
-into the pipeline is DEC-76.
+sniffing decides the type, the parser decides whether the content can be read safely.
+`RunGeneration` does this through `DocumentSourcing` in `retrieving_sources` and `parsing_sources`
+for a request that names a `documentId`, and screens the parsed text with the `MaterialModerator`
+port before the card generator sees it (see "Generating from a document" in the README).
 
 ## Error handling
 

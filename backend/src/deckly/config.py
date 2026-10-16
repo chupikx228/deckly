@@ -33,7 +33,8 @@ WORKER_MAX_JOBS = 10
 DEFAULT_MODERATION_MAX_CONCURRENCY = WORKER_MAX_JOBS
 MAX_MODERATION_CONCURRENCY = 40
 MAX_MODERATION_CHUNKS_PER_JOB = math.ceil(MAX_CARD_COUNT / NOTES_PER_CONTENT_CHECK)
-GATED_STAGES_PER_JOB = 2
+TOPIC_GATED_STAGES_PER_JOB = 2
+DOCUMENT_GATED_STAGES_PER_JOB = 3
 MAX_MODERATION_TIMEOUT_SECONDS = 10
 REGENERATE_OVERHEAD_SECONDS = 0.5
 MEDIA_URL_MIN_VALIDITY_SECONDS = 24 * 60 * 60
@@ -46,6 +47,8 @@ DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY = 8
 MAX_DOCUMENT_UPLOAD_CONCURRENCY = 32
 DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS = 120
 MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS = 900
+MAX_DOCUMENT_SOURCE_CHARACTERS = 200_000
+MAX_DOCUMENT_PARSE_DEADLINE_SECONDS = 120
 MIN_DOCUMENT_RETENTION_SECONDS = 60 * 60
 MAX_DOCUMENT_RETENTION_SECONDS = 7 * 24 * 60 * 60
 MAX_STORAGE_CONCURRENCY = 16
@@ -185,11 +188,19 @@ class ProviderSettings(BaseSettings):
     storage_max_concurrency: Annotated[int, Field(ge=1, le=MAX_STORAGE_CONCURRENCY)]
 
     @property
-    def moderation_gate_worst_case_wait_seconds(self) -> int:
+    def moderation_gate_worst_case_wait_per_stage_seconds(self) -> int:
         calls_ahead = WORKER_MAX_JOBS * MAX_MODERATION_CHUNKS_PER_JOB - 1
         waves_ahead = calls_ahead // self.moderation_max_concurrency
         longest_slot_hold = max(self.moderation_filter_deadline_seconds, self.media_judge_deadline_seconds)
-        return GATED_STAGES_PER_JOB * waves_ahead * longest_slot_hold
+        return waves_ahead * longest_slot_hold
+
+    @property
+    def moderation_gate_worst_case_wait_seconds(self) -> int:
+        return TOPIC_GATED_STAGES_PER_JOB * self.moderation_gate_worst_case_wait_per_stage_seconds
+
+    @property
+    def document_moderation_gate_worst_case_wait_seconds(self) -> int:
+        return DOCUMENT_GATED_STAGES_PER_JOB * self.moderation_gate_worst_case_wait_per_stage_seconds
 
     @field_validator("model_api_key", "search_api_key", "storage_secret_access_key")
     @classmethod
@@ -295,6 +306,10 @@ class LimitSettings(BaseSettings):
     document_upload_read_timeout_seconds: Annotated[
         int, Field(ge=1, le=MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS)
     ] = DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS
+    document_max_source_characters: Annotated[
+        int, Field(ge=MIN_VISIBLE_CHARACTERS, le=MAX_DOCUMENT_SOURCE_CHARACTERS)
+    ]
+    document_parse_deadline_seconds: Annotated[int, Field(ge=1, le=MAX_DOCUMENT_PARSE_DEADLINE_SECONDS)]
 
     @model_validator(mode="after")
     def require_address_limit_to_be_coarser(self) -> Self:
@@ -406,25 +421,58 @@ class Settings:
             return self.redis.url
         return self.cache.redis_url
 
-    def __post_init__(self) -> None:
-        provider_deadlines = (
-            self.providers.search_deadline_seconds
-            + self.providers.model_deadline_seconds
+    @property
+    def card_deadlines_seconds(self) -> int:
+        return (
+            self.providers.model_deadline_seconds
             + self.providers.media_deadline_seconds
             + self.providers.media_judge_deadline_seconds
             + self.providers.moderation_filter_deadline_seconds
         )
-        if provider_deadlines >= self.limits.generation_job_timeout_seconds:
+
+    @property
+    def topic_deadlines_seconds(self) -> int:
+        return self.providers.search_deadline_seconds + self.card_deadlines_seconds
+
+    @property
+    def document_deadlines_seconds(self) -> int:
+        return (
+            self.providers.storage_download_deadline_seconds
+            + self.limits.document_parse_deadline_seconds
+            + self.providers.moderation_filter_deadline_seconds
+            + self.card_deadlines_seconds
+        )
+
+    def __post_init__(self) -> None:
+        job_timeout = self.limits.generation_job_timeout_seconds
+        topic_deadlines = self.topic_deadlines_seconds
+        document_deadlines = self.document_deadlines_seconds
+        if topic_deadlines >= job_timeout:
             message = (
                 "the search, model, media, media judge and moderation deadlines together must leave room "
                 "within the generation job timeout"
             )
             raise ValueError(message)
-        gate_wait = self.providers.moderation_gate_worst_case_wait_seconds
-        if provider_deadlines + gate_wait >= self.limits.generation_job_timeout_seconds:
+        if document_deadlines >= job_timeout:
             message = (
-                f"the provider deadlines ({provider_deadlines}s) plus the worst-case wait for a moderation "
+                "the document download, document parse and document screening deadlines plus the model, "
+                "media, media judge and moderation deadlines together must leave room within the generation "
+                "job timeout"
+            )
+            raise ValueError(message)
+        gate_wait = self.providers.moderation_gate_worst_case_wait_seconds
+        if topic_deadlines + gate_wait >= job_timeout:
+            message = (
+                f"the provider deadlines ({topic_deadlines}s) plus the worst-case wait for a moderation "
                 f"concurrency slot ({gate_wait}s) must leave room within the generation job timeout"
+            )
+            raise ValueError(message)
+        document_gate_wait = self.providers.document_moderation_gate_worst_case_wait_seconds
+        if document_deadlines + document_gate_wait >= job_timeout:
+            message = (
+                f"the deadlines of a document-sourced job ({document_deadlines}s) plus the worst-case wait "
+                f"for a moderation concurrency slot at each of its {DOCUMENT_GATED_STAGES_PER_JOB} gated "
+                f"stages ({document_gate_wait}s) must leave room within the generation job timeout"
             )
             raise ValueError(message)
         if self.regenerate.budgeted_seconds > self.limits.regenerate_note_timeout_seconds:

@@ -26,6 +26,7 @@ from deckly.domain.source import WebSource
 from deckly.domain.text import is_blank, utf16_length
 from deckly.infrastructure.card_generator.generator import MAX_IMAGE_QUERY_CHARACTERS, LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
+from deckly.infrastructure.card_generator.prompt import DOCUMENT_SUBJECT
 from deckly.infrastructure.llm.client import (
     LlmClient,
     LlmRejectedError,
@@ -46,7 +47,11 @@ from deckly.transport.results import GenerationResultBody
 from tests.domain.builders import JOB_ID, T0
 from tests.fakes import (
     ADDRESS,
+    DOCUMENT_ID,
+    DOCUMENT_MATERIAL,
     MODEL_THINKING_SECONDS,
+    UPLOADED_DOCUMENT,
+    FakeDocuments,
     FakeLlmClient,
     Harness,
     LlmOutcome,
@@ -1273,6 +1278,7 @@ def pipeline_for(harness: Harness, llm: LlmClient) -> RunGeneration:
         cache=harness.cache,
         retriever=harness.providers,
         parser=harness.providers,
+        documents=FakeDocuments().sourcing(),
         generator=LlmCardGenerator(llm=llm, new_id=lambda: next(ids), handlers=NOTE_TYPE_HANDLERS),
         moderator=harness.providers,
         media=harness.providers,
@@ -1362,3 +1368,39 @@ async def test_pipeline_succeeds_with_the_valid_notes_of_a_generated_reply() -> 
 
     assert isinstance(job.state, Succeeded)
     assert len(job.state.result.notes) == 2
+
+
+def from_document(job_request: GenerationRequest) -> GenerationRequest:
+    return replace(job_request, topic=None, document_id=DOCUMENT_ID)
+
+
+async def test_prompt_for_a_document_names_the_document_as_its_subject_instead_of_a_topic() -> None:
+    llm = FakeLlmClient(model_reply(document(basic(1))))
+
+    await generate(llm, from_document(request(NoteType.BASIC)), DOCUMENT_MATERIAL)
+
+    [prompt] = llm.prompts
+    assert DOCUMENT_SUBJECT in prompt.user
+    assert "Topic:" not in prompt.user
+    assert DOCUMENT_MATERIAL[0].text in prompt.user
+    assert f"Title: {UPLOADED_DOCUMENT.filename}" in prompt.user
+
+
+@pytest.mark.parametrize("deck", [None, {"title": "  "}], ids=["no deck", "blank title"])
+async def test_deck_from_a_document_without_a_usable_title_is_named_after_the_document(deck: object) -> None:
+    llm = FakeLlmClient(model_reply({"deck": deck, "notes": [basic(1)]}))
+
+    result = await generate(llm, from_document(request(NoteType.BASIC)), DOCUMENT_MATERIAL)
+
+    assert result.deck.title == UPLOADED_DOCUMENT.filename
+
+
+async def test_document_request_no_handler_can_serve_names_its_empty_deck_after_the_document() -> None:
+    llm = FakeLlmClient(model_reply(document(basic(1))))
+    generator = LlmCardGenerator(llm=llm, new_id=sequential_job_ids().__next__, handlers={})
+
+    cards = await generator.generate(JOB_ID, from_document(request(NoteType.BASIC)), DOCUMENT_MATERIAL)
+
+    assert cards.result.deck.title == UPLOADED_DOCUMENT.filename
+    assert cards.result.notes == ()
+    assert llm.prompts == []

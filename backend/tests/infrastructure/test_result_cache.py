@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Unpack
+from uuid import UUID
 
 import pytest
 from redis.asyncio import Redis
@@ -10,6 +12,7 @@ from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.notes.note_type import NoteType
 from deckly.infrastructure.result_cache import (
+    DOCUMENT_KEY_PREFIX,
     KEY_PREFIX,
     RedisResultCache,
     ResultCacheLimits,
@@ -18,7 +21,7 @@ from deckly.infrastructure.result_cache import (
 )
 from deckly.infrastructure.stored_result import dump_result
 from tests.domain.builders import FULL_RESULT, RequestChanges
-from tests.fakes import fresh_metrics, generation_request
+from tests.fakes import DOCUMENT_ID, document_request, fresh_metrics, generation_request
 from tests.infrastructure.test_queue import LOOPBACK, never_answer, unused_port
 
 pytestmark = pytest.mark.anyio
@@ -184,3 +187,27 @@ def test_a_key_can_be_derived_from_any_text_a_request_can_carry(text: str) -> No
 
     assert key.startswith(f"{KEY_PREFIX}:")
     assert key.isascii()
+
+
+def test_document_requests_live_in_their_own_namespace_so_they_never_collide_with_topics() -> None:
+    prefix, _, digest = key_of(document_request()).rpartition(":")
+
+    assert prefix == DOCUMENT_KEY_PREFIX != KEY_PREFIX
+    assert len(digest) == SHA256_HEX_LENGTH
+    assert str(DOCUMENT_ID) not in key_of(document_request())
+
+
+def test_topic_keys_are_unchanged_by_the_document_namespace() -> None:
+    fingerprint = request_with().fingerprint()
+    canonical = json.dumps(asdict(fingerprint), sort_keys=True, separators=(",", ":"))
+
+    assert key_of(request_with()) == f"{KEY_PREFIX}:{hashlib.sha256(canonical.encode()).hexdigest()}"
+
+
+def test_document_requests_share_a_key_only_when_they_name_the_same_document_with_the_same_settings() -> None:
+    same = replace(document_request(), language="RU", note_types=(NoteType.BASIC,))
+    other_document = document_request(UUID("6e1d8b2f-4c3a-4d9e-8f7a-2b3c4d5e6f70"))
+    more_cards = replace(document_request(), card_count=41)
+
+    assert key_of(same) == key_of(document_request())
+    assert len({key_of(document_request()), key_of(other_document), key_of(more_cards)}) == 3

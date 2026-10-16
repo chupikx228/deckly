@@ -7,7 +7,12 @@ from redis.asyncio import Redis
 
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.domain.deck import GenerationResult
-from deckly.domain.generation import GenerationFingerprint, GenerationRequest
+from deckly.domain.generation import (
+    DocumentGenerationFingerprint,
+    Fingerprint,
+    GenerationFingerprint,
+    GenerationRequest,
+)
 from deckly.infrastructure.observability.metrics import CacheLookup, Metrics
 from deckly.infrastructure.rate_limit import bounded_redis
 from deckly.infrastructure.stored_result import dump_result, load_result
@@ -15,6 +20,7 @@ from deckly.infrastructure.stored_result import dump_result, load_result
 logger = logging.getLogger(__name__)
 
 KEY_PREFIX = "deckly:generation-result:v2"
+DOCUMENT_KEY_PREFIX = "deckly:generation-result:document:v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,9 +29,17 @@ class ResultCacheLimits:
     command_timeout_seconds: float
 
 
-def cache_key(fingerprint: GenerationFingerprint) -> str:
-    canonical = json.dumps(asdict(fingerprint), sort_keys=True, separators=(",", ":"))
-    return f"{KEY_PREFIX}:{hashlib.sha256(canonical.encode()).hexdigest()}"
+def key_prefix(fingerprint: Fingerprint) -> str:
+    match fingerprint:
+        case GenerationFingerprint():
+            return KEY_PREFIX
+        case DocumentGenerationFingerprint():
+            return DOCUMENT_KEY_PREFIX
+
+
+def cache_key(fingerprint: Fingerprint) -> str:
+    canonical = json.dumps(asdict(fingerprint), sort_keys=True, separators=(",", ":"), default=str)
+    return f"{key_prefix(fingerprint)}:{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
 def parse_payload(payload: object) -> GenerationResult:

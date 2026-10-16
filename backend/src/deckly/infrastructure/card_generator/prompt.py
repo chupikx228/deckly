@@ -41,6 +41,9 @@ DIFFICULTY_GUIDANCE: Mapping[Difficulty, str] = {
     Difficulty.INTERMEDIATE: "The main facts and how they relate, for someone with some background.",
     Difficulty.ADVANCED: "Details, exceptions and fine distinctions for someone who knows the basics.",
 }
+DOCUMENT_SUBJECT = (
+    "Subject: the document the user uploaded, given as the source material. Cover what it teaches."
+)
 SECTION_BREAK = "\n\n"
 LIST_SEPARATOR = ", "
 ESTIMATED_DECK_TOKENS = 100
@@ -62,6 +65,10 @@ def system_prompt(handlers: Sequence[NoteTypeHandler], *, include_images: bool) 
     )
 
 
+def subject_line(request: GenerationRequest) -> str:
+    return DOCUMENT_SUBJECT if request.topic is None else f"Topic: {request.topic}"
+
+
 def material_entry(number: int, entry: SourceMaterial) -> str:
     return f'<source number="{number}">\nTitle: {entry.source.title}\n\n{entry.text}\n</source>'
 
@@ -71,7 +78,7 @@ def user_prompt(
 ) -> str:
     note_types = LIST_SEPARATOR.join(handler.note_type for handler in handlers)
     request_section = (
-        f"Topic: {request.topic}\n"
+        f"{subject_line(request)}\n"
         f"Language (BCP 47 tag): {request.language}\n"
         f"Difficulty: {request.difficulty}. {DIFFICULTY_GUIDANCE[request.difficulty]}\n"
         f"Write up to {request.card_count} notes. Fewer is fine when the material supports fewer.\n"

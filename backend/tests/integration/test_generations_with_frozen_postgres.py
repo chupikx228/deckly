@@ -15,7 +15,7 @@ from deckly.main import API_PREFIX, create_app
 from deckly.transport.generations import CLIENT_ID_HEADER, IDEMPOTENCY_KEY_HEADER
 from tests.domain.builders import T0
 from tests.fakes import generation_request
-from tests.integration.conftest import Cleanup
+from tests.integration.conftest import DOCUMENT_RETENTION, Cleanup
 from tests.integration.test_health_endpoint import Dependency, Proxy, postgres_at, upstream
 from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
@@ -55,7 +55,9 @@ def through_proxy(settings: Settings, postgres_port: int) -> Settings:
 async def stored_job(session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup) -> UUID:
     job = GenerationJob.queue(uuid4(), T0)
     cleanup.job_ids.add(job.job_id)
-    await PostgresJobStore(session_factory).add(job, generation_request(), cleanup.scope())
+    await PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION).add(
+        job, generation_request(), cleanup.scope()
+    )
     return job.job_id
 
 

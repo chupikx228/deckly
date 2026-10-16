@@ -12,7 +12,7 @@ from deckly.domain.job import GenerationJob
 from deckly.infrastructure.job_store import PostgresJobStore
 from deckly.infrastructure.tables import GenerationJobRow
 from tests.fakes import generation_request
-from tests.integration.conftest import Cleanup
+from tests.integration.conftest import DOCUMENT_RETENTION, Cleanup
 from tests.reserved_clients import ABANDONED_AFTER, purge_abandoned_test_jobs, reserved_client_id
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -30,7 +30,9 @@ async def leftover(
     cleanup.client_ids.add(client_id)
     job = GenerationJob.queue(uuid4(), created_at)
     scope = IdempotencyScope(client_id=client_id, idempotency_key=uuid4())
-    await PostgresJobStore(session_factory).add(job, generation_request(), scope)
+    await PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION).add(
+        job, generation_request(), scope
+    )
     return job.job_id
 
 

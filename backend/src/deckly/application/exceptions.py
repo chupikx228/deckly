@@ -22,6 +22,10 @@ class DocumentHasNoTextError(ApplicationError):
     pass
 
 
+class DocumentRejectedError(ApplicationError):
+    pass
+
+
 class JobStoppedError(ApplicationError):
     pass
 

@@ -26,8 +26,8 @@ from deckly.infrastructure.database import create_engine, create_session_factory
 from deckly.infrastructure.job_store import PostgresJobHousekeeping, PostgresJobStore
 from deckly.infrastructure.tables import GenerationJobRow
 from tests.domain.builders import FULL_RESULT
-from tests.fakes import FakeProviders, InMemoryResultCache, fresh_telemetry, generation_request
-from tests.integration.conftest import Cleanup
+from tests.fakes import FakeDocuments, FakeProviders, InMemoryResultCache, fresh_telemetry, generation_request
+from tests.integration.conftest import DOCUMENT_RETENTION, Cleanup
 from tests.integration.test_postgres_job_store import RowHolder, until_an_update_waits_on_the_row_lock
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -60,7 +60,7 @@ async def stored(store: PostgresJobStore, cleanup: Cleanup, job: GenerationJob) 
 
 def sweeper(session_factory: async_sessionmaker[AsyncSession], now: datetime = SWEPT_AT) -> SweepStaleJobs:
     return SweepStaleJobs(
-        store=PostgresJobStore(session_factory),
+        store=PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION),
         housekeeping=PostgresJobHousekeeping(session_factory),
         policy=StalenessPolicy(running_after=RUNNING_AFTER, queued_after=QUEUED_AFTER),
         batch_size=BATCH_SIZE,
@@ -74,6 +74,7 @@ def pipeline(store: PostgresJobStore, providers: FakeProviders) -> RunGeneration
         cache=InMemoryResultCache(),
         retriever=providers,
         parser=providers,
+        documents=FakeDocuments().sourcing(),
         generator=providers,
         moderator=providers,
         media=providers,
@@ -106,7 +107,7 @@ async def rows_of(
 async def test_stale_lists_jobs_of_one_status_last_changed_before_the_cutoff_oldest_first(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     older = await stored(store, cleanup, running(timedelta(seconds=1)))
     oldest = await stored(store, cleanup, running())
     await stored(store, cleanup, running(DAY))
@@ -124,7 +125,7 @@ async def test_stale_lists_jobs_of_one_status_last_changed_before_the_cutoff_old
 async def test_released_key_starts_a_new_job_while_the_original_row_stays_pollable(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     expired_scope, fresh_scope = cleanup.scope(), cleanup.scope()
     original = await store.add(queued(), generation_request(), expired_scope)
     fresh = await store.add(queued(2 * DAY), generation_request(), fresh_scope)
@@ -146,7 +147,7 @@ async def test_released_key_starts_a_new_job_while_the_original_row_stays_pollab
 async def test_purge_deletes_only_finished_jobs_past_retention(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     expired = [
         await stored(store, cleanup, running().succeed(FULL_RESULT, ANCIENT)),
         await stored(store, cleanup, queued().cancel(ANCIENT)),
@@ -168,7 +169,7 @@ async def test_purge_deletes_only_finished_jobs_past_retention(
 async def test_purge_skips_a_row_someone_holds_instead_of_waiting_for_it(
     settings: Settings, session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     held = await stored(store, cleanup, queued().cancel(ANCIENT))
     holder = RowHolder(settings, held)
     holding = asyncio.create_task(holder.update(lambda job: job))
@@ -186,7 +187,7 @@ async def test_purge_skips_a_row_someone_holds_instead_of_waiting_for_it(
 async def test_sweep_fails_jobs_stuck_past_their_threshold_and_leaves_the_rest(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     crashed = await stored(store, cleanup, running().advance(JobStage.GENERATING_CARDS, 0.5, ANCIENT))
     lost = await stored(store, cleanup, queued())
     busy = running(timedelta(hours=1, minutes=50))
@@ -215,7 +216,7 @@ async def test_sweep_fails_jobs_stuck_past_their_threshold_and_leaves_the_rest(
 async def test_queued_job_with_an_invalidated_request_is_failed_when_the_worker_picks_it_up(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job_id = await stored(store, cleanup, GenerationJob.queue(uuid4(), utc_now()))
     await invalidate_saved_request(session_factory, job_id)
     providers = FakeProviders()
@@ -232,7 +233,7 @@ async def test_queued_job_with_an_invalidated_request_is_failed_when_the_worker_
 async def test_queued_job_with_an_invalidated_request_that_is_never_picked_up_is_swept(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job_id = await stored(store, cleanup, queued())
     await invalidate_saved_request(session_factory, job_id)
 
@@ -247,7 +248,7 @@ async def test_queued_job_with_an_invalidated_request_that_is_never_picked_up_is
 async def test_sweep_waiting_on_a_worker_that_advances_the_job_leaves_it_running(
     settings: Settings, session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = running()
     await stored(store, cleanup, job)
 
@@ -272,7 +273,7 @@ async def test_sweep_waiting_on_a_worker_that_advances_the_job_leaves_it_running
 async def test_sweep_waiting_on_a_worker_that_claims_the_queued_job_leaves_it_running(
     settings: Settings, session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = queued()
     await stored(store, cleanup, job)
 
@@ -297,7 +298,7 @@ async def test_sweep_waiting_on_a_worker_that_claims_the_queued_job_leaves_it_ru
 async def test_worker_claiming_a_job_the_sweep_is_failing_waits_then_stops_without_calling_a_port(
     settings: Settings, session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = queued()
     await stored(store, cleanup, job)
     sweep = RowHolder(settings, job.job_id)
@@ -322,7 +323,7 @@ async def test_worker_claiming_a_job_the_sweep_is_failing_waits_then_stops_witho
 async def test_two_sweeps_racing_over_one_stuck_job_fail_it_exactly_once(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = running()
     await stored(store, cleanup, job)
     first, second = sweeper(session_factory), sweeper(session_factory, SWEPT_AT + timedelta(seconds=1))
@@ -357,7 +358,7 @@ async def test_key_released_between_a_conflicting_insert_and_its_lookup_starts_a
     cleanup: Cleanup,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     held = cleanup.scope()
     original = await store.add(queued(), generation_request(), held)
     real_scoped_row = job_store.scoped_row
@@ -383,7 +384,7 @@ async def test_key_released_between_a_conflicting_insert_and_its_lookup_starts_a
 async def test_retention_run_releases_expired_keys_and_purges_expired_jobs(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     held = cleanup.scope()
     waiting = await store.add(queued(), generation_request(), held)
     finished = await stored(store, cleanup, running().succeed(FULL_RESULT, ANCIENT))
@@ -407,7 +408,7 @@ async def test_retention_run_releases_expired_keys_and_purges_expired_jobs(
 async def test_one_unrestorable_stuck_job_does_not_stop_the_sweep_from_failing_the_others(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     poisoned = await stored(store, cleanup, running())
     stuck = await stored(store, cleanup, running(timedelta(seconds=1)))
     async with session_factory.begin() as session:
@@ -429,7 +430,7 @@ async def test_one_unrestorable_stuck_job_does_not_stop_the_sweep_from_failing_t
 async def test_one_retention_run_touches_at_most_one_batch_of_rows_oldest_first(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     older_scope, newer_scope = cleanup.scope(), cleanup.scope()
     older = await store.add(queued().cancel(ANCIENT), generation_request(), older_scope)
     newer = await store.add(

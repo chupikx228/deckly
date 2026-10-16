@@ -1,11 +1,12 @@
 from dataclasses import dataclass
 from enum import StrEnum
+from uuid import UUID
 
 from deckly.domain.exceptions import InvalidGenerationRequestError, UnsupportedNoteTypeError
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import fields_type_for
 from deckly.domain.source import SourceQuery
-from deckly.domain.text import collapse_whitespace, is_blank
+from deckly.domain.text import collapse_whitespace, is_blank, is_uuid_v4
 
 UNGENERATABLE_NOTE_TYPES = frozenset({NoteType.IMAGE_OCCLUSION})
 MIN_CARD_COUNT = 5
@@ -16,6 +17,11 @@ class Difficulty(StrEnum):
     BEGINNER = "beginner"
     INTERMEDIATE = "intermediate"
     ADVANCED = "advanced"
+
+
+class SourceKind(StrEnum):
+    TOPIC = "topic"
+    DOCUMENT = "document"
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,8 +36,8 @@ class GenerationFingerprint:
 
 
 @dataclass(frozen=True, slots=True)
-class GenerationRequest:
-    topic: str
+class DocumentGenerationFingerprint:
+    document_id: UUID
     language: str
     card_count: int
     difficulty: Difficulty
@@ -39,9 +45,30 @@ class GenerationRequest:
     include_images: bool
     instructions: str | None
 
+
+type Fingerprint = GenerationFingerprint | DocumentGenerationFingerprint
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationRequest:
+    topic: str | None
+    language: str
+    card_count: int
+    difficulty: Difficulty
+    note_types: tuple[NoteType, ...]
+    include_images: bool
+    instructions: str | None
+    document_id: UUID | None = None
+
     def __post_init__(self) -> None:
-        if is_blank(self.topic):
+        if (self.topic is None) == (self.document_id is None):
+            message = "a request must name exactly one of a topic and a documentId"
+            raise InvalidGenerationRequestError(message)
+        if self.topic is not None and is_blank(self.topic):
             message = "topic must contain visible characters"
+            raise InvalidGenerationRequestError(message)
+        if self.document_id is not None and not is_uuid_v4(self.document_id):
+            message = f"documentId {self.document_id} is not a UUID v4"
             raise InvalidGenerationRequestError(message)
         if not MIN_CARD_COUNT <= self.card_count <= MAX_CARD_COUNT:
             message = f"card count must be {MIN_CARD_COUNT} to {MAX_CARD_COUNT}, got {self.card_count}"
@@ -68,17 +95,36 @@ class GenerationRequest:
             message = f"note types {ungeneratable} are not generated yet"
             raise InvalidGenerationRequestError(message)
 
+    @property
+    def source_kind(self) -> SourceKind:
+        return SourceKind.TOPIC if self.document_id is None else SourceKind.DOCUMENT
+
     def source_query(self) -> SourceQuery:
+        if self.topic is None:
+            message = "a request that generates from a document has no topic to search for"
+            raise InvalidGenerationRequestError(message)
         return SourceQuery(topic=self.topic, language=self.language)
 
-    def fingerprint(self) -> GenerationFingerprint:
-        instructions = None if self.instructions is None else collapse_whitespace(self.instructions)
+    def fingerprint(self) -> Fingerprint:
+        collapsed = None if self.instructions is None else collapse_whitespace(self.instructions)
+        instructions = None if collapsed is None or is_blank(collapsed) else collapsed
+        note_types = tuple(sorted(self.note_types))
+        if self.document_id is not None:
+            return DocumentGenerationFingerprint(
+                document_id=self.document_id,
+                language=self.language.lower(),
+                card_count=self.card_count,
+                difficulty=self.difficulty,
+                note_types=note_types,
+                include_images=self.include_images,
+                instructions=instructions,
+            )
         return GenerationFingerprint(
-            topic=collapse_whitespace(self.topic),
+            topic=collapse_whitespace(self.source_query().topic),
             language=self.language.lower(),
             card_count=self.card_count,
             difficulty=self.difficulty,
-            note_types=tuple(sorted(self.note_types)),
+            note_types=note_types,
             include_images=self.include_images,
-            instructions=None if instructions is None or is_blank(instructions) else instructions,
+            instructions=instructions,
         )

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
@@ -11,30 +11,40 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyHttpUrl, SecretStr
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deckly.application.documents import UploadDocument
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.housekeeping import DocumentRetentionPolicy, EnforceDocumentRetention
+from deckly.application.pipeline import RunGeneration
+from deckly.application.ports import IdempotencyScope
 from deckly.config import Settings
 from deckly.domain.document import Document, DocumentFormat, storage_key
 from deckly.domain.exceptions import DocumentNotFoundError
+from deckly.domain.job import GenerationJob
+from deckly.domain.notes.note_type import NoteType
 from deckly.domain.source import CitationUnit, DocumentSource
+from deckly.infrastructure.card_generator.generator import LlmCardGenerator
+from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.documents.parser import DocumentTextParser
 from deckly.infrastructure.documents.store import (
     DocumentStatus,
     PostgresDocumentHousekeeping,
     PostgresDocumentStore,
 )
+from deckly.infrastructure.job_store import PostgresJobHousekeeping, PostgresJobStore
+from deckly.infrastructure.moderation.moderator import LlmContentModerator, LlmMaterialModerator
 from deckly.infrastructure.observability.metrics import DOCUMENT_UPLOAD_GATE
-from deckly.infrastructure.tables import DocumentRow
+from deckly.infrastructure.tables import DocumentRow, GenerationJobRow
 from deckly.infrastructure.upload_gate import UPLOAD_CAPACITY_RETRY_AFTER_SECONDS, RejectingUploadGate
 from deckly.infrastructure.upload_limit import ADDRESS_KEY_PREFIX, CLIENT_KEY_PREFIX
 from deckly.main import API_PREFIX, create_app
 from deckly.worker.settings import (
     ENFORCE_DOCUMENT_RETENTION_KEY,
     OBSERVABILITY_KEY,
+    RUN_GENERATION_KEY,
     SETTINGS_KEY,
     WorkerContext,
     build_document_storage,
@@ -45,8 +55,15 @@ from deckly.worker.settings import (
 )
 from tests.document_files import TOPIC_TEXT, text_pdf
 from tests.documents import InMemoryDocumentStorage, pdf_bytes, pptx_bytes
-from tests.fakes import fresh_observability
-from tests.integration.conftest import TEST_PEER_ADDRESSES, open_queue_pool
+from tests.fakes import (
+    FakeLlmClient,
+    InMemoryResultCache,
+    document_request,
+    fresh_observability,
+    generation_request,
+    model_reply,
+)
+from tests.integration.conftest import TEST_PEER_ADDRESSES, Cleanup, open_queue_pool
 from tests.integration.storage import ObjectBucket
 from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
@@ -80,6 +97,8 @@ class DocumentCleanup:
 
     async def purge(self) -> None:
         async with self.session_factory.begin() as session:
+            owned = select(DocumentRow.document_id).where(DocumentRow.client_id.in_(self.client_ids))
+            await session.execute(delete(GenerationJobRow).where(GenerationJobRow.document_id.in_(owned)))
             removed = await session.scalars(
                 delete(DocumentRow)
                 .where(DocumentRow.client_id.in_(self.client_ids))
@@ -296,7 +315,7 @@ async def test_storage_failure_is_a_503_that_leaves_nothing_a_client_can_read(
     assert body["code"] == "UPSTREAM_UNAVAILABLE"
     leftovers = await rows_of(documents.session_factory, client_id)
     assert all(row.status == DocumentStatus.PENDING for row in leftovers)
-    store = PostgresDocumentStore(documents.session_factory)
+    store = document_store(documents.session_factory)
     assert [await store.get(row.document_id, client_id) for row in leftovers] == [None] * len(leftovers)
 
 
@@ -317,6 +336,20 @@ async def test_upload_budget_trips_after_the_configured_number_of_uploads(
     assert statuses == [HTTPStatus.CREATED, HTTPStatus.CREATED, HTTPStatus.TOO_MANY_REQUESTS]
     assert other == HTTPStatus.CREATED
     assert len(await rows_of(documents.session_factory, client_id)) == 2
+
+
+def document_store(session_factory: async_sessionmaker[AsyncSession]) -> PostgresDocumentStore:
+    return PostgresDocumentStore(session_factory, retention=RETENTION, clock=lambda: SWEPT_AT)
+
+
+async def generate_from(
+    session_factory: async_sessionmaker[AsyncSession], document: Document
+) -> GenerationJob:
+    job = GenerationJob.queue(uuid4(), document.uploaded_at)
+    scope = IdempotencyScope(client_id=document.client_id, idempotency_key=uuid4())
+    store = PostgresJobStore(session_factory, document_retention=RETENTION)
+    await store.add(job, document_request(document.document_id), scope)
+    return job
 
 
 def ancient_document(client_id: UUID, uploaded_at: datetime) -> Document:
@@ -418,16 +451,13 @@ async def test_sweep_deletes_old_unused_documents_and_keeps_recent_and_used_ones
     documents: DocumentCleanup, probe: StorageProbe
 ) -> None:
     session_factory, bucket = documents.session_factory, documents.bucket
-    store = PostgresDocumentStore(session_factory)
+    store = document_store(session_factory)
     client_id = documents.client_id()
     expired = await placed(store, probe, ancient_document(client_id, CUTOFF - TICK))
     abandoned = await placed(store, probe, ancient_document(client_id, CUTOFF - TICK), stored=False)
     recent = await placed(store, probe, ancient_document(client_id, CUTOFF))
     used = await placed(store, probe, ancient_document(client_id, ANCIENT))
-    async with session_factory.begin() as session:
-        await session.execute(
-            update(DocumentRow).where(DocumentRow.document_id == used.document_id).values(used_at=ANCIENT)
-        )
+    await generate_from(session_factory, used)
 
     purged = await sweeper(session_factory, probe)()
 
@@ -444,7 +474,7 @@ async def test_record_survives_when_its_object_cannot_be_deleted(
     settings: Settings, documents: DocumentCleanup, probe: StorageProbe
 ) -> None:
     session_factory = documents.session_factory
-    store = PostgresDocumentStore(session_factory)
+    store = document_store(session_factory)
     client_id = documents.client_id()
     stuck = await placed(store, probe, ancient_document(client_id, CUTOFF - TICK))
     down = StorageProbe(with_storage(settings, storage_endpoint_url=AnyHttpUrl(UNREACHABLE_STORAGE)))
@@ -460,7 +490,7 @@ async def test_concurrent_sweeps_never_delete_the_same_document_twice(
     settings: Settings, documents: DocumentCleanup, probe: StorageProbe
 ) -> None:
     session_factory = documents.session_factory
-    store = PostgresDocumentStore(session_factory)
+    store = document_store(session_factory)
     client_id = documents.client_id()
     placed_documents = [
         await placed(store, probe, ancient_document(client_id, CUTOFF - TICK)) for _ in range(6)
@@ -482,10 +512,10 @@ async def test_pending_and_foreign_documents_are_invisible_and_only_pending_ones
     documents: DocumentCleanup,
 ) -> None:
     session_factory = documents.session_factory
-    store = PostgresDocumentStore(session_factory)
+    store = document_store(session_factory)
     owner = documents.client_id()
-    pending = ancient_document(owner, ANCIENT)
-    stored = ancient_document(owner, ANCIENT)
+    pending = ancient_document(owner, SWEPT_AT)
+    stored = ancient_document(owner, SWEPT_AT)
     await store.add_pending(pending)
     await store.add_pending(stored)
     await store.mark_stored(stored.document_id)
@@ -511,3 +541,372 @@ async def test_worker_startup_wires_document_retention_with_the_configured_polic
     assert retention.policy.retention == timedelta(seconds=settings.cache.document_retention_seconds)
     assert retention.policy.batch_size == settings.sweep.document_batch_size
     assert retention.policy.max_concurrency == settings.providers.storage_max_concurrency
+
+
+JOB_TIME = SWEPT_AT
+GENERATIONS_ENDPOINT = f"{API_PREFIX}/generations"
+CARD_REPLY = {
+    "deck": {"title": "Road signs", "description": "Warning signs", "tags": ["signs"]},
+    "notes": [
+        {
+            "noteType": NoteType.BASIC,
+            "fields": {"front": "What does a red triangle warn of?", "back": "Danger ahead"},
+            "sources": [1],
+        }
+    ],
+}
+ALLOW = {"verdict": "allow"}
+EVERY_NOTE_ALLOWED = {"deck": "allow", "notes": {"1": "allow"}}
+
+
+def job_store(session_factory: async_sessionmaker[AsyncSession]) -> PostgresJobStore:
+    return PostgresJobStore(session_factory, document_retention=RETENTION)
+
+
+def scope_of(client_id: UUID) -> IdempotencyScope:
+    return IdempotencyScope(client_id=client_id, idempotency_key=uuid4())
+
+
+async def jobs_referencing(
+    session_factory: async_sessionmaker[AsyncSession], document_id: UUID
+) -> list[GenerationJobRow]:
+    async with session_factory() as session:
+        rows = await session.scalars(
+            select(GenerationJobRow).where(GenerationJobRow.document_id == document_id)
+        )
+        return list(rows)
+
+
+async def test_generation_claims_its_document_in_the_transaction_that_stores_the_job(
+    documents: DocumentCleanup, probe: StorageProbe
+) -> None:
+    session_factory = documents.session_factory
+    lecture = await placed(
+        document_store(session_factory), probe, ancient_document(documents.client_id(), CUTOFF)
+    )
+    store = job_store(session_factory)
+    first = GenerationJob.queue(uuid4(), JOB_TIME)
+    later = GenerationJob.queue(uuid4(), JOB_TIME + timedelta(minutes=5))
+    scope = scope_of(lecture.client_id)
+
+    stored = await store.add(first, document_request(lecture.document_id), scope)
+    await store.add(later, document_request(lecture.document_id), scope_of(lecture.client_id))
+
+    row = await stored_row(session_factory, lecture.document_id)
+    assert row is not None
+    assert row.used_at == first.created_at
+    assert {job.job_id for job in await jobs_referencing(session_factory, lecture.document_id)} == {
+        first.job_id,
+        later.job_id,
+    }
+    assert stored.request.topic is None
+    assert await store.get_stored(first.job_id) == stored
+    assert await store.find(scope) == stored
+
+
+@pytest.mark.parametrize(
+    "case", ["pending", "another client's", "never uploaded", "expired and unused"], ids=str
+)
+async def test_document_the_client_cannot_use_is_refused_and_leaves_no_job_or_claim_behind(
+    documents: DocumentCleanup, probe: StorageProbe, case: str
+) -> None:
+    session_factory = documents.session_factory
+    owner = documents.client_id()
+    uploaded_at = CUTOFF - TICK if case == "expired and unused" else CUTOFF
+    lecture = ancient_document(owner, uploaded_at)
+    if case != "never uploaded":
+        await placed(document_store(session_factory), probe, lecture, stored=case != "pending")
+    client_id = documents.client_id() if case == "another client's" else owner
+    scope = scope_of(client_id)
+
+    with pytest.raises(DocumentNotFoundError):
+        await job_store(session_factory).add(
+            GenerationJob.queue(uuid4(), JOB_TIME), document_request(lecture.document_id), scope
+        )
+
+    assert await job_store(session_factory).find(scope) is None
+    row = await stored_row(session_factory, lecture.document_id)
+    assert row is None or row.used_at is None
+
+
+async def test_expired_document_a_job_still_refers_to_can_be_used_again(
+    documents: DocumentCleanup, probe: StorageProbe
+) -> None:
+    session_factory = documents.session_factory
+    lecture = await placed(
+        document_store(session_factory), probe, ancient_document(documents.client_id(), ANCIENT)
+    )
+    await generate_from(session_factory, lecture)
+    again = GenerationJob.queue(uuid4(), JOB_TIME)
+
+    stored = await job_store(session_factory).add(
+        again, document_request(lecture.document_id), scope_of(lecture.client_id)
+    )
+
+    assert stored.job == again
+    row = await stored_row(session_factory, lecture.document_id)
+    assert row is not None
+    assert row.used_at == ANCIENT
+
+
+async def test_claim_is_rolled_back_when_the_idempotency_key_already_names_another_job(
+    documents: DocumentCleanup, probe: StorageProbe
+) -> None:
+    session_factory = documents.session_factory
+    lecture = await placed(
+        document_store(session_factory), probe, ancient_document(documents.client_id(), CUTOFF)
+    )
+    store = job_store(session_factory)
+    scope = scope_of(lecture.client_id)
+    original = await store.add(GenerationJob.queue(uuid4(), JOB_TIME), generation_request(), scope)
+
+    replay = await store.add(
+        GenerationJob.queue(uuid4(), JOB_TIME), document_request(lecture.document_id), scope
+    )
+
+    assert replay == original
+    row = await stored_row(session_factory, lecture.document_id)
+    assert row is not None
+    assert row.used_at is None
+    assert await jobs_referencing(session_factory, lecture.document_id) == []
+
+
+async def test_database_refuses_to_delete_a_document_a_job_refers_to(
+    documents: DocumentCleanup, probe: StorageProbe
+) -> None:
+    session_factory = documents.session_factory
+    lecture = await placed(
+        document_store(session_factory), probe, ancient_document(documents.client_id(), CUTOFF)
+    )
+    await generate_from(session_factory, replace(lecture, uploaded_at=JOB_TIME))
+
+    with pytest.raises(IntegrityError):
+        async with session_factory.begin() as session:
+            await session.execute(delete(DocumentRow).where(DocumentRow.document_id == lecture.document_id))
+
+    assert await stored_row(session_factory, lecture.document_id) is not None
+
+
+async def test_used_document_survives_the_sweep_until_job_retention_purges_its_last_job(
+    documents: DocumentCleanup, probe: StorageProbe
+) -> None:
+    session_factory = documents.session_factory
+    lecture = await placed(
+        document_store(session_factory), probe, ancient_document(documents.client_id(), ANCIENT)
+    )
+    job = await generate_from(session_factory, lecture)
+    finished_at = ANCIENT + timedelta(minutes=1)
+    await job_store(session_factory).update(job.job_id, lambda stored: stored.cancel(finished_at))
+
+    await sweeper(session_factory, probe)()
+    kept = await stored_row(session_factory, lecture.document_id)
+    purged_jobs = await PostgresJobHousekeeping(session_factory).purge_finished(SWEPT_AT, BATCH_SIZE)
+    await sweeper(session_factory, probe)()
+
+    assert kept is not None
+    assert purged_jobs >= 1
+    assert await stored_row(session_factory, lecture.document_id) is None
+    assert not await documents.bucket.holds(lecture.storage_key)
+
+
+class HeldDelete(InMemoryDocumentStorage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.holding = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def delete(self, key: str) -> None:
+        self.holding.set()
+        await self.release.wait()
+        await super().delete(key)
+
+
+async def test_generation_whose_clock_still_sees_the_document_waits_for_the_sweep_and_is_refused(
+    documents: DocumentCleanup, probe: StorageProbe
+) -> None:
+    session_factory = documents.session_factory
+    lecture = await placed(
+        document_store(session_factory), probe, ancient_document(documents.client_id(), CUTOFF - TICK)
+    )
+    held = HeldDelete()
+    sweep = asyncio.create_task(sweeper(session_factory, held)())
+    await held.holding.wait()
+    scope = scope_of(lecture.client_id)
+
+    admission = asyncio.create_task(
+        job_store(session_factory).add(
+            GenerationJob.queue(uuid4(), JOB_TIME - timedelta(hours=1)),
+            document_request(lecture.document_id),
+            scope,
+        )
+    )
+    await asyncio.sleep(0.2)
+    blocked = not admission.done()
+    held.release.set()
+    await sweep
+
+    assert blocked
+    with pytest.raises(DocumentNotFoundError):
+        await admission
+    assert await stored_row(session_factory, lecture.document_id) is None
+    assert await job_store(session_factory).find(scope) is None
+
+
+async def test_reading_a_document_follows_the_same_retention_rule_as_using_it(
+    documents: DocumentCleanup, probe: StorageProbe
+) -> None:
+    session_factory = documents.session_factory
+    store = document_store(session_factory)
+    owner = documents.client_id()
+    boundary = await placed(store, probe, ancient_document(owner, CUTOFF))
+    expired = await placed(store, probe, ancient_document(owner, CUTOFF - TICK))
+    referenced = await placed(store, probe, ancient_document(owner, ANCIENT))
+    await generate_from(session_factory, referenced)
+
+    assert await store.get(boundary.document_id, owner) == boundary
+    assert await store.get(expired.document_id, owner) is None
+    assert await store.get(referenced.document_id, owner) == referenced
+
+
+def generation_headers(client_id: UUID) -> dict[str, str]:
+    return {"Idempotency-Key": str(uuid4()), "X-Client-Id": str(client_id)}
+
+
+def start_generation(client: TestClient, client_id: UUID, body: dict[str, object]) -> dict[str, object]:
+    response = client.post(GENERATIONS_ENDPOINT, json=body, headers=generation_headers(client_id))
+    payload: dict[str, object] = response.json()
+    payload["status_code"] = response.status_code
+    return payload
+
+
+def poll(client: TestClient, job_id: str, client_id: UUID) -> dict[str, object]:
+    response = client.get(f"{GENERATIONS_ENDPOINT}/{job_id}", headers={"X-Client-Id": str(client_id)})
+    assert response.status_code == HTTPStatus.OK
+    body: dict[str, object] = response.json()
+    assert spec_errors("GenerationJob", body) == []
+    return body
+
+
+@contextmanager
+def generation_api(settings: Settings, cleanup: Cleanup, client_id: UUID) -> Iterator[TestClient]:
+    cleanup.client_ids.add(client_id)
+    with app_client(settings) as client:
+        yield client
+
+
+@asynccontextmanager
+async def scripted_worker(settings: Settings, llm: FakeLlmClient) -> AsyncIterator[RunGeneration]:
+    ctx: WorkerContext = {SETTINGS_KEY: settings, OBSERVABILITY_KEY: fresh_observability()}
+    await startup(ctx)
+    try:
+        wired = from_context(ctx, RUN_GENERATION_KEY, RunGeneration)
+        yield replace(
+            wired,
+            cache=InMemoryResultCache(),
+            generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),
+            moderator=LlmContentModerator(llm=FakeLlmClient(model_reply(EVERY_NOTE_ALLOWED))),
+            documents=replace(wired.documents, moderator=LlmMaterialModerator(llm=llm)),
+        )
+    finally:
+        await shutdown(ctx)
+
+
+async def test_worker_wires_document_generation_with_the_configured_limits(settings: Settings) -> None:
+    async with scripted_worker(settings, FakeLlmClient(model_reply(ALLOW))) as run:
+        parser = run.documents.parser
+
+    assert isinstance(parser, DocumentTextParser)
+    assert parser.max_characters == settings.limits.document_max_source_characters
+    assert parser.deadline_seconds == settings.limits.document_parse_deadline_seconds
+
+
+async def test_document_generation_runs_the_real_pipeline_and_polls_like_a_topic_job(
+    settings: Settings, documents: DocumentCleanup, cleanup: Cleanup
+) -> None:
+    client_id = documents.client_id()
+    llm = FakeLlmClient(model_reply(ALLOW), model_reply(CARD_REPLY))
+    with generation_api(settings, cleanup, client_id) as client:
+        uploaded = upload(client, client_id, text_pdf(TOPIC_TEXT), filename="signs.pdf")
+        created = start_generation(
+            client, client_id, {"documentId": uploaded["documentId"], "language": "en", "cardCount": 5}
+        )
+        job_id = str(created["jobId"])
+        cleanup.job_ids.add(UUID(job_id))
+        queued = poll(client, job_id, client_id)
+        async with scripted_worker(settings, llm) as run:
+            await run(UUID(job_id))
+        finished = poll(client, job_id, client_id)
+
+    assert created["status_code"] == HTTPStatus.ACCEPTED, created
+    assert queued["status"] == "queued"
+    assert finished["status"] == "succeeded", finished
+    result = finished["result"]
+    assert isinstance(result, dict)
+    [note] = result["notes"]
+    assert note["sources"] == [
+        {
+            "kind": "document",
+            "title": "signs.pdf",
+            "documentId": uploaded["documentId"],
+            "unit": "page",
+            "number": 1,
+        }
+    ]
+    screening, generation = llm.prompts
+    assert "A red triangle warns of danger ahead." in screening.user
+    assert "A red triangle warns of danger ahead." in generation.user
+    row = await stored_row(documents.session_factory, UUID(str(uploaded["documentId"])))
+    assert row is not None
+    assert row.used_at is not None
+
+
+async def test_document_generation_is_cancelled_like_a_topic_job_and_never_reads_the_document(
+    settings: Settings, documents: DocumentCleanup, cleanup: Cleanup
+) -> None:
+    client_id = documents.client_id()
+    llm = FakeLlmClient(model_reply(ALLOW), model_reply(CARD_REPLY))
+    with generation_api(settings, cleanup, client_id) as client:
+        uploaded = upload(client, client_id, text_pdf(TOPIC_TEXT))
+        created = start_generation(
+            client, client_id, {"documentId": uploaded["documentId"], "language": "en", "cardCount": 5}
+        )
+        job_id = str(created["jobId"])
+        cleanup.job_ids.add(UUID(job_id))
+        cancel = client.post(
+            f"{GENERATIONS_ENDPOINT}/{job_id}/cancel", headers={"X-Client-Id": str(client_id)}
+        )
+        async with scripted_worker(settings, llm) as run:
+            await run(UUID(job_id))
+        finished = poll(client, job_id, client_id)
+
+    assert cancel.status_code == HTTPStatus.NO_CONTENT
+    assert finished["status"] == "cancelled"
+    assert llm.prompts == []
+
+
+@pytest.mark.parametrize("owner", ["another client", "nobody"])
+async def test_generation_from_a_document_the_client_cannot_use_is_a_404_that_spends_no_quota(
+    settings: Settings, documents: DocumentCleanup, cleanup: Cleanup, owner: str
+) -> None:
+    client_id = documents.client_id()
+    with generation_api(settings, cleanup, client_id) as client:
+        uploader = documents.client_id()
+        foreign = (
+            upload(client, uploader, pdf_bytes())["documentId"] if owner == "another client" else uuid4()
+        )
+        refused = start_generation(
+            client, client_id, {"documentId": str(foreign), "language": "en", "cardCount": 5}
+        )
+        accepted = start_generation(
+            client, client_id, {"topic": "Road signs", "language": "en", "cardCount": 5}
+        )
+        cleanup.job_ids.add(UUID(str(accepted["jobId"])))
+
+    assert refused["status_code"] == HTTPStatus.NOT_FOUND
+    assert refused["code"] == "DOCUMENT_NOT_FOUND"
+    assert (
+        spec_errors("Problem", {key: value for key, value in refused.items() if key != "status_code"}) == []
+    )
+    quota = accepted["quota"]
+    assert isinstance(quota, dict)
+    assert quota["remaining"] == quota["limit"] - 1

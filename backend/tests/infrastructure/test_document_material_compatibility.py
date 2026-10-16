@@ -77,7 +77,7 @@ async def test_moderator_screens_document_cited_notes_and_keeps_their_citations(
     verdicts = model_reply({"deck": "allow", "notes": {"1": "allow"}})
 
     screened = await LlmContentModerator(llm=FakeLlmClient(verdicts)).screen(
-        JOB_ID, generation_request().source_query(), result
+        JOB_ID, generation_request().source_query().topic, result
     )
 
     assert screened == result

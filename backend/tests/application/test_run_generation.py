@@ -129,7 +129,7 @@ async def test_each_port_receives_what_the_previous_stage_produced() -> None:
     }
 
 
-async def test_every_port_that_searches_or_screens_is_given_the_source_query_of_the_request() -> None:
+async def test_every_port_that_searches_or_screens_is_given_the_topic_of_the_request() -> None:
     harness = Harness()
     job_id = await create(harness, WITH_IMAGES)
 
@@ -138,8 +138,8 @@ async def test_every_port_that_searches_or_screens_is_given_the_source_query_of_
     assert harness.providers.queried == {
         JobStage.RETRIEVING_SOURCES: WITH_IMAGES.source_query(),
         JobStage.PARSING_SOURCES: WITH_IMAGES.source_query(),
-        JobStage.GENERATING_CARDS: WITH_IMAGES.source_query(),
     }
+    assert harness.providers.subjects == [WITH_IMAGES.topic]
 
 
 async def test_card_generator_is_told_which_job_it_generates_for() -> None:

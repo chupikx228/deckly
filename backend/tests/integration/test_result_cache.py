@@ -36,13 +36,14 @@ from deckly.worker.settings import (
 from tests.domain.builders import FULL_RESULT, RequestChanges
 from tests.fakes import (
     GENERATED,
+    FakeDocuments,
     FakeProviders,
     fresh_metrics,
     fresh_observability,
     fresh_telemetry,
     generation_request,
 )
-from tests.integration.conftest import Cleanup, open_queue_pool
+from tests.integration.conftest import DOCUMENT_RETENTION, Cleanup, open_queue_pool
 from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
 
@@ -217,10 +218,11 @@ async def run_through_postgres_and_redis(settings: Settings, providers: FakeProv
     redis = await open_queue_pool(settings)
     try:
         await RunGeneration(
-            store=PostgresJobStore(create_session_factory(engine)),
+            store=PostgresJobStore(create_session_factory(engine), document_retention=DOCUMENT_RETENTION),
             cache=build_result_cache(redis, settings, metrics=fresh_metrics()),
             retriever=providers,
             parser=providers,
+            documents=FakeDocuments().sourcing(),
             generator=providers,
             moderator=providers,
             media=providers,

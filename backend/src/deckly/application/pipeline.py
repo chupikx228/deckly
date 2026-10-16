@@ -2,13 +2,14 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from uuid import UUID
 
 from deckly.application.correlation import JOB_ID, correlated
 from deckly.application.exceptions import (
     DocumentHasNoTextError,
+    DocumentRejectedError,
     EncryptedDocumentError,
     JobStoppedError,
     NoValidContentError,
@@ -20,23 +21,29 @@ from deckly.application.generations import Clock, elapsed_ms
 from deckly.application.ports import (
     CardGenerator,
     ContentModerator,
+    DocumentParser,
+    DocumentStorage,
+    DocumentStore,
     GenerationTelemetry,
     ImageQuery,
     JobOutcome,
     JobRun,
     JobStore,
     JobTransition,
+    MaterialModerator,
     MediaFetcher,
     MissingImage,
     MissingImageReason,
     NoteMedia,
     ResultCache,
+    SourceMaterial,
     SourceParser,
     SourceRetriever,
     StoredJob,
 )
 from deckly.domain.deck import GenerationResult
-from deckly.domain.exceptions import JobAlreadyTerminalError
+from deckly.domain.document import Document
+from deckly.domain.exceptions import DocumentNotFoundError, JobAlreadyTerminalError
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import STAGE_ORDER, Failed, FailureCode, GenerationJob, JobStage, JobStatus
 from deckly.domain.media import Media
@@ -50,6 +57,8 @@ FAILURE_CODES: Mapping[type[Exception], FailureCode] = {
     UnreadableDocumentError: FailureCode.DOCUMENT_UNREADABLE,
     EncryptedDocumentError: FailureCode.DOCUMENT_ENCRYPTED,
     DocumentHasNoTextError: FailureCode.DOCUMENT_HAS_NO_TEXT,
+    DocumentNotFoundError: FailureCode.DOCUMENT_NOT_FOUND,
+    DocumentRejectedError: FailureCode.DOCUMENT_REJECTED,
 }
 EXPECTED_FAILURES = frozenset(
     {
@@ -58,6 +67,8 @@ EXPECTED_FAILURES = frozenset(
         FailureCode.DOCUMENT_UNREADABLE,
         FailureCode.DOCUMENT_ENCRYPTED,
         FailureCode.DOCUMENT_HAS_NO_TEXT,
+        FailureCode.DOCUMENT_NOT_FOUND,
+        FailureCode.DOCUMENT_REJECTED,
     }
 )
 
@@ -114,7 +125,7 @@ def failure_level(error: Exception) -> int:
     return logging.WARNING if isinstance(error, UpstreamUnavailableError) else logging.ERROR
 
 
-def log_context(job: GenerationJob) -> dict[str, object]:
+def log_context(job: GenerationJob, request: GenerationRequest | None = None) -> dict[str, object]:
     context: dict[str, object] = {
         "job_id": str(job.job_id),
         "status": job.status,
@@ -123,6 +134,10 @@ def log_context(job: GenerationJob) -> dict[str, object]:
     }
     if isinstance(job.state, Failed):
         context["failure_code"] = job.state.code
+    if request is not None:
+        context["source_kind"] = request.source_kind
+        if request.document_id is not None:
+            context["document_id"] = str(request.document_id)
     return context
 
 
@@ -133,11 +148,32 @@ class Illustrated:
 
 
 @dataclass(frozen=True, slots=True)
+class Sourced:
+    subject: str
+    material: tuple[SourceMaterial, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FetchedDocument:
+    document: Document
+    content: bytes = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentSourcing:
+    store: DocumentStore
+    storage: DocumentStorage
+    parser: DocumentParser
+    moderator: MaterialModerator
+
+
+@dataclass(frozen=True, slots=True)
 class RunGeneration:
     store: JobStore
     cache: ResultCache
     retriever: SourceRetriever
     parser: SourceParser
+    documents: DocumentSourcing
     generator: CardGenerator
     moderator: ContentModerator
     media: MediaFetcher
@@ -158,6 +194,7 @@ class RunGeneration:
             logger.info("generation_skipped", extra={"job_id": str(job_id)})
             run.finish(JobOutcome.SKIPPED)
             return
+        run.identify(stored.request.source_kind)
         try:
             await self._run(stored, run)
         except JobStoppedError:
@@ -165,17 +202,17 @@ class RunGeneration:
             run.finish(JobOutcome.STOPPED)
 
     async def _run(self, stored: StoredJob, run: JobRun) -> None:
-        job_id = stored.job.job_id
+        job_id, request = stored.job.job_id, stored.request
         if stored.job.status is JobStatus.RUNNING:
             abandoned = await self._fail(job_id, FailureCode.GENERATION_FAILED)
-            logger.warning("generation_abandoned", extra=log_context(abandoned))
+            logger.warning("generation_abandoned", extra=log_context(abandoned, request))
             run.finish(JobOutcome.FAILED, FailureCode.GENERATION_FAILED)
             return
         now = self.clock()
         started = await self._update(job_id, lambda job: job.start(now))
-        logger.info("generation_started", extra=log_context(started))
+        logger.info("generation_started", extra=log_context(started, request))
         try:
-            await self._generate(job_id, stored.request, now, run)
+            await self._generate(stored, now, run)
         except JobStoppedError:
             raise
         except asyncio.CancelledError:
@@ -189,47 +226,79 @@ class RunGeneration:
                 level,
                 "generation_failed",
                 exc_info=error,
-                extra={**log_context(failed), "duration_ms": elapsed_ms(now, failed.updated_at)},
+                extra={**log_context(failed, request), "duration_ms": elapsed_ms(now, failed.updated_at)},
             )
             run.finish(JobOutcome.FAILED, code)
 
-    async def _generate(
-        self, job_id: UUID, request: GenerationRequest, started: datetime, run: JobRun
-    ) -> None:
-        with self.telemetry.stage(JobStage.PLANNING):
+    async def _generate(self, stored: StoredJob, started: datetime, run: JobRun) -> None:
+        job_id, request = stored.job.job_id, stored.request
+        with self.telemetry.stage(JobStage.PLANNING, request.source_kind):
             cached = await self._recall(job_id, request)
             if cached is not None:
-                await self._succeed(job_id, cached, started, cache_hit=True)
+                await self._succeed(stored, cached, started, cache_hit=True)
                 run.finish(JobOutcome.SUCCEEDED)
                 return
-        query = request.source_query()
-        async with self._stage(job_id, JobStage.RETRIEVING_SOURCES):
-            pages = await self.retriever.retrieve(job_id, query)
-        async with self._stage(job_id, JobStage.PARSING_SOURCES):
-            material = await self.parser.parse(job_id, query, pages)
-        async with self._stage(job_id, JobStage.GENERATING_CARDS):
-            cards = await self.generator.generate(job_id, request, material)
-            result = require_notes(await self.moderator.screen(job_id, query, require_notes(cards.result)))
+        sourced = await self._source(stored)
+        async with self._stage(job_id, JobStage.GENERATING_CARDS, request):
+            cards = await self.generator.generate(job_id, request, sourced.material)
+            screened = await self.moderator.screen(job_id, sourced.subject, require_notes(cards.result))
+            result = require_notes(screened)
         cacheable = True
         if request.include_images:
-            async with self._stage(job_id, JobStage.FETCHING_MEDIA):
+            async with self._stage(job_id, JobStage.FETCHING_MEDIA, request):
                 illustrated = await self._illustrate(job_id, result, queries_for(result, cards.image_queries))
             result, cacheable = illustrated.result, illustrated.complete
-        async with self._stage(job_id, JobStage.FINALIZING):
-            await self._succeed(job_id, result, started, cache_hit=False)
+        async with self._stage(job_id, JobStage.FINALIZING, request):
+            await self._succeed(stored, result, started, cache_hit=False)
             run.finish(JobOutcome.SUCCEEDED)
             if cacheable:
                 await self._remember(job_id, request, result)
 
+    async def _source(self, stored: StoredJob) -> Sourced:
+        job_id, request = stored.job.job_id, stored.request
+        if request.document_id is None:
+            query = request.source_query()
+            async with self._stage(job_id, JobStage.RETRIEVING_SOURCES, request):
+                pages = await self.retriever.retrieve(job_id, query)
+            async with self._stage(job_id, JobStage.PARSING_SOURCES, request):
+                material = await self.parser.parse(job_id, query, pages)
+            return Sourced(subject=query.topic, material=material)
+        async with self._stage(job_id, JobStage.RETRIEVING_SOURCES, request):
+            fetched = await self._fetch_document(job_id, request.document_id, stored.client_id)
+        document = fetched.document
+        async with self._stage(job_id, JobStage.PARSING_SOURCES, request):
+            material = await self.documents.parser.parse(document, fetched.content)
+            if not await self.documents.moderator.allows(job_id, document, material):
+                message = f"document {document.document_id} violates the content policy"
+                raise DocumentRejectedError(message)
+        return Sourced(subject=document.filename, material=material)
+
+    async def _fetch_document(self, job_id: UUID, document_id: UUID, client_id: UUID) -> FetchedDocument:
+        document = await self.documents.store.get(document_id, client_id)
+        if document is None:
+            message = f"document {document_id} is no longer stored"
+            raise DocumentNotFoundError(message)
+        content = await self.documents.storage.get(document.storage_key, document.size_bytes)
+        logger.info(
+            "document_fetched",
+            extra={
+                "job_id": str(job_id),
+                "document_id": str(document_id),
+                "content_type": document.document_format,
+                "size_bytes": len(content),
+            },
+        )
+        return FetchedDocument(document=document, content=content)
+
     async def _succeed(
-        self, job_id: UUID, result: GenerationResult, started: datetime, *, cache_hit: bool
+        self, stored: StoredJob, result: GenerationResult, started: datetime, *, cache_hit: bool
     ) -> None:
         now = self.clock()
-        succeeded = await self._update(job_id, lambda job: job.succeed(result, now))
+        succeeded = await self._update(stored.job.job_id, lambda job: job.succeed(result, now))
         logger.info(
             "generation_succeeded",
             extra={
-                **log_context(succeeded),
+                **log_context(succeeded, stored.request),
                 "notes": len(result.notes),
                 "cache_hit": cache_hit,
                 "duration_ms": elapsed_ms(started, succeeded.updated_at),
@@ -289,16 +358,16 @@ class RunGeneration:
         return Illustrated(result=illustrated, complete=failed_notes == 0)
 
     @asynccontextmanager
-    async def _stage(self, job_id: UUID, stage: JobStage) -> AsyncIterator[None]:
-        with self.telemetry.stage(stage):
-            await self._enter(job_id, stage)
+    async def _stage(self, job_id: UUID, stage: JobStage, request: GenerationRequest) -> AsyncIterator[None]:
+        with self.telemetry.stage(stage, request.source_kind):
+            await self._enter(job_id, stage, request)
             yield
 
-    async def _enter(self, job_id: UUID, stage: JobStage) -> None:
+    async def _enter(self, job_id: UUID, stage: JobStage, request: GenerationRequest) -> None:
         now = self.clock()
         progress = stage_progress(stage)
         entered = await self._update(job_id, lambda job: job.advance(stage, progress, now))
-        logger.info("generation_stage_entered", extra=log_context(entered))
+        logger.info("generation_stage_entered", extra=log_context(entered, request))
 
     async def _reject_unreadable(self, job_id: UUID, run: JobRun) -> None:
         try:

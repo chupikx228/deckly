@@ -2,17 +2,19 @@ import logging
 from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from uuid import UUID
 
-from sqlalchemy import Select, delete, select, update
+from sqlalchemy import ColumnElement, Exists, Select, and_, delete, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.dml import ReturningUpdate
 
+from deckly.application.generations import Clock
 from deckly.application.ports import DocumentStore, ExpiredDocument
 from deckly.domain.document import Document, DocumentFormat
 from deckly.infrastructure.bounded import BoundedCalls
-from deckly.infrastructure.tables import DocumentRow
+from deckly.infrastructure.tables import DocumentRow, GenerationJobRow
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,34 @@ class CorruptStoredDocumentError(Exception):
 
 class DocumentStoreTimeoutError(TimeoutError):
     pass
+
+
+def is_referenced() -> Exists:
+    return exists().where(GenerationJobRow.document_id == DocumentRow.document_id)
+
+
+def is_usable(uploaded_since: datetime) -> ColumnElement[bool]:
+    return or_(DocumentRow.uploaded_at >= uploaded_since, is_referenced())
+
+
+def is_expired(uploaded_before: datetime) -> ColumnElement[bool]:
+    return and_(DocumentRow.uploaded_at < uploaded_before, ~is_referenced())
+
+
+def claim_document_statement(
+    document_id: UUID, client_id: UUID, now: datetime, uploaded_since: datetime
+) -> ReturningUpdate[tuple[UUID]]:
+    return (
+        update(DocumentRow)
+        .where(
+            DocumentRow.document_id == document_id,
+            DocumentRow.client_id == client_id,
+            DocumentRow.status == DocumentStatus.STORED,
+            is_usable(uploaded_since),
+        )
+        .values(used_at=func.coalesce(DocumentRow.used_at, now))
+        .returning(DocumentRow.document_id)
+    )
 
 
 def restore_document(row: DocumentRow) -> Document:
@@ -47,8 +77,12 @@ def restore_document(row: DocumentRow) -> Document:
 
 
 class PostgresDocumentStore:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self, session_factory: async_sessionmaker[AsyncSession], *, retention: timedelta, clock: Clock
+    ) -> None:
         self._session_factory = session_factory
+        self._retention = retention
+        self._clock = clock
 
     async def add_pending(self, document: Document) -> None:
         async with self._session_factory.begin() as session:
@@ -87,6 +121,7 @@ class PostgresDocumentStore:
             DocumentRow.document_id == document_id,
             DocumentRow.client_id == client_id,
             DocumentRow.status == DocumentStatus.STORED,
+            is_usable(self._clock() - self._retention),
         )
         async with self._session_factory() as session:
             row = await session.scalar(statement)
@@ -119,7 +154,7 @@ class BoundedDocumentStore:
 def expired_documents_statement(uploaded_before: datetime, limit: int) -> Select[tuple[UUID, str]]:
     return (
         select(DocumentRow.document_id, DocumentRow.storage_key)
-        .where(DocumentRow.used_at.is_(None), DocumentRow.uploaded_at < uploaded_before)
+        .where(is_expired(uploaded_before))
         .order_by(DocumentRow.uploaded_at)
         .limit(limit)
         .with_for_update(skip_locked=True)
@@ -136,7 +171,7 @@ class PostgresExpiredDocuments:
             return 0
         statement = (
             delete(DocumentRow)
-            .where(DocumentRow.document_id.in_(tuple(document_ids)), DocumentRow.used_at.is_(None))
+            .where(DocumentRow.document_id.in_(tuple(document_ids)), ~is_referenced())
             .returning(DocumentRow.document_id)
         )
         return len((await self.session.scalars(statement)).all())
