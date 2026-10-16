@@ -17,6 +17,8 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from deckly.domain.generation import MAX_CARD_COUNT
+from deckly.infrastructure.documents.archive import MAX_TOTAL_PART_BYTES
+from deckly.infrastructure.documents.pdf import MAX_DECODED_CONTENT_BYTES, MAX_DECODED_STREAM_BYTES
 from deckly.infrastructure.media.licensing import MIN_IMAGE_SIDE
 from deckly.infrastructure.moderation.moderator import NOTES_PER_CONTENT_CHECK
 from deckly.infrastructure.observability.tracing import TraceExporter
@@ -47,6 +49,11 @@ DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY = 8
 MAX_DOCUMENT_UPLOAD_CONCURRENCY = 32
 DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES = 400 * MEBIBYTE
 DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN = 2
+DEFAULT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES = 1280 * MEBIBYTE
+DOCUMENT_DOWNLOAD_PEAK_COPIES = 2
+DOCUMENT_PARSE_WORKING_SET_BYTES = max(
+    MAX_DECODED_CONTENT_BYTES + MAX_DECODED_STREAM_BYTES, MAX_TOTAL_PART_BYTES
+)
 DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS = 120
 MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS = 900
 MAX_DOCUMENT_SOURCE_CHARACTERS = 200_000
@@ -309,10 +316,18 @@ class LimitSettings(BaseSettings):
         int, Field(ge=1, le=MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS)
     ] = DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS
     document_upload_memory_budget_bytes: PositiveInt = DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES
+    document_worker_memory_budget_bytes: PositiveInt = DEFAULT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES
     document_max_source_characters: Annotated[
         int, Field(ge=MIN_VISIBLE_CHARACTERS, le=MAX_DOCUMENT_SOURCE_CHARACTERS)
     ]
     document_parse_deadline_seconds: Annotated[int, Field(ge=1, le=MAX_DOCUMENT_PARSE_DEADLINE_SECONDS)]
+
+    @property
+    def document_worker_job_peak_bytes(self) -> int:
+        return max(
+            DOCUMENT_DOWNLOAD_PEAK_COPIES * self.document_max_bytes,
+            self.document_max_bytes + DOCUMENT_PARSE_WORKING_SET_BYTES,
+        )
 
     @model_validator(mode="after")
     def require_address_limit_to_be_coarser(self) -> Self:
@@ -344,6 +359,25 @@ class LimitSettings(BaseSettings):
                 "DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY or DECKLY_LIMIT_DOCUMENT_MAX_BYTES, or raise "
                 "DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES; the check assumes a single process, so "
                 "divide the budget by the number of workers or replicas sharing one container"
+            )
+            raise ValueError(message)
+        return self
+
+    @model_validator(mode="after")
+    def require_concurrent_document_jobs_to_fit_the_worker_memory_budget(self) -> Self:
+        worst_case_bytes = WORKER_MAX_JOBS * self.document_worker_job_peak_bytes
+        if worst_case_bytes > self.document_worker_memory_budget_bytes:
+            message = (
+                f"the worker job concurrency ({WORKER_MAX_JOBS}) times the peak memory of one "
+                f"document-sourced job ({self.document_worker_job_peak_bytes} bytes, the larger of "
+                f"{DOCUMENT_DOWNLOAD_PEAK_COPIES} copies of the document size limit "
+                f"({self.document_max_bytes} bytes) while it downloads and the size limit plus "
+                f"{DOCUMENT_PARSE_WORKING_SET_BYTES} bytes of parser working set while it parses) is "
+                f"{worst_case_bytes} bytes, which exceeds the worker memory budget "
+                f"({self.document_worker_memory_budget_bytes} bytes); lower "
+                "DECKLY_LIMIT_DOCUMENT_MAX_BYTES, or raise "
+                "DECKLY_LIMIT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES; the check assumes a single worker "
+                "process, so divide the budget by the number of workers sharing one container"
             )
             raise ValueError(message)
         return self
