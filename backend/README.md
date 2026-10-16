@@ -902,6 +902,9 @@ set it to what the container can actually spare. **The check assumes a single pr
 the budget are per process, so with several workers or replicas sharing one container's memory, divide
 the budget by their number (or lower the cap) yourself; the check cannot see them.
 
+The worker holds documents too, and has its own budget and check (see _Worker memory_ under
+_Generating from a document_).
+
 _Reject, not queue._ An upload is a user waiting at a screen, and a slot is held for as long as the
 client takes to send the body, up to about 40 s on a 5 Mbit/s uplink, plus the object-store PUT (60 s
 deadline). Queueing behind a full gate would add up to that much to a request that already takes that
@@ -1124,11 +1127,62 @@ carry `source_kind` (`topic` or `document`) and, for a document, `document_id`;
 cover the document steps. The admission, job and stage metrics have a `source` label, the run and
 stage spans a `deckly.source_kind` attribute.
 
+**Worker memory** (`DECKLY_LIMIT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES`, default 1280 MiB). A
+document-sourced job holds its whole document in the worker's memory, and the worker runs up to
+`WORKER_MAX_JOBS` (10) jobs at once, so the same cross-check as the upload gate (DEC-81) covers it:
+the process refuses to start when 10 x the peak of one document-sourced job exceeds the budget, and
+the error names the terms and the two settings to change. The check lives in `LimitSettings`, so the
+API and the worker both run it.
+
+_The peak of one job_ is the larger of two phases that do not overlap. **Download:** the object is
+read into a `bytearray` and then copied to `bytes`, so for a moment there are two copies of the
+document (50.2 MiB for a 25 MiB object, `tracemalloc`, measured in this repository):
+`DOCUMENT_DOWNLOAD_PEAK_COPIES` = 2. **Parse:** the document stays resident while the parser works,
+and the parser's own working set does not depend on the document's size, only on its caps: a PDF
+whose page content inflates to the 64 MiB limit peaked at 80.5 MiB with a 0.3 MiB file (the 64 MiB
+plus one 16 MiB stream being decoded), and a PPTX reads at most 64 MiB of parts in total. The model
+takes the larger, 80 MiB (`DOCUMENT_PARSE_WORKING_SET_BYTES`, taken from the parser's own limits so
+it moves with them). With the default 25 MiB limit the parse phase is the larger one: 25 + 80 =
+105 MiB per job, 1050 MiB for ten. The download phase only dominates above 80 MiB.
+
+_Why a separate budget._ The API and the worker are different processes, and in a deployment they
+get different container limits, so one shared setting would be wrong for one of them. The default
+is an assumption, like DEC-81's, because there is no deployment to measure: a 3 GiB worker
+container, about 300 MiB of baseline (the Arq worker, the model, search, media and storage
+clients, image thumbnails during media fetching) and half of what remains kept free for the
+other stages and for garbage collection, about 1.3 GiB, rounded down to 1280 MiB. It is not read
+from the container; set it to what the worker can actually spare. The model is a worst case:
+all ten slots must be document jobs, each at the size limit, each at its parse peak at the same
+moment, so a typical mix of topic jobs and small decks uses a fraction of it. **The check assumes a
+single worker process.** The figures are per process, so with several workers sharing one container,
+divide the budget by their number yourself.
+
+Raising `DECKLY_LIMIT_DOCUMENT_MAX_BYTES` moves both checks. With the default worker budget the
+largest limit that passes is 48 MiB (48 + 80 = 128 MiB x 10 = 1280 MiB), and the API's upload check,
+at 8 slots, stops it at 25 MiB first.
+
+**Parsing concurrency is not bounded, on purpose (DEC-82).** Parsing runs in a thread
+(`asyncio.to_thread`) in the worker's process, and pypdf and the XML parsing are pure Python, so
+concurrent parses share one interpreter lock with each other and with the worker's event loop, which
+runs every other job's I/O. Ten document jobs parsing together could therefore delay the other
+jobs' progress and their deadline checks (the parse deadline is wall-clock, so a starved parse
+fails sooner rather than later, with `DOCUMENT_UNREADABLE`). The mitigations would be a semaphore
+limiting concurrent parses or a process pool, and neither is built: a pool is a pattern the
+service does not have yet (separate processes, their own memory, pickling a document across the
+boundary, crash handling), and there is no evidence the problem exists. There is no production
+traffic, a parse is short next to the model, media and moderation stages of the same job, and
+per-user limits (20 jobs a day, 10 uploads an hour) keep the number of document jobs small. What
+is covered is the memory, above, since that fails hard and silently at start-up instead of
+as slowness. **Revisit this** if real usage shows document-heavy load degrading the worker: the
+`deckly_generation_stage_duration_seconds` histogram has a `source` label, so look for the
+`parsing_sources` stage of `document` jobs getting slower as concurrency rises, for the stages of
+`topic` jobs getting slower while documents are being parsed, or for `DOCUMENT_UNREADABLE` failures
+whose message names the extraction deadline. A semaphore on the parse step
+is the cheaper first move, a process pool the second.
+
 **Not done here.** The mobile app's contract types, Zod schema and mock transport still describe a
 topic-only request; DEC-77 (calling `POST /v1/generations` with a `documentId`) regenerates them.
-Concurrent parsing holds the GIL in the worker's event loop and each job holds its whole document in
-memory (DEC-82), and note regeneration on a document-sourced deck still searches the web for a topic
-(DEC-83).
+Note regeneration on a document-sourced deck still searches the web for a topic (DEC-83).
 
 ### Object storage client
 

@@ -9,7 +9,10 @@ from deckly.config import (
     DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY,
     DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES,
     DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS,
+    DEFAULT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES,
     DEFAULT_MODERATION_MAX_CONCURRENCY,
+    DOCUMENT_DOWNLOAD_PEAK_COPIES,
+    DOCUMENT_PARSE_WORKING_SET_BYTES,
     DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN,
     MAX_DOCUMENT_BYTES,
     MAX_DOCUMENT_PARSE_DEADLINE_SECONDS,
@@ -28,6 +31,7 @@ from deckly.config import (
     MEDIA_URL_MIN_VALIDITY_SECONDS,
     MIN_DOCUMENT_RETENTION_SECONDS,
     MIN_JOB_RETENTION_SECONDS,
+    WORKER_MAX_JOBS,
     AppSettings,
     CacheSettings,
     DatabaseSettings,
@@ -190,6 +194,10 @@ LIMIT_ENVIRONMENT = {
     "DECKLY_LIMIT_DOCUMENT_PARSE_DEADLINE_SECONDS": "1",
 }
 SHIPPED_DOCUMENT_MAX_BYTES = 25 * MEBIBYTE
+LARGEST_DOCUMENT_JOB_PEAK_BYTES = 2 * MAX_DOCUMENT_BYTES
+LARGEST_DOCUMENT_WORKER_BUDGET_BYTES = WORKER_MAX_JOBS * LARGEST_DOCUMENT_JOB_PEAK_BYTES
+PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES = 80 * MEBIBYTE
+LARGEST_LIMIT_THE_DEFAULT_WORKER_BUDGET_FITS = 48 * MEBIBYTE
 ROOMY_JOB_TIMEOUT_SECONDS = "336"
 REGENERATE_ENVIRONMENT = {
     "DECKLY_REGENERATE_RATE_LIMIT_TIMEOUT_SECONDS": "0.5",
@@ -644,6 +652,7 @@ def test_shipped_env_example_passes_every_startup_check(
     settings = load_settings()
 
     assert settings.limits.document_upload_memory_budget_bytes == DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES
+    assert settings.limits.document_worker_memory_budget_bytes == DEFAULT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES
     assert (
         settings.limits.generation_job_timeout_seconds
         > settings.topic_deadlines_seconds + settings.providers.moderation_gate_worst_case_wait_seconds
@@ -1420,6 +1429,7 @@ def test_document_size_limit_within_its_bounds_is_accepted(
         clean_environment,
         DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(max_bytes),
         DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY="1",
+        DECKLY_LIMIT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES=str(LARGEST_DOCUMENT_WORKER_BUDGET_BYTES),
     )
 
     assert settings.document_max_bytes == max_bytes
@@ -1686,6 +1696,7 @@ def test_raising_the_budget_makes_room_for_a_larger_size_limit(
             * MAX_DOCUMENT_BYTES
             * DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN
         ),
+        DECKLY_LIMIT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES=str(LARGEST_DOCUMENT_WORKER_BUDGET_BYTES),
     )
 
     assert settings.document_max_bytes == MAX_DOCUMENT_BYTES
@@ -1713,3 +1724,157 @@ def test_document_upload_memory_budget_outside_its_bounds_is_rejected(
 ) -> None:
     with pytest.raises(ValidationError, match="document_upload_memory_budget_bytes"):
         limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES=value)
+
+
+def test_document_worker_memory_budget_defaults_to_the_documented_twelve_hundred_and_eighty_mebibytes(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = limit_settings_with(clean_environment)
+
+    assert settings.document_worker_memory_budget_bytes == DEFAULT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES
+    assert DEFAULT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES == 1280 * MEBIBYTE
+
+
+def test_document_worker_memory_model_uses_the_measured_figures() -> None:
+    assert DOCUMENT_DOWNLOAD_PEAK_COPIES == 2
+    assert DOCUMENT_PARSE_WORKING_SET_BYTES == PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES
+
+
+@pytest.mark.parametrize(
+    ("max_bytes", "peak_bytes"),
+    [
+        (1, 1 + PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES),
+        (SHIPPED_DOCUMENT_MAX_BYTES, SHIPPED_DOCUMENT_MAX_BYTES + PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES),
+        (
+            PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES - 1,
+            PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES - 1 + PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES,
+        ),
+        (PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES, 2 * PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES),
+        (PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES + 1, 2 * (PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES + 1)),
+        (MAX_DOCUMENT_BYTES, 2 * MAX_DOCUMENT_BYTES),
+    ],
+)
+def test_document_job_peak_is_the_larger_of_the_download_and_the_parse_phase(
+    clean_environment: pytest.MonkeyPatch, max_bytes: int, peak_bytes: int
+) -> None:
+    settings = limit_settings_with(
+        clean_environment,
+        DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(max_bytes),
+        DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY="1",
+        DECKLY_LIMIT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES=str(LARGEST_DOCUMENT_WORKER_BUDGET_BYTES),
+    )
+
+    assert settings.document_worker_job_peak_bytes == peak_bytes
+
+
+def test_default_size_limit_fits_the_default_worker_memory_budget_and_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = limit_settings_with(clean_environment)
+
+    assert (
+        WORKER_MAX_JOBS * settings.document_worker_job_peak_bytes
+        < settings.document_worker_memory_budget_bytes
+    )
+
+
+def test_budget_exactly_equal_to_the_worst_case_is_accepted(clean_environment: pytest.MonkeyPatch) -> None:
+    worst_case = WORKER_MAX_JOBS * (SHIPPED_DOCUMENT_MAX_BYTES + PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES)
+
+    settings = limit_settings_with(
+        clean_environment, DECKLY_LIMIT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES=str(worst_case)
+    )
+
+    assert settings.document_worker_memory_budget_bytes == worst_case
+
+
+def test_budget_one_byte_under_the_worst_case_is_rejected(clean_environment: pytest.MonkeyPatch) -> None:
+    worst_case = WORKER_MAX_JOBS * (SHIPPED_DOCUMENT_MAX_BYTES + PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES)
+
+    with pytest.raises(ValidationError, match="exceeds the worker memory budget"):
+        limit_settings_with(
+            clean_environment, DECKLY_LIMIT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES=str(worst_case - 1)
+        )
+
+
+def test_largest_size_limit_the_default_worker_budget_holds_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = limit_settings_with(
+        clean_environment,
+        DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(LARGEST_LIMIT_THE_DEFAULT_WORKER_BUDGET_FITS),
+        DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY="1",
+    )
+
+    assert settings.document_max_bytes == LARGEST_LIMIT_THE_DEFAULT_WORKER_BUDGET_FITS
+
+
+def test_one_byte_past_the_largest_size_limit_the_default_worker_budget_holds_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="exceeds the worker memory budget"):
+        limit_settings_with(
+            clean_environment,
+            DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(LARGEST_LIMIT_THE_DEFAULT_WORKER_BUDGET_FITS + 1),
+            DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY="1",
+        )
+
+
+def test_maximum_size_limit_at_the_default_worker_budget_is_rejected_even_with_one_upload_slot(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="exceeds the worker memory budget"):
+        limit_settings_with(
+            clean_environment,
+            DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(MAX_DOCUMENT_BYTES),
+            DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY="1",
+        )
+
+
+def test_worker_memory_budget_error_reports_every_term_and_the_single_process_assumption(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError) as raised:
+        limit_settings_with(
+            clean_environment,
+            DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(MAX_DOCUMENT_BYTES),
+            DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY="1",
+        )
+
+    message = str(raised.value)
+    assert f"worker job concurrency ({WORKER_MAX_JOBS})" in message
+    assert f"({2 * MAX_DOCUMENT_BYTES} bytes" in message
+    assert f"size limit ({MAX_DOCUMENT_BYTES} bytes)" in message
+    assert f"{DOCUMENT_PARSE_WORKING_SET_BYTES} bytes of parser working set" in message
+    assert f"is {LARGEST_DOCUMENT_WORKER_BUDGET_BYTES} bytes" in message
+    assert f"worker memory budget ({DEFAULT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES} bytes)" in message
+    assert "DECKLY_LIMIT_DOCUMENT_MAX_BYTES" in message
+    assert "DECKLY_LIMIT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES" in message
+    assert "assumes a single worker process" in message
+
+
+def test_worker_budget_does_not_relax_the_upload_check(clean_environment: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValidationError, match="exceeds the upload memory budget"):
+        limit_settings_with(
+            clean_environment,
+            DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(MAX_DOCUMENT_BYTES),
+            DECKLY_LIMIT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES=str(LARGEST_DOCUMENT_WORKER_BUDGET_BYTES),
+        )
+
+
+def test_upload_budget_does_not_relax_the_worker_check(clean_environment: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValidationError, match="exceeds the worker memory budget"):
+        limit_settings_with(
+            clean_environment,
+            DECKLY_LIMIT_DOCUMENT_MAX_BYTES=str(MAX_DOCUMENT_BYTES),
+            DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY="1",
+            DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES=str(LARGEST_DOCUMENT_WORKER_BUDGET_BYTES),
+        )
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1GiB", "1.5", ""])
+def test_document_worker_memory_budget_outside_its_bounds_is_rejected(
+    clean_environment: pytest.MonkeyPatch, value: str
+) -> None:
+    with pytest.raises(ValidationError, match="document_worker_memory_budget_bytes"):
+        limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES=value)
