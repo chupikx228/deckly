@@ -338,10 +338,18 @@ metadata. The file goes in a `multipart/form-data` body as the only part, named 
   control and invisible characters removed (including bidi overrides). A name with nothing left
   is `400 VALIDATION_FAILED`. It is never used to name the stored object.
 - **Malformed requests** are `400 VALIDATION_FAILED`: a body that is not `multipart/form-data`,
-  no part named `file`, more than one file, or any other form field.
+  no part named `file`, more than one file, or any other form field. So is a body that is not
+  fully received within `DECKLY_LIMIT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS` (120 by default),
+  counted from the moment the upload is admitted to the last byte, however steadily the client is
+  sending: the server stops reading, frees the upload slot and answers `400`. The upload was
+  counted against the client's budget.
 - `429 RATE_LIMITED` when the client's upload budget is used up (see "Quota").
-- `503 UPSTREAM_UNAVAILABLE` when the object store or the rate-limit store fails or is too slow.
-  A failed upload leaves nothing behind that a client can read.
+- `503 UPSTREAM_UNAVAILABLE` when the object store or the rate-limit store fails or is too slow,
+  or when the server is already handling its maximum number of uploads at once
+  (`DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY`, 8 by default, per API process). The latter is
+  answered immediately, never queued, with `Retry-After: 5` and `retryAfterSeconds`, before the
+  body is read and before the upload is counted against the client's budget, so retrying costs
+  nothing. A failed upload leaves nothing behind that a client can read.
 - **No idempotency key.** Retrying an upload stores a second copy with a new `documentId`; the
   copy nothing uses expires like any other.
 

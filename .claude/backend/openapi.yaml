@@ -158,7 +158,10 @@ paths:
         stored. Uploads are rate limited per X-Client-Id and per network address, separately from
         the generation quota (429 RATE_LIMITED). A document nothing uses is deleted 24 hours after
         it was uploaded, and reading it afterwards is 404 DOCUMENT_NOT_FOUND. There is no
-        Idempotency-Key: retrying an upload stores a second copy, which expires the same way.
+        Idempotency-Key: retrying an upload stores a second copy, which expires the same way. The
+        server also bounds how many uploads it handles at once; one that arrives while every slot
+        is taken is refused at once as 503 UPSTREAM_UNAVAILABLE with Retry-After, before it is
+        counted against the upload budget, and can simply be retried.
       parameters:
         - $ref: '#/components/parameters/ClientId'
       requestBody:

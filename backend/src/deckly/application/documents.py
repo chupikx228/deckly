@@ -11,6 +11,7 @@ from deckly.application.ports import (
     DocumentStore,
     DocumentUpload,
     Requester,
+    UploadGate,
     UploadLimiter,
     UploadReader,
 )
@@ -24,6 +25,7 @@ type DocumentIdFactory = Callable[[], UUID]
 
 @dataclass(frozen=True, slots=True)
 class UploadDocument:
+    gate: UploadGate
     limiter: UploadLimiter
     inspector: DocumentInspector
     storage: DocumentStorage
@@ -31,8 +33,13 @@ class UploadDocument:
     clock: Clock
     new_document_id: DocumentIdFactory
     max_bytes: int
+    read_timeout_seconds: float
 
     async def __call__(self, requester: Requester, read: UploadReader) -> Document:
+        async with self.gate.admit():
+            return await self._upload(requester, read)
+
+    async def _upload(self, requester: Requester, read: UploadReader) -> Document:
         await self.limiter.acquire(requester, self.clock())
         upload = await read()
         document = await self._admit(upload, requester.client_id)

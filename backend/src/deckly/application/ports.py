@@ -218,6 +218,10 @@ class UploadLimiter(Protocol):
     async def acquire(self, requester: Requester, now: datetime) -> None: ...
 
 
+class UploadGate(Protocol):
+    def admit(self) -> AbstractAsyncContextManager[None]: ...
+
+
 class DocumentInspector(Protocol):
     async def identify(self, content: bytes) -> DocumentFormat: ...
 

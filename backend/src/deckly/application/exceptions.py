@@ -46,3 +46,7 @@ class RateLimitedError(RetryableError):
 
 class UpstreamUnavailableError(RetryableError):
     pass
+
+
+class UploadCapacityExceededError(UpstreamUnavailableError):
+    pass

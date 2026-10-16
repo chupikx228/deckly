@@ -1,3 +1,4 @@
+import asyncio
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
@@ -36,6 +37,7 @@ from deckly.infrastructure.observability.exposition import (
     MetricsExposition,
 )
 from deckly.infrastructure.observability.http import ObservedRequests
+from deckly.infrastructure.observability.metrics import DOCUMENT_UPLOAD_GATE
 from deckly.infrastructure.observability.runtime import Observability, create_observability
 from deckly.infrastructure.provider_faults import UpstreamFaultRegenerator, UpstreamFaultRetriever
 from deckly.infrastructure.queue import ArqJobQueue, create_queue_pool, create_redis_settings
@@ -47,6 +49,7 @@ from deckly.infrastructure.search.parser import CleaningSourceParser
 from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
 from deckly.infrastructure.storage.client import StorageClient
+from deckly.infrastructure.upload_gate import RejectingUploadGate
 from deckly.infrastructure.upload_limit import RedisUploadLimiter, UploadWindow
 from deckly.transport import documents, generations, health, notes
 from deckly.transport.dependencies import (
@@ -106,17 +109,23 @@ def wire_documents(app: FastAPI, settings: Settings, clients: DocumentClients) -
         window_seconds=limits.document_upload_window_seconds,
         command_timeout_seconds=settings.redis.connect_timeout_seconds,
     )
+    metrics = clients.observability.metrics
+    metrics.gate_limit.labels(gate=DOCUMENT_UPLOAD_GATE).set(limits.document_upload_max_concurrency)
     setattr(
         app.state,
         UPLOAD_DOCUMENT_STATE,
         UploadDocument(
-            limiter=RedisUploadLimiter(clients.redis, window, clients.observability.metrics),
+            gate=RejectingUploadGate(
+                asyncio.Semaphore(limits.document_upload_max_concurrency), DOCUMENT_UPLOAD_GATE, metrics
+            ),
+            limiter=RedisUploadLimiter(clients.redis, window, metrics),
             inspector=ContentDocumentInspector(),
             storage=build_document_storage(settings.providers, clients.storage, clients.observability),
             store=store,
             clock=utc_now,
             new_document_id=uuid4,
             max_bytes=limits.document_max_bytes,
+            read_timeout_seconds=limits.document_upload_read_timeout_seconds,
         ),
     )
     setattr(app.state, GET_DOCUMENT_STATE, GetDocument(store=store))

@@ -32,6 +32,7 @@ from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher
 from deckly.infrastructure.moderation.image_judge import LlmCandidateJudge
 from deckly.infrastructure.moderation.moderator import LlmContentModerator
+from deckly.infrastructure.observability.metrics import MODERATION_GATE
 from deckly.infrastructure.observability.runtime import Observability, create_observability
 from deckly.infrastructure.rate_limit import RedisRegenerationLimiter, RegenerationWindow
 from deckly.infrastructure.resilience import ProviderOperation, RetryPolicy
@@ -351,9 +352,7 @@ async def test_every_metric_the_ticket_lists_is_emitted_by_a_local_run(
         if line.startswith('deckly_generation_queue_depth{queue="generation"} ')
     ]
     assert float(depth.split()[1]) >= 1
-    assert "deckly_gate_in_flight{" not in lifecycle.scraped
-    assert "deckly_gate_wait_seconds_count{" not in lifecycle.scraped
-    assert "deckly_gate_limit{" not in lifecycle.scraped
+    assert f'gate="{MODERATION_GATE}"' not in lifecycle.scraped
     assert sample(worker, "deckly_generation_jobs_finished_total", outcome="succeeded", failure_code="") == 1
     assert sample(worker, "deckly_generation_job_duration_seconds_count", outcome="succeeded") == 1
     for stage in STAGE_ORDER:

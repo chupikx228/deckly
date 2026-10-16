@@ -8,11 +8,13 @@ from http import HTTPStatus
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyHttpUrl, SecretStr
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deckly.application.documents import UploadDocument
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.housekeeping import DocumentRetentionPolicy, EnforceDocumentRetention
 from deckly.config import Settings
@@ -25,7 +27,9 @@ from deckly.infrastructure.documents.store import (
     PostgresDocumentHousekeeping,
     PostgresDocumentStore,
 )
+from deckly.infrastructure.observability.metrics import DOCUMENT_UPLOAD_GATE
 from deckly.infrastructure.tables import DocumentRow
+from deckly.infrastructure.upload_gate import UPLOAD_CAPACITY_RETRY_AFTER_SECONDS, RejectingUploadGate
 from deckly.infrastructure.upload_limit import ADDRESS_KEY_PREFIX, CLIENT_KEY_PREFIX
 from deckly.main import API_PREFIX, create_app
 from deckly.worker.settings import (
@@ -180,6 +184,72 @@ async def test_uploaded_document_has_both_a_stored_record_and_its_object_and_rea
     assert read.json() == body
     assert foreign.status_code == HTTPStatus.NOT_FOUND
     assert foreign.json()["code"] == "DOCUMENT_NOT_FOUND"
+
+
+def with_upload_concurrency(settings: Settings, concurrency: int) -> Settings:
+    return replace(
+        settings, limits=settings.limits.model_copy(update={"document_upload_max_concurrency": concurrency})
+    )
+
+
+def gate_samples(scraped: str) -> dict[str, float]:
+    marker = f'gate="{DOCUMENT_UPLOAD_GATE}"'
+    return {
+        line.rsplit(" ", 1)[0]: float(line.rsplit(" ", 1)[1])
+        for line in scraped.splitlines()
+        if line.startswith("deckly_gate_") and marker in line
+    }
+
+
+async def test_upload_gate_reports_its_limit_and_its_uploads_on_the_metrics_endpoint(
+    settings: Settings, documents: DocumentCleanup
+) -> None:
+    client_id = documents.client_id()
+    with app_client(with_upload_concurrency(settings, 3)) as client:
+        before = gate_samples(client.get("/metrics").text)
+        body = upload(client, client_id, pdf_bytes())
+        after = gate_samples(client.get("/metrics").text)
+
+    assert body["status"] == HTTPStatus.CREATED
+    assert before == {f'deckly_gate_limit{{gate="{DOCUMENT_UPLOAD_GATE}"}}': 3.0}
+    assert after[f'deckly_gate_limit{{gate="{DOCUMENT_UPLOAD_GATE}"}}'] == 3.0
+    assert after[f'deckly_gate_in_flight{{gate="{DOCUMENT_UPLOAD_GATE}"}}'] == 0.0
+    assert after[f'deckly_gate_wait_seconds_count{{gate="{DOCUMENT_UPLOAD_GATE}",outcome="acquired"}}'] == 1.0
+    assert after[f'deckly_gate_wait_seconds_sum{{gate="{DOCUMENT_UPLOAD_GATE}",outcome="acquired"}}'] == 0.0
+
+
+async def test_upload_arriving_while_every_slot_is_taken_is_503_and_does_not_spend_the_clients_budget(
+    settings: Settings, documents: DocumentCleanup
+) -> None:
+    client_id = documents.client_id()
+    with app_client(with_upload_concurrency(settings, 1)) as client:
+        assert isinstance(client.app, FastAPI)
+        use_case = client.app.state.upload_document
+        assert isinstance(use_case, UploadDocument)
+        assert isinstance(use_case.gate, RejectingUploadGate)
+        await use_case.gate.gate.acquire()
+        refused = client.post(
+            ENDPOINT,
+            files={"file": ("lecture.pdf", pdf_bytes(), "application/octet-stream")},
+            headers={"X-Client-Id": str(client_id)},
+        )
+        use_case.gate.gate.release()
+        accepted = upload(client, client_id, pdf_bytes())
+        scraped = client.get("/metrics").text
+
+    assert refused.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+    assert refused.json()["code"] == "UPSTREAM_UNAVAILABLE"
+    assert refused.headers["Retry-After"] == str(UPLOAD_CAPACITY_RETRY_AFTER_SECONDS)
+    assert accepted["status"] == HTTPStatus.CREATED
+    assert len(await rows_of(documents.session_factory, client_id)) == 1
+    assert f'deckly_gate_rejections_total{{gate="{DOCUMENT_UPLOAD_GATE}"}} 1.0' in scraped
+    pool = await open_queue_pool(settings)
+    try:
+        keys = [key async for key in pool.scan_iter(match=f"{CLIENT_KEY_PREFIX}:{client_id}:*")]
+        counted = [await pool.get(key) for key in keys]
+    finally:
+        await pool.aclose()
+    assert [int(count) for count in counted if count is not None] == [1]
 
 
 async def test_oversized_upload_is_refused_before_anything_is_stored(

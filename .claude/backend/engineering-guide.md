@@ -278,10 +278,14 @@ soon as it picks it up; if it is never picked up, the queued threshold catches i
 store that speaks SigV4, chosen by `DECKLY_PROVIDER_STORAGE_*`) and its metadata in the
 `documents` table. The order is fixed so that no object can exist without a row pointing at it:
 
-1. The rate limit is checked before the body is read; a `Content-Length` over the limit is refused
-   before even that.
+1. A slot of the upload concurrency gate is taken, or the request is refused at once with `503` and
+   `Retry-After` (see "Concurrency cap" in the README): memory is bounded by the slots, not by the
+   number of clients. Then the rate limit is checked before the body is read; a `Content-Length`
+   over the limit is refused before even that.
 2. The body is read through a byte counter that stops the upload as soon as it passes the size
-   limit, so an oversized body is never buffered whole.
+   limit, so an oversized body is never buffered whole, and under a wall-clock deadline
+   (`DECKLY_LIMIT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS`) so a slow client cannot hold a gate slot
+   indefinitely.
 3. The size, the filename and the content type are checked. The type comes from the bytes, never
    from the name or the declared `Content-Type`.
 4. A `pending` row is written, then the object, then the row becomes `stored`. If the write fails,

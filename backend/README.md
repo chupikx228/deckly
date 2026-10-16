@@ -782,8 +782,15 @@ so saturation is `deckly_gate_in_flight / deckly_gate_limit`.
 one was free. `outcome` is `acquired` when the call got its slot, and `abandoned` when it was
 cancelled while still queued (its job timed out or was stopped): that observation is the time it
 had waited up to the cancellation. The worst waits are therefore in `abandoned`; watch
-`rate(..._count{outcome="abandoned"})` against the `acquired` rate. The API process never creates
-this gate, so it exposes no `gate` series.
+`rate(..._count{outcome="abandoned"})` against the `acquired` rate.
+
+The API process has a gate of its own, `gate="document_upload"` (see "Documents"), reported with the
+same three series, so the same saturation query works for it. It never queues, so every wait it
+records is 0 in `acquired` and `abandoned` never appears; the calls it turned away are counted by
+`deckly_gate_rejections_total{gate="document_upload"}`. The two processes expose different `gate`
+values: the worker never has `document_upload`, the API never has `moderation`. Each API process has
+its own gate, so aggregate `deckly_gate_in_flight` with `sum` across instances and read the limit of
+one.
 
 `make observability` starts Prometheus on `:9090` (compose profile `observability`, config in
 `observability/prometheus.yml`), scraping `host.docker.internal:8000` and `:9464`. `make up` does not
@@ -863,6 +870,65 @@ day, so 10 an hour leaves room for retries and wrong files while capping one cli
 upload bandwidth an hour. The address backstop shares the generation quota's bucketing (IPv6 /56).
 Both counters are incremented in one `MULTI`; a Redis that does not answer within
 `DECKLY_REDIS_CONNECT_TIMEOUT_SECONDS` fails the upload with `503`, like the generation quota.
+
+**Concurrency cap** (`infrastructure/upload_gate.py`, `DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY`,
+default 8, 1 to 32). The rate limits bound one client or address; nothing bounded the API process, and
+an upload is held in memory, so many clients uploading at once could exhaust it. The gate is an
+`asyncio.Semaphore` built once when the API starts, one per process, and an upload holds a slot from
+before the rate limit is checked until the object is stored (or the request fails or is cancelled).
+
+_Why 8._ There is no deployment to measure, so this is an assumption, stated so it can be revisited.
+Reading a 25 MiB upload through `read_upload` holds 25.8 MiB of Python allocations at its peak
+(`tracemalloc`, measured in this repository, the multipart parser spools to disk past 1 MiB), and the
+PUT hashes and sends those same bytes without copying them. Allowing about twice that for allocator
+overhead and the HTTP client's buffers gives 50 MiB per upload, which is the figure DEC-78 started from.
+The assumed budget is a 1 GiB API container with about 200 MiB of baseline (FastAPI,
+SQLAlchemy, the HTTP clients) and half of what remains kept free for the other endpoints and for
+garbage collection: roughly 400 MiB, and 400 / 50 = 8. A slot is sized for a full 25 MiB body, but an
+upload only holds what it has received so far, so a typical few-MiB lecture deck costs far less and 8
+slots is conservative for the usual mix. **The cap and `DECKLY_LIMIT_DOCUMENT_MAX_BYTES` are tied:**
+the worst case is cap x 2 x the size limit, so raising the size limit to 100 MiB with a cap of 8 puts
+the worst case at 1.6 GiB; lower the cap in step. The limit is per process, so with several workers or
+replicas the server-wide ceiling is their number times the cap.
+
+_Reject, not queue._ An upload is a user waiting at a screen, and a slot is held for as long as the
+client takes to send the body, up to about 40 s on a 5 Mbit/s uplink, plus the object-store PUT (60 s
+deadline). Queueing behind a full gate would add up to that much to a request that already takes that
+long, past a mobile client's timeout and a reverse proxy's body-read and response timeouts, and a
+request the client has given up on would still be queued and would take a slot when it came up
+(`ClientDisconnect`). A full gate therefore answers `503 UPSTREAM_UNAVAILABLE` at once with
+`Retry-After: 5`, the hint every other transient `503` in the API uses (`STORAGE_FAULT`, provider
+faults): a typical upload finishes in a few seconds, so the first retry usually finds a slot. This
+deliberately differs from the moderation gate, which queues because its callers are background
+worker chunks with a job-length deadline. No new error code is needed (`UploadCapacityExceededError`
+is an `UpstreamUnavailableError`, so the client already retries it), and the retries are not
+jittered: with 8 slots and the per-client limits the herd is small.
+
+_Read deadline_ (`DECKLY_LIMIT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS`, default 120, 1 to 900). A slot is
+held while the body is received, and the cap means that exactly 8 connections sending a few bytes a
+minute would hold every slot and refuse every other upload. `read_upload` therefore runs under one
+`asyncio.timeout` around the whole receive loop, the same bounded-I/O pattern as the rest of the
+service. It is a deadline for the _whole body_, not an idle timeout: a trickling client sends
+something just before any idle timeout fires, so only a total deadline bounds the slot. On expiry the
+upload fails with the same quiet `400` as a disconnect (`InvalidDocumentError`), the gate releases
+the slot as the exception unwinds, and `upload_read_timed_out` is logged at warning level.
+
+_Why 120 s._ A full 25 MiB body takes about 40 s at 5 Mbit/s, so 120 s is three times that, and it
+still admits a full-size upload at about 1.75 Mbit/s sustained (a poor but usable mobile link); a
+typical few-MiB deck at 1 Mbit/s takes well under a minute. A client slower than that is better
+served by a quick failure than by a connection that outlives the app's own request timeout. Longer
+would let an attacker hold a slot longer per connection; with the cap at 8, each slow connection
+costs at most 120 s of one slot, and each costs one unit of the upload budget (the limiter runs
+before the body is read), so one client or address cannot do this for long: 10 uploads per client
+per hour and 50 per address. Raise the value together with `DECKLY_LIMIT_DOCUMENT_MAX_BYTES`, since the
+time a legitimate upload needs grows with the size limit. A `400` was chosen over `408` because the
+contract has no error code for it and a client that is told its upload is invalid does not retry
+blindly; a distinct `408 UPLOAD_TIMEOUT` is the natural next step if the app needs to tell the two apart.
+
+The gate is taken before the rate limit, so a refused upload never reaches the Redis counters and
+retrying it does not spend the client's budget; it is refused before the body is read, so the refusal
+costs no memory. A `Content-Length` over the size limit is still refused first, without taking a slot.
+The slot is held only by the uploads themselves, so `GET /documents/{id}` is not affected.
 
 **Retention.** 24 hours from upload (`DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS`), the same window as
 job retention and idempotency keys: long enough for a user who uploaded, backgrounded the app and
