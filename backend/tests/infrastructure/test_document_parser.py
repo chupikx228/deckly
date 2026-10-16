@@ -1,7 +1,4 @@
 import itertools
-import tracemalloc
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import replace
 
 import pytest
@@ -45,6 +42,7 @@ from tests.document_files import (
 )
 from tests.documents import document
 from tests.logs import captured_json_logs
+from tests.memory import peak_memory
 
 pytestmark = pytest.mark.anyio
 
@@ -74,17 +72,6 @@ def cited(document: Document, unit: CitationUnit, number: int) -> DocumentSource
 
 def numbers(material: tuple[SourceMaterial, ...]) -> list[int]:
     return [entry.source.number for entry in material if isinstance(entry.source, DocumentSource)]
-
-
-@contextmanager
-def peak_memory() -> Iterator[list[int]]:
-    peak: list[int] = []
-    tracemalloc.start()
-    try:
-        yield peak
-    finally:
-        peak.append(tracemalloc.get_traced_memory()[1])
-        tracemalloc.stop()
 
 
 async def test_pdf_page_becomes_material_citing_that_page_of_the_document() -> None:

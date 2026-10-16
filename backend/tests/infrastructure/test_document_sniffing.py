@@ -5,6 +5,7 @@ import pytest
 
 from deckly.domain.document import DocumentFormat
 from deckly.domain.exceptions import UnsupportedDocumentError
+from deckly.infrastructure.documents.archive import MAX_ARCHIVE_ENTRIES
 from deckly.infrastructure.documents.sniffing import (
     MAX_CONTENT_TYPES_BYTES,
     PDF_HEADER_WINDOW,
@@ -12,6 +13,7 @@ from deckly.infrastructure.documents.sniffing import (
     ContentDocumentInspector,
     detect_format,
 )
+from tests.document_files import MIB
 from tests.documents import (
     MACRO_PRESENTATION_MAIN,
     SHEET_MAIN,
@@ -21,9 +23,11 @@ from tests.documents import (
     pdf_bytes,
     pptx_bytes,
 )
+from tests.memory import peak_memory
 
 pytestmark = pytest.mark.anyio
 
+OVERSIZED_ENTRY_COUNT = 200_000
 OLE_COMPOUND_FILE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 504
 
 
@@ -106,6 +110,23 @@ def test_content_types_part_over_its_size_cap_is_rejected_without_reading_it_who
         archive.writestr("[Content_Types].xml", padding + b"presentationml.presentation.main+xml")
         archive.writestr("ppt/presentation.xml", b"<presentation/>")
     rejected(buffer.getvalue())
+
+
+def test_archive_with_too_many_entries_is_rejected_before_its_directory_is_read() -> None:
+    padding = {f"ppt/media/empty{index}.bin": b"" for index in range(OVERSIZED_ENTRY_COUNT)}
+
+    archive = office_bytes(extra=padding)
+
+    with peak_memory() as peak:
+        rejected(archive)
+
+    assert peak[0] < MIB
+
+
+def test_archive_at_the_entry_limit_is_still_recognised() -> None:
+    padding = {f"ppt/media/empty{index}.bin": b"" for index in range(MAX_ARCHIVE_ENTRIES - 2)}
+
+    assert detect_format(office_bytes(extra=padding)) is DocumentFormat.PPTX
 
 
 def test_legacy_binary_powerpoint_is_rejected() -> None:
