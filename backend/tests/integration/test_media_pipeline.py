@@ -18,6 +18,7 @@ from deckly.infrastructure.job_store import PostgresJobStore
 from deckly.transport.results import GenerationResultBody
 from tests.domain.builders import T0
 from tests.fakes import (
+    FakeDocuments,
     FakeLlmClient,
     FakeProviders,
     InMemoryResultCache,
@@ -29,7 +30,7 @@ from tests.fakes import (
     generation_request,
     model_reply,
 )
-from tests.integration.conftest import Cleanup
+from tests.integration.conftest import DOCUMENT_RETENTION, Cleanup
 from tests.transport.openapi import spec_errors
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -77,6 +78,7 @@ async def run_with(
         cache=InMemoryResultCache(),
         retriever=providers,
         parser=providers,
+        documents=FakeDocuments().sourcing(),
         generator=LlmCardGenerator(
             llm=FakeLlmClient(model_reply({"deck": {"title": "Знаки"}, "notes": NOTES})),
             new_id=uuid4,
@@ -118,7 +120,9 @@ async def test_only_images_with_a_derivable_licence_are_stored_against_the_notes
         page = LICENSED if terms.startswith("stop sign") else UNLICENSED
         return httpx2.Response(200, json=commons_results(page))
 
-    stored = await run_with(PostgresJobStore(session_factory), cleanup, handler)
+    stored = await run_with(
+        PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION), cleanup, handler
+    )
 
     assert sorted(searched) == ["stop sign filetype:bitmap|drawing", "yield sign filetype:bitmap|drawing"]
     assert fronts_with_images(stored) == {
@@ -141,7 +145,9 @@ async def test_attributed_image_is_stored_and_read_back_with_its_attribution(
         page = ATTRIBUTED if request.url.params["gsrsearch"].startswith("yield sign") else UNLICENSED
         return httpx2.Response(200, json=commons_results(page))
 
-    stored = await run_with(PostgresJobStore(session_factory), cleanup, handler)
+    stored = await run_with(
+        PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION), cleanup, handler
+    )
 
     assert isinstance(stored.state, Succeeded)
     [image] = [item for note in stored.state.result.notes for item in note.media]
@@ -159,7 +165,11 @@ async def test_attributed_image_is_stored_and_read_back_with_its_attribution(
 async def test_image_provider_outage_is_stored_as_a_succeeded_job_with_an_image_free_deck(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    stored = await run_with(PostgresJobStore(session_factory), cleanup, lambda _: httpx2.Response(503))
+    stored = await run_with(
+        PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION),
+        cleanup,
+        lambda _: httpx2.Response(503),
+    )
 
     assert fronts_with_images(stored) == {
         "Что означает красный восьмиугольник?": 0,

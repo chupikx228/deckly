@@ -14,6 +14,9 @@ from opentelemetry.trace import format_span_id, format_trace_id
 
 from deckly.application.correlation import CLIENT_ID, JOB_ID, REQUEST_ID, correlated, current_correlation
 from deckly.application.exceptions import UpstreamUnavailableError
+from deckly.application.ports import JobOutcome
+from deckly.domain.generation import SourceKind
+from deckly.domain.job import JobStage
 from deckly.infrastructure.llm.client import LlmPrompt, LlmReply, LlmStop, LlmUnavailableError
 from deckly.infrastructure.llm.resilient import ResilientLlmClient
 from deckly.infrastructure.logging import URL_LOGGING_LIBRARY_LOGGERS, configure_logging
@@ -468,3 +471,29 @@ async def test_a_job_queued_before_trace_propagation_still_runs() -> None:
     await run_generation({RUN_GENERATION_KEY: harness.run}, str(job_id))
 
     assert (await harness.get(job_id)).status == "succeeded"
+
+
+def test_a_job_span_names_the_source_kind_once_the_job_is_known() -> None:
+    out = io.StringIO()
+    telemetry = create_observability(TEST_SERVICE_NAME, "console", out).generation()
+
+    with telemetry.run(JOB) as run, telemetry.stage(JobStage.PARSING_SOURCES, SourceKind.DOCUMENT):
+        run.identify(SourceKind.DOCUMENT)
+        run.finish(JobOutcome.SUCCEEDED)
+
+    stage, job = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert job["attributes"]["deckly.source_kind"] == "document"
+    assert stage["attributes"]["deckly.source_kind"] == "document"
+
+
+def test_a_job_that_never_learns_its_source_is_counted_under_an_empty_source() -> None:
+    observability = fresh_observability()
+    telemetry = observability.generation()
+
+    with telemetry.run(JOB) as run:
+        run.finish(JobOutcome.SKIPPED)
+
+    labels = {"outcome": "skipped", "failure_code": "", "source": ""}
+    assert (
+        observability.metrics.registry.get_sample_value("deckly_generation_jobs_finished_total", labels) == 1
+    )

@@ -100,11 +100,15 @@ async def test_answering_store_passes_every_call_through() -> None:
     added = await store.add(job, generation_request(), scope())
     cancelled = await store.update(job.job_id, lambda stored: stored.cancel(T0))
 
-    assert added == StoredJob(job=job, request=generation_request())
+    assert added == StoredJob(job=job, request=generation_request(), client_id=scope().client_id)
     assert cancelled is not None
     assert await store.get(job.job_id) == cancelled
-    assert await store.get_stored(job.job_id) == StoredJob(job=cancelled, request=generation_request())
-    assert await store.find(scope()) == StoredJob(job=cancelled, request=generation_request())
+    assert await store.get_stored(job.job_id) == StoredJob(
+        job=cancelled, request=generation_request(), client_id=scope().client_id
+    )
+    assert await store.find(scope()) == StoredJob(
+        job=cancelled, request=generation_request(), client_id=scope().client_id
+    )
     assert await store.find(scope(key=2)) is None
     assert await store.get(job_id(2)) is None
 

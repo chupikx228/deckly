@@ -58,8 +58,8 @@ def create_metrics() -> Metrics:
         registry=registry,
         jobs_admitted=Counter(
             "deckly_generation_jobs_admitted",
-            "Generation requests answered by POST /generations, by admission outcome.",
-            ["outcome"],
+            "Generation requests answered by POST /generations, by admission outcome and source kind.",
+            ["outcome", "source"],
             registry=registry,
         ),
         jobs_cancelled=Counter(
@@ -69,21 +69,21 @@ def create_metrics() -> Metrics:
         ),
         jobs_finished=Counter(
             "deckly_generation_jobs_finished",
-            "Generation jobs a worker finished, by outcome and failure code.",
-            ["outcome", "failure_code"],
+            "Generation jobs a worker finished, by outcome, failure code and source kind.",
+            ["outcome", "failure_code", "source"],
             registry=registry,
         ),
         job_duration=Histogram(
             "deckly_generation_job_duration_seconds",
-            "Wall time a worker spent on one generation job.",
-            ["outcome"],
+            "Wall time a worker spent on one generation job, by outcome and source kind.",
+            ["outcome", "source"],
             buckets=JOB_BUCKETS,
             registry=registry,
         ),
         stage_duration=Histogram(
             "deckly_generation_stage_duration_seconds",
-            "Time spent in one pipeline stage, by stage and outcome.",
-            ["stage", "outcome"],
+            "Time spent in one pipeline stage, by stage, outcome and source kind.",
+            ["stage", "outcome", "source"],
             buckets=STAGE_BUCKETS,
             registry=registry,
         ),

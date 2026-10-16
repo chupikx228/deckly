@@ -10,8 +10,9 @@ from types import MappingProxyType
 from uuid import UUID
 
 from deckly.application.exceptions import UpstreamUnavailableError
-from deckly.application.ports import ContentModerator
+from deckly.application.ports import ContentModerator, SourceMaterial
 from deckly.domain.deck import Deck, GenerationResult
+from deckly.domain.document import Document
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.notes.note import Note
 from deckly.domain.regeneration import RegenerationRequest
@@ -22,6 +23,7 @@ from deckly.infrastructure.card_generator.untrusted import JsonObject, as_object
 from deckly.infrastructure.llm.client import LlmClient, LlmError, LlmReply, LlmStop
 from deckly.infrastructure.moderation.prompt import (
     build_content_prompt,
+    build_material_prompt,
     build_regeneration_screening_prompt,
     build_topic_prompt,
     note_number,
@@ -141,11 +143,38 @@ def content_verdicts(reply: LlmReply) -> ContentVerdicts:
 class LlmTopicModerator:
     llm: LlmClient
 
-    async def allows(self, request: GenerationRequest) -> bool:
+    async def allows(self, request: GenerationRequest, document: Document | None) -> bool:
         with moderation_faults_as_upstream({"subject": "topic"}):
-            reply = await self.llm.complete(build_topic_prompt(request))
+            reply = await self.llm.complete(build_topic_prompt(request, document))
             verdict = topic_verdict(reply)
-        logger.info("topic_screened", extra={"verdict": verdict, "reply_stop": reply.stop})
+        logger.info(
+            "topic_screened",
+            extra={"verdict": verdict, "reply_stop": reply.stop, "source_kind": request.source_kind},
+        )
+        return verdict is Verdict.ALLOW
+
+
+@dataclass(frozen=True, slots=True)
+class LlmMaterialModerator:
+    llm: LlmClient
+
+    async def allows(self, job_id: UUID, document: Document, material: tuple[SourceMaterial, ...]) -> bool:
+        context = {"subject": "document", "job_id": str(job_id), "document_id": str(document.document_id)}
+        with moderation_faults_as_upstream(context):
+            reply = await self.llm.complete(build_material_prompt(document, material))
+            verdict = topic_verdict(reply)
+        logger.log(
+            logging.INFO if verdict is Verdict.ALLOW else logging.WARNING,
+            "document_screened",
+            extra={
+                "job_id": str(job_id),
+                "document_id": str(document.document_id),
+                "verdict": verdict,
+                "reply_stop": reply.stop,
+                "units": len(material),
+                "characters": sum(len(entry.text) for entry in material),
+            },
+        )
         return verdict is Verdict.ALLOW
 
 
@@ -153,7 +182,7 @@ class LlmTopicModerator:
 class LlmContentModerator:
     llm: LlmClient
 
-    async def screen(self, _job_id: UUID, query: SourceQuery, result: GenerationResult) -> GenerationResult:
+    async def screen(self, _job_id: UUID, subject: str, result: GenerationResult) -> GenerationResult:
         batches = tuple(batched(result.notes, NOTES_PER_CONTENT_CHECK)) or (NO_NOTES,)
         checks = await self._check_all(result.deck, batches)
         judged = [
@@ -175,7 +204,7 @@ class LlmContentModerator:
                 "deck_replaced": not deck_allowed,
             },
         )
-        deck = result.deck if deck_allowed else repair_deck(NO_DECK_REPLACEMENT, query.topic)
+        deck = result.deck if deck_allowed else repair_deck(NO_DECK_REPLACEMENT, subject)
         return GenerationResult(deck=deck, notes=kept)
 
     async def _check_all(self, deck: Deck, batches: tuple[tuple[Note, ...], ...]) -> tuple[ContentCheck, ...]:
@@ -207,5 +236,5 @@ class LlmRegenerationModerator:
 
     async def allows_note(self, request_id: UUID, query: SourceQuery, note: Note) -> bool:
         result = GenerationResult(deck=repair_deck(NO_DECK_REPLACEMENT, query.topic), notes=(note,))
-        screened = await self.content.screen(request_id, query, result)
+        screened = await self.content.screen(request_id, query.topic, result)
         return note in screened.notes

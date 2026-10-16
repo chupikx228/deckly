@@ -47,6 +47,7 @@ from tests.fakes import (
     MEDIA_ENDPOINT,
     MEDIA_LIMITS,
     TEST_SERVICE_NAME,
+    FakeDocuments,
     FakeLlmClient,
     commons_page,
     commons_results,
@@ -54,6 +55,7 @@ from tests.fakes import (
     tavily_result,
 )
 from tests.integration.conftest import (
+    DOCUMENT_RETENTION,
     TEST_PEER_ADDRESSES,
     Cleanup,
     purge_quota,
@@ -205,12 +207,13 @@ async def worker_pipeline(
     )
     stack.push_async_callback(media.aclose)
     return RunGeneration(
-        store=PostgresJobStore(session_factory),
+        store=PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION),
         cache=RedisResultCache(
             pool, ResultCacheLimits(ttl_seconds=60, command_timeout_seconds=2), worker.metrics
         ),
         retriever=retriever,
         parser=CleaningSourceParser(max_characters=4000),
+        documents=FakeDocuments().sourcing(),
         generator=LlmCardGenerator(
             llm=resilient_llm(worker, ProviderOperation.CARD_GENERATION, generated_cards(canaries.content)),
             new_id=uuid4,
@@ -266,7 +269,7 @@ async def run_lifecycle(
             await run_generation({RUN_GENERATION_KEY: run}, str(job_argument), trace_context)
         assert client.get(f"{ENDPOINT}/{job_id}", headers=headers).status_code == HTTPStatus.OK
         scraped = client.get("/metrics").text
-    stored = await PostgresJobStore(session_factory).get_stored(job_id)
+    stored = await PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION).get_stored(job_id)
     assert stored is not None
     await pool.delete(cache_key(stored.request.fingerprint()))
     worker.shutdown()
@@ -288,7 +291,17 @@ def connections(session_factory: async_sessionmaker[AsyncSession], queue_pool: A
     return session_factory, queue_pool
 
 
+SOURCE_LABELLED_METRICS = (
+    "deckly_generation_jobs_admitted",
+    "deckly_generation_jobs_finished",
+    "deckly_generation_job_duration",
+    "deckly_generation_stage_duration",
+)
+
+
 def sample(worker: Observability, name: str, **labels: str) -> float | None:
+    if name.startswith(SOURCE_LABELLED_METRICS):
+        labels = {"source": "topic", **labels}
     return worker.metrics.registry.get_sample_value(name, labels)
 
 
@@ -345,7 +358,7 @@ async def test_every_metric_the_ticket_lists_is_emitted_by_a_local_run(
     lifecycle, _ = await run_lifecycle(settings, cleanup, connections, HTTPStatus.SERVICE_UNAVAILABLE)
     worker = lifecycle.worker
 
-    assert 'deckly_generation_jobs_admitted_total{outcome="queued"} 1.0' in lifecycle.scraped
+    assert 'deckly_generation_jobs_admitted_total{outcome="queued",source="topic"} 1.0' in lifecycle.scraped
     [depth] = [
         line
         for line in lifecycle.scraped.splitlines()

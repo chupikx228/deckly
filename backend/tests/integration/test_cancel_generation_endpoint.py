@@ -18,7 +18,7 @@ from deckly.infrastructure.tables import GenerationJobRow
 from deckly.main import API_PREFIX, create_app
 from tests.domain.builders import FULL_RESULT, T0, at
 from tests.fakes import generation_request
-from tests.integration.conftest import Cleanup, open_queue_pool
+from tests.integration.conftest import DOCUMENT_RETENTION, Cleanup, open_queue_pool
 from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
 
@@ -43,7 +43,9 @@ async def write(settings: Settings, cleanup: Cleanup, job: GenerationJob) -> Non
     engine = create_engine(str(settings.database.url), pool_size=1, max_overflow=0, pool_timeout_seconds=10)
     try:
         cleanup.job_ids.add(job.job_id)
-        await PostgresJobStore(create_session_factory(engine)).add(job, generation_request(), cleanup.scope())
+        await PostgresJobStore(create_session_factory(engine), document_retention=DOCUMENT_RETENTION).add(
+            job, generation_request(), cleanup.scope()
+        )
     finally:
         await engine.dispose()
 

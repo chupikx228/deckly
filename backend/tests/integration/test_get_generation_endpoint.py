@@ -19,7 +19,7 @@ from deckly.main import API_PREFIX, create_app
 from deckly.transport.generations import POLL_RETRY_AFTER_SECONDS
 from tests.domain.builders import FULL_RESULT, T0, at
 from tests.fakes import generation_request
-from tests.integration.conftest import Cleanup
+from tests.integration.conftest import DOCUMENT_RETENTION, Cleanup
 from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
 
@@ -51,7 +51,9 @@ async def write(settings: Settings, cleanup: Cleanup, job: GenerationJob) -> Non
         session_factory = create_session_factory(engine)
         if job.job_id not in cleanup.job_ids:
             cleanup.job_ids.add(job.job_id)
-            await PostgresJobStore(session_factory).add(job, generation_request(), cleanup.scope())
+            await PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION).add(
+                job, generation_request(), cleanup.scope()
+            )
             return
         stored = store_state(job.state)
         async with session_factory.begin() as session:

@@ -11,6 +11,7 @@ from deckly.application.exceptions import (
 )
 from deckly.application.ports import (
     AdmissionOutcome,
+    DocumentStore,
     GenerationQuota,
     GenerationTelemetry,
     IdempotencyScope,
@@ -21,7 +22,8 @@ from deckly.application.ports import (
     StoredJob,
     TopicModerator,
 )
-from deckly.domain.exceptions import JobNotFoundError, TopicRejectedError
+from deckly.domain.document import Document
+from deckly.domain.exceptions import DocumentNotFoundError, JobNotFoundError, TopicRejectedError
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import GenerationJob, JobStatus
 
@@ -49,6 +51,7 @@ class CreateGeneration:
     queue: JobQueue
     quota: GenerationQuota
     moderator: TopicModerator
+    documents: DocumentStore
     clock: Clock
     new_job_id: JobIdFactory
     telemetry: GenerationTelemetry
@@ -58,6 +61,7 @@ class CreateGeneration:
         existing = await self._find(scope)
         if existing is not None:
             return await self._replay(existing, request, scope, now)
+        document = await self._document(request, scope.client_id)
         requester = Requester(client_id=scope.client_id, address=address)
         try:
             quota = await self.quota.reserve(requester, now)
@@ -66,18 +70,22 @@ class CreateGeneration:
             if twin is None:
                 raise
             return await self._replay(twin, request, scope, now)
-        if not await self._screen(request, requester, now):
+        if not await self._screen(request, document, requester, now):
             twin = await self._find(scope)
             if twin is None:
-                logger.info("topic_rejected")
-                self.telemetry.admitted(AdmissionOutcome.TOPIC_REJECTED)
-                message = "topic violates the content policy"
+                logger.info("topic_rejected", extra={"source_kind": request.source_kind})
+                self.telemetry.admitted(AdmissionOutcome.TOPIC_REJECTED, request.source_kind)
+                message = "the request violates the content policy"
                 raise TopicRejectedError(message)
             await self.quota.release(requester, now)
             return await self._replay(twin, request, scope, now)
         job = GenerationJob.queue(self.new_job_id(), now)
         try:
             stored = await self.store.add(job, request, scope)
+        except DocumentNotFoundError:
+            await self.quota.release(requester, now)
+            self._document_missing(request)
+            raise
         except Exception:
             await self.quota.release(requester, now)
             raise
@@ -85,7 +93,7 @@ class CreateGeneration:
             await self.quota.release(requester, now)
             return await self._replay(stored, request, scope, now)
         await self.queue.enqueue(job.job_id)
-        self._admit(job, AdmissionOutcome.QUEUED)
+        self._admit(job, request, AdmissionOutcome.QUEUED)
         return JobCreated(job=job, quota=quota)
 
     async def _find(self, scope: IdempotencyScope) -> StoredJob | None:
@@ -95,9 +103,25 @@ class CreateGeneration:
             message = f"{scope} was first used for a request that no longer validates"
             raise IdempotencyKeyConflictError(message) from error
 
-    async def _screen(self, request: GenerationRequest, requester: Requester, now: datetime) -> bool:
+    async def _document(self, request: GenerationRequest, client_id: UUID) -> Document | None:
+        if request.document_id is None:
+            return None
+        document = await self.documents.get(request.document_id, client_id)
+        if document is None:
+            self._document_missing(request)
+            message = f"document {request.document_id} does not exist for this client"
+            raise DocumentNotFoundError(message)
+        return document
+
+    def _document_missing(self, request: GenerationRequest) -> None:
+        logger.info("generation_document_not_found", extra={"document_id": str(request.document_id)})
+        self.telemetry.admitted(AdmissionOutcome.DOCUMENT_NOT_FOUND, request.source_kind)
+
+    async def _screen(
+        self, request: GenerationRequest, document: Document | None, requester: Requester, now: datetime
+    ) -> bool:
         try:
-            return await self.moderator.allows(request)
+            return await self.moderator.allows(request, document)
         except BaseException:
             await self.quota.release(requester, now)
             raise
@@ -111,15 +135,20 @@ class CreateGeneration:
         if stored.job.status is JobStatus.QUEUED:
             await self.queue.enqueue(stored.job.job_id)
         quota = await self.quota.current(scope.client_id, now)
-        self._admit(stored.job, AdmissionOutcome.REPLAYED)
+        self._admit(stored.job, request, AdmissionOutcome.REPLAYED)
         return JobCreated(job=stored.job, quota=quota)
 
-    def _admit(self, job: GenerationJob, outcome: AdmissionOutcome) -> None:
-        logger.info(
-            "generation_admitted",
-            extra={"job_id": str(job.job_id), "admission": outcome, "status": job.status},
-        )
-        self.telemetry.admitted(outcome)
+    def _admit(self, job: GenerationJob, request: GenerationRequest, outcome: AdmissionOutcome) -> None:
+        context: dict[str, object] = {
+            "job_id": str(job.job_id),
+            "admission": outcome,
+            "status": job.status,
+            "source_kind": request.source_kind,
+        }
+        if request.document_id is not None:
+            context["document_id"] = str(request.document_id)
+        logger.info("generation_admitted", extra=context)
+        self.telemetry.admitted(outcome, request.source_kind)
 
 
 @dataclass(frozen=True, slots=True)

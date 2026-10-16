@@ -65,6 +65,7 @@ from deckly.worker.settings import (
 from tests.domain.builders import T0
 from tests.fakes import (
     MODEL_THINKING_SECONDS,
+    FakeDocuments,
     FakeLlmClient,
     FakeProviders,
     InMemoryResultCache,
@@ -75,7 +76,7 @@ from tests.fakes import (
     generation_request,
     model_reply,
 )
-from tests.integration.conftest import Cleanup, job_queue, redis_settings
+from tests.integration.conftest import DOCUMENT_RETENTION, Cleanup, job_queue, redis_settings
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -125,6 +126,7 @@ def context_with(store: PostgresJobStore, providers: FakeProviders) -> WorkerCon
             cache=InMemoryResultCache(),
             retriever=providers,
             parser=providers,
+            documents=FakeDocuments().sourcing(),
             generator=providers,
             moderator=providers,
             media=providers,
@@ -137,7 +139,7 @@ def context_with(store: PostgresJobStore, providers: FakeProviders) -> WorkerCon
 async def test_job_enqueued_like_the_api_does_is_run_by_the_registered_generation_task(
     session_factory: async_sessionmaker[AsyncSession], queue_pool: ArqRedis, cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = await enqueued_job(store, queue_pool, cleanup)
     providers = FakeProviders()
 
@@ -158,7 +160,7 @@ async def test_job_enqueued_like_the_api_does_is_run_by_the_registered_generatio
 async def test_task_of_a_job_cancelled_while_it_waited_in_the_queue_calls_no_port(
     session_factory: async_sessionmaker[AsyncSession], queue_pool: ArqRedis, cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = await enqueued_job(store, queue_pool, cleanup)
     await store.update(job.job_id, lambda stored: stored.cancel(utc_now()))
     providers = FakeProviders()
@@ -352,7 +354,7 @@ async def test_worker_startup_wires_housekeeping_with_the_configured_thresholds_
 async def test_job_that_outlives_the_arq_timeout_ends_failed_instead_of_running_forever(
     session_factory: async_sessionmaker[AsyncSession], queue_pool: ArqRedis, cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = await enqueued_job(store, queue_pool, cleanup)
     providers = FakeProviders()
 
@@ -383,7 +385,7 @@ async def test_cancelling_a_running_job_aborts_its_model_call_inside_the_arq_wor
 ) -> None:
     queue_name = f"{default_queue_name}:{uuid4()}"
     pool = await create_pool(redis_settings(settings), default_queue_name=queue_name)
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = await enqueued_job(store, pool, cleanup)
     model = SlowModel(model_reply({"notes": []}))
     breaker = CircuitBreaker(failure_threshold=1, reset_seconds=30, clock=time.monotonic, probe=fresh_probe())
@@ -393,6 +395,7 @@ async def test_cancelling_a_running_job_aborts_its_model_call_inside_the_arq_wor
         cache=InMemoryResultCache(),
         retriever=providers,
         parser=providers,
+        documents=FakeDocuments().sourcing(),
         generator=LlmCardGenerator(
             llm=patient_llm(model, breaker), new_id=uuid4, handlers=NOTE_TYPE_HANDLERS
         ),

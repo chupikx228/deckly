@@ -14,6 +14,7 @@ from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.job_store import PostgresJobStore
 from tests.domain.builders import T0
 from tests.fakes import (
+    FakeDocuments,
     FakeLlmClient,
     FakeProviders,
     InMemoryResultCache,
@@ -21,7 +22,7 @@ from tests.fakes import (
     generation_request,
     model_reply,
 )
-from tests.integration.conftest import Cleanup
+from tests.integration.conftest import DOCUMENT_RETENTION, Cleanup
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -32,7 +33,7 @@ SURROGATE_CATEGORY = "Cs"
 async def test_generated_text_with_nul_and_lone_surrogates_is_stored_and_read_back(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = GenerationJob.queue(uuid4(), T0)
     await store.add(job, generation_request(), cleanup.scope())
     note = {
@@ -49,6 +50,7 @@ async def test_generated_text_with_nul_and_lone_surrogates_is_stored_and_read_ba
         cache=InMemoryResultCache(),
         retriever=providers,
         parser=providers,
+        documents=FakeDocuments().sourcing(),
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),
         moderator=providers,
         media=providers,

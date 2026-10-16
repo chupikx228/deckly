@@ -1,5 +1,6 @@
 from dataclasses import replace
 from typing import Unpack
+from uuid import UUID
 
 import pytest
 
@@ -9,8 +10,11 @@ from deckly.domain.generation import (
     MIN_CARD_COUNT,
     UNGENERATABLE_NOTE_TYPES,
     Difficulty,
+    DocumentGenerationFingerprint,
+    Fingerprint,
     GenerationFingerprint,
     GenerationRequest,
+    SourceKind,
 )
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE
@@ -143,7 +147,7 @@ def test_topic_with_one_visible_character_among_blanks_is_accepted() -> None:
     assert request_with(NoteType.BASIC, topic=topic).topic == topic
 
 
-def fingerprint_of(**changes: Unpack[RequestChanges]) -> GenerationFingerprint:
+def fingerprint_of(**changes: Unpack[RequestChanges]) -> Fingerprint:
     return replace(request_with(NoteType.BASIC, NoteType.CLOZE), **changes).fingerprint()
 
 
@@ -221,3 +225,98 @@ def test_fingerprint_leaves_the_request_itself_untouched() -> None:
     assert request.topic == "  Road   signs "
     assert request.language == "RU"
     assert request.note_types == (NoteType.CLOZE, NoteType.BASIC)
+
+
+DOCUMENT_ID = UUID("5d0c7a1e-3b2f-4c8d-9e6f-1a2b3c4d5e6f")
+OTHER_DOCUMENT_ID = UUID("6e1d8b2f-4c3a-4d9e-8f7a-2b3c4d5e6f70")
+
+
+def document_request_with(**changes: Unpack[RequestChanges]) -> GenerationRequest:
+    request = replace(request_with(NoteType.BASIC, NoteType.CLOZE), topic=None, document_id=DOCUMENT_ID)
+    return replace(request, **changes)
+
+
+def test_request_from_a_document_names_no_topic_and_is_a_document_source() -> None:
+    request = document_request_with()
+
+    assert request.topic is None
+    assert request.document_id == DOCUMENT_ID
+    assert request.source_kind is SourceKind.DOCUMENT
+    assert request_with(NoteType.BASIC).source_kind is SourceKind.TOPIC
+
+
+@pytest.mark.parametrize(
+    ("topic", "document_id"),
+    [("Road signs", DOCUMENT_ID), (None, None)],
+    ids=["both", "neither"],
+)
+def test_request_must_name_exactly_one_of_a_topic_and_a_document(
+    topic: str | None, document_id: UUID | None
+) -> None:
+    with pytest.raises(InvalidGenerationRequestError, match="exactly one"):
+        replace(request_with(NoteType.BASIC), topic=topic, document_id=document_id)
+
+
+@pytest.mark.parametrize("document_id", [UUID(int=0), UUID(int=7, version=1)], ids=["nil", "version 1"])
+def test_document_id_must_be_a_version_4_uuid(document_id: UUID) -> None:
+    with pytest.raises(InvalidGenerationRequestError, match="documentId"):
+        document_request_with(document_id=document_id)
+
+
+def test_request_from_a_document_still_validates_the_rest_of_the_request() -> None:
+    with pytest.raises(InvalidGenerationRequestError, match="card count"):
+        document_request_with(card_count=MAX_CARD_COUNT + 1)
+
+
+def test_request_from_a_document_has_no_topic_to_search_for() -> None:
+    with pytest.raises(InvalidGenerationRequestError, match="no topic"):
+        document_request_with().source_query()
+
+
+def test_document_fingerprint_names_the_document_and_normalises_like_a_topic_fingerprint() -> None:
+    request = document_request_with(language="RU", note_types=(NoteType.CLOZE, NoteType.BASIC))
+
+    assert request.fingerprint() == DocumentGenerationFingerprint(
+        document_id=DOCUMENT_ID,
+        language="ru",
+        card_count=40,
+        difficulty=Difficulty.INTERMEDIATE,
+        note_types=(NoteType.BASIC, NoteType.CLOZE),
+        include_images=False,
+        instructions=None,
+    )
+    assert document_request_with(instructions=" \t ").fingerprint() == document_request_with().fingerprint()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"document_id": OTHER_DOCUMENT_ID},
+        {"language": "en"},
+        {"card_count": 41},
+        {"difficulty": Difficulty.ADVANCED},
+        {"note_types": (NoteType.BASIC,)},
+        {"include_images": True},
+        {"instructions": "Only chapter two"},
+    ],
+    ids=[
+        "document_id",
+        "language",
+        "card_count",
+        "difficulty",
+        "note_types",
+        "include_images",
+        "instructions",
+    ],
+)
+def test_every_input_that_shapes_the_deck_changes_the_document_fingerprint(
+    changes: RequestChanges,
+) -> None:
+    assert document_request_with(**changes).fingerprint() != document_request_with().fingerprint()
+
+
+def test_document_and_topic_fingerprints_of_otherwise_equal_requests_differ() -> None:
+    topic = request_with(NoteType.BASIC, NoteType.CLOZE)
+
+    assert document_request_with().fingerprint() != topic.fingerprint()
+    assert isinstance(topic.fingerprint(), GenerationFingerprint)

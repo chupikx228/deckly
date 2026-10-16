@@ -103,6 +103,12 @@ FAILURE_KINDS: Mapping[FailureCode, ProblemKind] = {
     FailureCode.DOCUMENT_HAS_NO_TEXT: ProblemKind(
         HTTPStatus.OK, ErrorCode.DOCUMENT_HAS_NO_TEXT, "Document has no text"
     ),
+    FailureCode.DOCUMENT_NOT_FOUND: ProblemKind(
+        HTTPStatus.OK, ErrorCode.DOCUMENT_NOT_FOUND, "Document not found"
+    ),
+    FailureCode.DOCUMENT_REJECTED: ProblemKind(
+        HTTPStatus.OK, ErrorCode.DOCUMENT_REJECTED, "Document rejected"
+    ),
 }
 
 

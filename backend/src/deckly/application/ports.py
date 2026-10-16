@@ -8,7 +8,7 @@ from uuid import UUID
 
 from deckly.domain.deck import GenerationResult
 from deckly.domain.document import Document, DocumentFormat
-from deckly.domain.generation import GenerationRequest
+from deckly.domain.generation import GenerationRequest, SourceKind
 from deckly.domain.job import FailureCode, GenerationJob, JobStage, JobStatus
 from deckly.domain.media import Media
 from deckly.domain.notes.note import Note
@@ -22,6 +22,7 @@ class AdmissionOutcome(StrEnum):
     QUEUED = "queued"
     REPLAYED = "replayed"
     TOPIC_REJECTED = "topic_rejected"
+    DOCUMENT_NOT_FOUND = "document_not_found"
 
 
 class JobOutcome(StrEnum):
@@ -47,6 +48,7 @@ class Requester:
 class StoredJob:
     job: GenerationJob
     request: GenerationRequest
+    client_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,13 +185,17 @@ class CardGenerator(Protocol):
 
 
 class TopicModerator(Protocol):
-    async def allows(self, request: GenerationRequest) -> bool: ...
+    async def allows(self, request: GenerationRequest, document: Document | None) -> bool: ...
 
 
 class ContentModerator(Protocol):
-    async def screen(
-        self, job_id: UUID, query: SourceQuery, result: GenerationResult
-    ) -> GenerationResult: ...
+    async def screen(self, job_id: UUID, subject: str, result: GenerationResult) -> GenerationResult: ...
+
+
+class MaterialModerator(Protocol):
+    async def allows(
+        self, job_id: UUID, document: Document, material: tuple[SourceMaterial, ...]
+    ) -> bool: ...
 
 
 class MediaFetcher(Protocol):
@@ -262,14 +268,16 @@ class DocumentHousekeeping(Protocol):
 
 
 class JobRun(Protocol):
+    def identify(self, source: SourceKind) -> None: ...
+
     def finish(self, outcome: JobOutcome, code: FailureCode | None = None) -> None: ...
 
 
 class GenerationTelemetry(Protocol):
-    def admitted(self, outcome: AdmissionOutcome) -> None: ...
+    def admitted(self, outcome: AdmissionOutcome, source: SourceKind) -> None: ...
 
     def cancelled(self) -> None: ...
 
     def run(self, job_id: UUID) -> AbstractContextManager[JobRun]: ...
 
-    def stage(self, stage: JobStage) -> AbstractContextManager[None]: ...
+    def stage(self, stage: JobStage, source: SourceKind) -> AbstractContextManager[None]: ...

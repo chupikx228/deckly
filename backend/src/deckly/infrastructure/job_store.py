@@ -1,6 +1,7 @@
 import logging
+from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import CTE, Select, delete, select, update
@@ -11,7 +12,7 @@ from sqlalchemy.sql.dml import ReturningDelete, ReturningUpdate
 from deckly.application.exceptions import UnreadableJobRequestError
 from deckly.application.ports import IdempotencyScope, JobStore, JobTransition, StoredJob
 from deckly.domain.deck import GenerationResult
-from deckly.domain.exceptions import InvalidGenerationRequestError
+from deckly.domain.exceptions import DocumentNotFoundError, InvalidGenerationRequestError
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import (
     TERMINAL_STATUSES,
@@ -29,6 +30,7 @@ from deckly.domain.job import (
 )
 from deckly.domain.notes.note_type import NoteType
 from deckly.infrastructure.bounded import BoundedCalls
+from deckly.infrastructure.documents.store import claim_document_statement
 from deckly.infrastructure.stored_result import dump_result, load_result
 from deckly.infrastructure.tables import GenerationJobRow
 
@@ -42,6 +44,10 @@ class CorruptStoredJobError(Exception):
 
 
 class JobStoreTimeoutError(TimeoutError):
+    pass
+
+
+class IdempotencyKeyTakenError(Exception):
     pass
 
 
@@ -110,6 +116,7 @@ def restore_request(row: GenerationJobRow) -> GenerationRequest:
             note_types=tuple(NoteType(note_type) for note_type in row.note_types),
             include_images=row.include_images,
             instructions=row.instructions,
+            document_id=row.document_id,
         )
     except (ValueError, InvalidGenerationRequestError) as error:
         message = f"the saved request of job {row.job_id} no longer validates: {error}"
@@ -124,12 +131,15 @@ def scoped_row(scope: IdempotencyScope) -> Select[tuple[GenerationJobRow]]:
 
 
 def restore_stored(row: GenerationJobRow) -> StoredJob:
-    return StoredJob(job=restore_job(row), request=restore_request(row))
+    return StoredJob(job=restore_job(row), request=restore_request(row), client_id=row.client_id)
 
 
 class PostgresJobStore:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self, session_factory: async_sessionmaker[AsyncSession], *, document_retention: timedelta
+    ) -> None:
         self._session_factory = session_factory
+        self._document_retention = document_retention
 
     async def add(self, job: GenerationJob, request: GenerationRequest, scope: IdempotencyScope) -> StoredJob:
         stored = store_state(job.state)
@@ -140,6 +150,7 @@ class PostgresJobStore:
                 client_id=scope.client_id,
                 idempotency_key=scope.idempotency_key,
                 topic=request.topic,
+                document_id=request.document_id,
                 language=request.language,
                 card_count=request.card_count,
                 difficulty=request.difficulty,
@@ -160,9 +171,13 @@ class PostgresJobStore:
             .returning(GenerationJobRow.job_id)
         )
         for _ in range(INSERT_ATTEMPTS):
-            async with self._session_factory.begin() as session:
-                if await session.scalar(statement) is not None:
-                    return StoredJob(job=job, request=request)
+            with suppress(IdempotencyKeyTakenError):
+                async with self._session_factory.begin() as session:
+                    await self._claim(session, job, request, scope)
+                    if await session.scalar(statement) is not None:
+                        return StoredJob(job=job, request=request, client_id=scope.client_id)
+                    raise IdempotencyKeyTakenError
+            async with self._session_factory() as session:
                 existing = await session.scalar(scoped_row(scope))
             if existing is not None:
                 return restore_stored(existing)
@@ -173,6 +188,18 @@ class PostgresJobStore:
         async with self._session_factory() as session:
             row = await session.scalar(scoped_row(scope))
         return None if row is None else restore_stored(row)
+
+    async def _claim(
+        self, session: AsyncSession, job: GenerationJob, request: GenerationRequest, scope: IdempotencyScope
+    ) -> None:
+        if request.document_id is None:
+            return
+        statement = claim_document_statement(
+            request.document_id, scope.client_id, job.created_at, job.created_at - self._document_retention
+        )
+        if await session.scalar(statement) is None:
+            message = f"document {request.document_id} cannot be used by this client"
+            raise DocumentNotFoundError(message)
 
     async def get(self, job_id: UUID) -> GenerationJob | None:
         async with self._session_factory() as session:

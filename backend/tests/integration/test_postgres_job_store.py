@@ -23,7 +23,7 @@ from deckly.infrastructure.stored_result import dump_result
 from deckly.infrastructure.tables import GenerationJobRow
 from tests.domain.builders import FULL_RESULT, T0, at, basic_note, result_with
 from tests.fakes import generation_request
-from tests.integration.conftest import Cleanup
+from tests.integration.conftest import DOCUMENT_RETENTION, Cleanup
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -62,7 +62,7 @@ async def count_for_client(session_factory: async_sessionmaker[AsyncSession], cl
 async def test_new_job_is_persisted_with_its_request(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = new_job()
     request = replace(
         generation_request(),
@@ -109,7 +109,7 @@ ROUND_TRIPPED_REQUESTS = {
 async def test_replaying_a_scope_returns_the_original_job_and_its_original_request(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup, original_request: GenerationRequest
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     scope = cleanup.scope()
     original = await store.add(new_job(), original_request, scope)
 
@@ -127,7 +127,7 @@ async def test_replaying_a_scope_returns_the_original_job_and_its_original_reque
 async def test_same_key_from_another_client_is_a_separate_job(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     first_scope = cleanup.scope()
     other_scope = replace(cleanup.scope(), idempotency_key=first_scope.idempotency_key)
 
@@ -141,7 +141,7 @@ async def test_same_key_from_another_client_is_a_separate_job(
 async def test_concurrent_requests_with_one_scope_create_exactly_one_job(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     scope = cleanup.scope()
 
     results = await asyncio.gather(
@@ -157,7 +157,9 @@ async def add_through_a_fresh_pool(
 ) -> GenerationJob:
     engine = create_engine(str(settings.database.url), pool_size=1, max_overflow=0, pool_timeout_seconds=10)
     try:
-        stored = await PostgresJobStore(create_session_factory(engine)).add(job, generation_request(), scope)
+        stored = await PostgresJobStore(
+            create_session_factory(engine), document_retention=DOCUMENT_RETENTION
+        ).add(job, generation_request(), scope)
         return stored.job
     finally:
         await engine.dispose()
@@ -177,7 +179,7 @@ async def test_a_stored_job_survives_a_new_connection_pool(settings: Settings, c
 async def test_succeeded_job_is_persisted_with_its_full_result(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     succeeded = new_job().start(at(1)).succeed(FULL_RESULT, at(2))
 
     await store.add(succeeded, generation_request(), cleanup.scope())
@@ -191,7 +193,7 @@ async def test_succeeded_job_is_persisted_with_its_full_result(
 async def test_replays_from_two_clients_sharing_a_key_each_get_their_own_job(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     first_scope = cleanup.scope()
     other_scope = replace(cleanup.scope(), idempotency_key=first_scope.idempotency_key)
     first = await store.add(new_job(), generation_request(), first_scope)
@@ -218,7 +220,7 @@ async def test_get_returns_the_job_exactly_as_it_was_stored(
     cleanup: Cleanup,
     transition: Callable[[GenerationJob], GenerationJob],
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = transition(new_job())
     await store.add(job, generation_request(), cleanup.scope())
 
@@ -226,7 +228,7 @@ async def test_get_returns_the_job_exactly_as_it_was_stored(
 
 
 async def test_get_of_an_unknown_job_is_none(session_factory: async_sessionmaker[AsyncSession]) -> None:
-    assert await PostgresJobStore(session_factory).get(uuid4()) is None
+    assert await PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION).get(uuid4()) is None
 
 
 ACTIVE_STATES = {name: STORED_STATES[name] for name in ("queued", "running")}
@@ -239,7 +241,7 @@ async def test_update_persists_a_cancellation(
     cleanup: Cleanup,
     transition: Callable[[GenerationJob], GenerationJob],
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = transition(new_job())
     await store.add(job, generation_request(), cleanup.scope())
 
@@ -258,7 +260,7 @@ async def test_update_that_raises_leaves_the_row_unchanged(
     cleanup: Cleanup,
     transition: Callable[[GenerationJob], GenerationJob],
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = transition(new_job())
     await store.add(job, generation_request(), cleanup.scope())
 
@@ -272,7 +274,12 @@ async def test_update_of_an_unknown_job_is_none(session_factory: async_sessionma
     def unreachable(job: GenerationJob) -> GenerationJob:
         raise AssertionError(job)
 
-    assert await PostgresJobStore(session_factory).update(uuid4(), unreachable) is None
+    assert (
+        await PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION).update(
+            uuid4(), unreachable
+        )
+        is None
+    )
 
 
 def cancel_at(second: int) -> JobTransition:
@@ -282,7 +289,7 @@ def cancel_at(second: int) -> JobTransition:
 async def test_concurrent_cancels_of_one_job_succeed_exactly_once(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = new_job().start(at(1))
     await store.add(job, generation_request(), cleanup.scope())
 
@@ -300,7 +307,7 @@ async def test_concurrent_cancels_of_one_job_succeed_exactly_once(
 async def test_update_persists_a_success_with_its_result(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = new_job().start(at(1)).advance(JobStage.FINALIZING, 0.9, at(40))
     await store.add(job, generation_request(), cleanup.scope())
 
@@ -314,7 +321,7 @@ async def test_update_persists_a_success_with_its_result(
 async def test_result_postgres_cannot_store_is_refused_and_the_job_left_as_it_was(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup, front: str
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = new_job().start(at(1))
     await store.add(job, generation_request(), cleanup.scope())
     result = result_with(replace(basic_note(1), fields=BasicFields(front=front, back="back")))
@@ -328,30 +335,33 @@ async def test_result_postgres_cannot_store_is_refused_and_the_job_left_as_it_wa
 async def test_get_stored_returns_the_job_with_its_original_request(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = new_job()
     request = ROUND_TRIPPED_REQUESTS["every field set"]
-    await store.add(job, request, cleanup.scope())
+    scope = cleanup.scope()
+    await store.add(job, request, scope)
 
-    assert await store.get_stored(job.job_id) == StoredJob(job=job, request=request)
+    assert await store.get_stored(job.job_id) == StoredJob(
+        job=job, request=request, client_id=scope.client_id
+    )
 
 
 async def test_find_returns_the_job_and_request_stored_under_a_scope(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     scope = cleanup.scope()
     job = new_job()
     request = ROUND_TRIPPED_REQUESTS["every field set"]
     await store.add(job, request, scope)
 
-    assert await store.find(scope) == StoredJob(job=job, request=request)
+    assert await store.find(scope) == StoredJob(job=job, request=request, client_id=scope.client_id)
 
 
 async def test_find_does_not_cross_clients_or_keys(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     scope = cleanup.scope()
     await store.add(new_job(), generation_request(), scope)
 
@@ -362,7 +372,7 @@ async def test_find_does_not_cross_clients_or_keys(
 async def test_find_of_a_request_saved_before_its_note_type_was_withdrawn_is_unreadable(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     scope = cleanup.scope()
     job = new_job()
     await store.add(job, generation_request(), scope)
@@ -381,7 +391,7 @@ async def test_find_of_a_request_saved_before_its_note_type_was_withdrawn_is_unr
 async def test_find_of_a_request_saved_with_an_out_of_bounds_card_count_is_unreadable(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup, card_count: int
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     scope = cleanup.scope()
     job = new_job()
     await store.add(job, generation_request(), scope)
@@ -399,7 +409,10 @@ async def test_find_of_a_request_saved_with_an_out_of_bounds_card_count_is_unrea
 async def test_get_stored_of_an_unknown_job_is_none(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    assert await PostgresJobStore(session_factory).get_stored(uuid4()) is None
+    assert (
+        await PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION).get_stored(uuid4())
+        is None
+    )
 
 
 def advance_to_retrieving(job: GenerationJob) -> GenerationJob:
@@ -429,7 +442,7 @@ class RowHolder:
             str(self._settings.database.url), pool_size=1, max_overflow=0, pool_timeout_seconds=10
         )
         try:
-            store = PostgresJobStore(create_session_factory(engine))
+            store = PostgresJobStore(create_session_factory(engine), document_retention=DOCUMENT_RETENTION)
             return await store.update(self._job_id, self._holding_the_row(transition))
         finally:
             await engine.dispose()
@@ -457,7 +470,7 @@ async def until_an_update_waits_on_the_row_lock(session_factory: async_sessionma
 async def test_cancel_arriving_while_the_worker_holds_the_row_waits_and_cancels_the_advanced_job(
     settings: Settings, session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = new_job().start(at(1))
     await store.add(job, generation_request(), cleanup.scope())
     worker = RowHolder(settings, job.job_id)
@@ -479,7 +492,7 @@ async def test_cancel_arriving_while_the_worker_holds_the_row_waits_and_cancels_
 async def test_worker_update_arriving_while_a_cancel_holds_the_row_waits_and_then_stops(
     settings: Settings, session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = new_job().start(at(1))
     await store.add(job, generation_request(), cleanup.scope())
     canceller = RowHolder(settings, job.job_id)
@@ -501,7 +514,7 @@ async def test_worker_update_arriving_while_a_cancel_holds_the_row_waits_and_the
 async def test_concurrent_claims_of_a_queued_job_start_it_exactly_once(
     session_factory: async_sessionmaker[AsyncSession], cleanup: Cleanup
 ) -> None:
-    store = PostgresJobStore(session_factory)
+    store = PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION)
     job = new_job()
     await store.add(job, generation_request(), cleanup.scope())
 

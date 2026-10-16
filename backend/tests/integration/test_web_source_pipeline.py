@@ -17,6 +17,7 @@ from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.job_store import PostgresJobStore
 from tests.domain.builders import MOSCOW, T0
 from tests.fakes import (
+    FakeDocuments,
     FakeLlmClient,
     FakeProviders,
     InMemoryResultCache,
@@ -27,7 +28,7 @@ from tests.fakes import (
     tavily_result,
     web_sources,
 )
-from tests.integration.conftest import Cleanup
+from tests.integration.conftest import DOCUMENT_RETENTION, Cleanup
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -51,6 +52,7 @@ async def run_with(
         cache=InMemoryResultCache(),
         retriever=retriever,
         parser=parser,
+        documents=FakeDocuments().sourcing(),
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),
         moderator=providers,
         media=providers,
@@ -85,7 +87,7 @@ async def test_stored_notes_keep_well_formed_sources_that_trace_back_to_the_fetc
     llm = FakeLlmClient(model_reply({"deck": {"title": "Знаки"}, "notes": [note]}))
 
     stored = await run_with(
-        PostgresJobStore(session_factory),
+        PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION),
         cleanup,
         lambda _: httpx2.Response(200, json={"results": results}),
         llm,
@@ -119,7 +121,9 @@ async def test_search_timeout_is_stored_as_provider_unavailable(
 
     llm = FakeLlmClient(model_reply({"notes": []}))
 
-    stored = await run_with(PostgresJobStore(session_factory), cleanup, timing_out, llm)
+    stored = await run_with(
+        PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION), cleanup, timing_out, llm
+    )
 
     assert isinstance(stored.state, Failed)
     assert stored.state.code is FailureCode.PROVIDER_UNAVAILABLE

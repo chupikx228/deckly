@@ -181,6 +181,8 @@ def test_failure_vocabulary_is_the_contract_one() -> None:
         "DOCUMENT_UNREADABLE",
         "DOCUMENT_ENCRYPTED",
         "DOCUMENT_HAS_NO_TEXT",
+        "DOCUMENT_NOT_FOUND",
+        "DOCUMENT_REJECTED",
     }
 
 

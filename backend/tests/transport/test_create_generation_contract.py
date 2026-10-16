@@ -1,4 +1,5 @@
 import time
+from dataclasses import replace
 from http import HTTPStatus
 from uuid import UUID
 
@@ -6,6 +7,7 @@ import httpx2
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.domain.generation import UNGENERATABLE_NOTE_TYPES
@@ -17,7 +19,7 @@ from deckly.transport.error_handlers import RETRY_AFTER_HEADER, register_error_h
 from deckly.transport.generations import CLIENT_ID_HEADER, IDEMPOTENCY_KEY_HEADER, UNKNOWN_ADDRESS, address_of
 from deckly.transport.problem import PROBLEM_JSON_MEDIA_TYPE
 from tests.domain.builders import unregister
-from tests.fakes import QUOTA_LIMIT, QUOTA_RETRY_AFTER_SECONDS, Harness
+from tests.fakes import DOCUMENT_ID, QUOTA_LIMIT, QUOTA_RETRY_AFTER_SECONDS, UPLOADED_DOCUMENT, Harness
 from tests.transport.openapi import declared_responses, spec_errors
 
 ENDPOINT = f"{API_PREFIX}/generations"
@@ -602,3 +604,90 @@ def test_body_the_spec_rejects_is_refused_before_the_topic_is_screened() -> None
 
     assert_validation_failed(response)
     assert harness.moderator.screened == []
+
+
+DOCUMENT_PAYLOAD = {"documentId": str(DOCUMENT_ID), "language": "ru", "cardCount": 40}
+DOCUMENT_SOURCE_REJECTED: dict[str, object] = {
+    "both topic and documentId": {**DOCUMENT_PAYLOAD, "topic": "Road signs"},
+    "neither topic nor documentId": without("topic"),
+    "documentId null": {**DOCUMENT_PAYLOAD, "documentId": None},
+    "topic null next to documentId": {**DOCUMENT_PAYLOAD, "topic": None},
+    "documentId not a uuid": {**DOCUMENT_PAYLOAD, "documentId": "lecture.pdf"},
+    "documentId as a number": {**DOCUMENT_PAYLOAD, "documentId": 42},
+}
+SERVER_ONLY_DOCUMENT_ID_REJECTED = {
+    "uppercase": str(DOCUMENT_ID).upper(),
+    "braces": f"{{{DOCUMENT_ID}}}",
+    "unhyphenated": DOCUMENT_ID.hex,
+    "version 1": "6e1d8b2f-4c3a-1d9e-8f7a-2b3c4d5e6f70",
+    "nil": "00000000-0000-0000-0000-000000000000",
+}
+
+
+def harness_holding_the_document() -> Harness:
+    harness = Harness()
+    harness.documents.keep(replace(UPLOADED_DOCUMENT, client_id=UUID(CLIENT_ID)))
+    return harness
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [DOCUMENT_PAYLOAD, {**DOCUMENT_PAYLOAD, "instructions": "Only chapter two", "includeImages": True}],
+    ids=["minimal", "with instructions and images"],
+)
+def test_request_naming_an_uploaded_document_instead_of_a_topic_is_accepted(
+    payload: dict[str, object],
+) -> None:
+    harness = harness_holding_the_document()
+
+    response = post(build_client(harness), payload)
+
+    assert spec_errors("GenerationRequest", payload) == []
+    assert_created(response)
+    [stored] = harness.store.requests.values()
+    assert stored.document_id == DOCUMENT_ID
+    assert stored.topic is None
+
+
+@pytest.mark.parametrize("payload", DOCUMENT_SOURCE_REJECTED.values(), ids=DOCUMENT_SOURCE_REJECTED.keys())
+def test_request_without_exactly_one_source_is_rejected_by_the_spec_and_the_server(payload: object) -> None:
+    harness = harness_holding_the_document()
+
+    response = post(build_client(harness), payload)
+
+    assert spec_errors("GenerationRequest", payload) != []
+    assert_validation_failed(response)
+    assert harness.store.jobs == {}
+
+
+@pytest.mark.parametrize(
+    "document_id", SERVER_ONLY_DOCUMENT_ID_REJECTED.values(), ids=SERVER_ONLY_DOCUMENT_ID_REJECTED.keys()
+)
+def test_document_id_outside_the_canonical_uuid_v4_form_is_validation_failed(document_id: str) -> None:
+    harness = harness_holding_the_document()
+
+    assert_validation_failed(post(build_client(harness), {**DOCUMENT_PAYLOAD, "documentId": document_id}))
+    assert harness.documents.lookups == []
+
+
+@pytest.mark.parametrize("held_by", ["nobody", "another client"])
+def test_document_the_client_cannot_use_is_a_declared_404_that_spends_no_quota(held_by: str) -> None:
+    harness = Harness()
+    if held_by == "another client":
+        harness.documents.keep(replace(UPLOADED_DOCUMENT, client_id=UUID(OTHER_CLIENT_ID)))
+
+    response = post(build_client(harness), DOCUMENT_PAYLOAD)
+
+    assert_problem(response, HTTPStatus.NOT_FOUND, "DOCUMENT_NOT_FOUND")
+    assert "404" in declared_responses("/generations", "post")
+    assert harness.quota.used_by_client[UUID(CLIENT_ID)] == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{**DOCUMENT_PAYLOAD, "topic": "Road signs"}, without("topic")],
+    ids=["both", "neither"],
+)
+def test_body_schema_itself_requires_exactly_one_source_before_the_domain_sees_it(payload: object) -> None:
+    with pytest.raises(ValidationError, match="exactly one of topic and documentId"):
+        generations.GenerationRequestBody.model_validate(payload)

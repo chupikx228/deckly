@@ -225,7 +225,8 @@ not retried and fails the job `GENERATION_FAILED`. A search with no usable page 
 here: the parser returns no material, the card generator skips the model call, and the job ends
 `NO_VALID_CONTENT`. Settings refuse to load unless the search, model, media, media judge and
 moderation deadlines, plus the worst-case wait for a moderation concurrency slot (see
-Concurrency cap), together leave room within `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS`.
+Concurrency cap), together leave room within `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS`, and the
+same for a job generated from a document (see "Generating from a document").
 
 ## Card generation
 
@@ -588,7 +589,7 @@ reaches the classifier as a JSON document, so it cannot break out of its delimit
 
 - **Topic check** (`LlmTopicModerator`, wired in `main.py`): runs in `POST /generations` after the
   quota is reserved and before the job is stored. The topic and the `instructions` are judged
-  together. A block is `422 TOPIC_REJECTED` and spends the quota unit. There is one attempt,
+  together; a request from a document is judged by its file name and `instructions`. A block is `422 TOPIC_REJECTED` and spends the quota unit. There is one attempt,
   bounded by `DECKLY_PROVIDER_MODERATION_TIMEOUT_SECONDS` (default 2 s, at most 10). A timeout,
   provider error or unreadable verdict is `503 UPSTREAM_UNAVAILABLE` and gives the unit back.
   Published latency for Haiku 4.5 is roughly 0.6–0.8 s to the first token, so the request
@@ -600,7 +601,8 @@ reaches the classifier as a JSON document, so it cannot break out of its delimit
   cards or fewer. A note is kept only on an explicit `"allow"`; a missing or unreadable verdict drops it.
   The classifier sees each note's type, fields and tags, never its sources, so notes written from
   an uploaded document are screened exactly like notes written from web pages.
-  A deck title that is not allowed by every chunk is replaced with the topic. A refused chunk drops
+  A deck title that is not allowed by every chunk is replaced with the topic (the file name for a
+  document). A refused chunk drops
   its own notes and the deck title. If any chunk fails, the whole filter fails like a single call
   would (`provider_unavailable`), and the other chunks are cancelled, so no partial deck ships.
   Retries follow `DECKLY_PROVIDER_MODERATION_FILTER_{TIMEOUT_SECONDS,DEADLINE_SECONDS,
@@ -639,13 +641,14 @@ MAX_ATTEMPTS}` per chunk. Because the chunks run concurrently, the filter's wall
   longest a slot can be held, which is the larger of the filter and the image judge deadlines
   (20 s), not the 15 s attempt timeout: a slot is held across retries, and a retry only starts
   when it can finish inside the deadline. A job passes the gate twice, at the content filter and
-  at the image judge, so the bound is 2 × 3 × 20 = 120 s, added to the 335 s of stage deadlines.
+  at the image judge, so the bound is 2 × 3 × 20 = 120 s, added to the 335 s of stage deadlines;
+  a job from a document passes it a third time, at the document screen (3 × 3 × 20 = 180 s).
   That is the worst case on purpose: the stage deadlines in the same sum are bounds, not typical
   durations, and a bound built from the typical 2–3 s per chunk would not follow the configured
   deadlines and would pass exactly when a slow provider makes the wait matter. It is slightly
   conservative, since the judge call queues behind at most nine other jobs' chunks, not ten.
-  `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS` is 465 in `.env.example`: those 455 s and the
-  same 10 s of margin the earlier 345 left over the deadlines alone.
+  `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS` is 570 in `.env.example`: the 555 s a document
+  job can need (see "Generating from a document") and 15 s of margin.
   The cap is not a breaker or a retry: excess calls wait for a slot and are never rejected. It
   sits outside the resilience layer, so waiting for a slot is not charged to an attempt timeout,
   the retry deadline or the circuit; it does count toward the generation job timeout. A slot is
@@ -702,19 +705,19 @@ searches) inherits it.
 
 The events that make up one job, in order:
 
-| Event                                                                                                                                       | Where                  | Carries                                           |
-| ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | ------------------------------------------------- |
-| `http_request_finished`                                                                                                                     | API, every request     | method, route template, status, `duration_ms`     |
-| `generation_admitted`                                                                                                                       | API                    | `admission` (`queued` or `replayed`), status      |
-| `topic_rejected`, `rate_limit_rejected`                                                                                                     | API                    | `limit` for the rate limit                        |
-| `generation_started`                                                                                                                        | worker                 | status, stage                                     |
-| `generation_cache_checked`                                                                                                                  | worker                 | `result` (`hit`, `miss`, `corrupt`, `error`)      |
-| `generation_stage_entered`                                                                                                                  | worker, every stage    | stage, progress                                   |
-| `provider_call_finished`                                                                                                                    | every provider attempt | `operation`, `attempt`, `outcome`, `duration_ms`  |
-| `provider_call_retrying`, `provider_call_refused`, `circuit_opened`, `circuit_closed`                                                       | resilience layer       | `operation`                                       |
-| `sources_retrieved`, `sources_parsed`, `card_generation_finished`, `content_screened`, `images_screened`, `media_fetched`, `media_attached` | adapters               | counts only                                       |
-| `generation_succeeded` / `generation_failed` / `generation_stopped`                                                                         | worker                 | `duration_ms`, failure code, traceback on failure |
-| `generation_cancelled`                                                                                                                      | API                    | stage and progress at the time                    |
+| Event                                                                                                                                       | Where                  | Carries                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | -------------------------------------------------------------------------- |
+| `http_request_finished`                                                                                                                     | API, every request     | method, route template, status, `duration_ms`                              |
+| `generation_admitted`                                                                                                                       | API                    | `admission` (`queued` or `replayed`), status, `source_kind`, `document_id` |
+| `topic_rejected`, `rate_limit_rejected`                                                                                                     | API                    | `limit` for the rate limit                                                 |
+| `generation_started`                                                                                                                        | worker                 | status, stage                                                              |
+| `generation_cache_checked`                                                                                                                  | worker                 | `result` (`hit`, `miss`, `corrupt`, `error`)                               |
+| `generation_stage_entered`                                                                                                                  | worker, every stage    | stage, progress                                                            |
+| `provider_call_finished`                                                                                                                    | every provider attempt | `operation`, `attempt`, `outcome`, `duration_ms`                           |
+| `provider_call_retrying`, `provider_call_refused`, `circuit_opened`, `circuit_closed`                                                       | resilience layer       | `operation`                                                                |
+| `sources_retrieved`, `sources_parsed`, `card_generation_finished`, `content_screened`, `images_screened`, `media_fetched`, `media_attached` | adapters               | counts only                                                                |
+| `generation_succeeded` / `generation_failed` / `generation_stopped`                                                                         | worker                 | `duration_ms`, failure code, traceback on failure                          |
+| `generation_cancelled`                                                                                                                      | API                    | stage and progress at the time                                             |
 
 To follow one job locally:
 
@@ -750,28 +753,29 @@ under `/v1`, not in the OpenAPI document); the worker serves the same format on
 is taken (a second worker on the same host) logs `worker_metrics_unavailable` and runs without
 exposing metrics rather than refusing to start.
 
-| Metric                                                                     | Labels                    | Process |
-| -------------------------------------------------------------------------- | ------------------------- | ------- |
-| `deckly_generation_jobs_admitted_total`                                    | `outcome`                 | API     |
-| `deckly_generation_jobs_cancelled_total`                                   |                           | API     |
-| `deckly_generation_jobs_finished_total`                                    | `outcome`, `failure_code` | worker  |
-| `deckly_generation_job_duration_seconds`                                   | `outcome`                 | worker  |
-| `deckly_generation_stage_duration_seconds`                                 | `stage`, `outcome`        | worker  |
-| `deckly_provider_call_duration_seconds`                                    | `operation`, `outcome`    | both    |
-| `deckly_provider_call_retries_total`                                       | `operation`               | both    |
-| `deckly_provider_circuit_rejections_total`, `deckly_provider_circuit_open` | `operation`               | both    |
-| `deckly_generation_cache_lookups_total`                                    | `result`                  | worker  |
-| `deckly_generation_queue_depth`                                            | `queue`                   | API     |
-| `deckly_gate_in_flight`                                                    | `gate`                    | worker  |
-| `deckly_gate_limit`                                                        | `gate`                    | worker  |
-| `deckly_gate_wait_seconds`                                                 | `gate`, `outcome`         | worker  |
-| `deckly_rate_limit_rejections_total`                                       | `limit`                   | API     |
+| Metric                                                                     | Labels                              | Process |
+| -------------------------------------------------------------------------- | ----------------------------------- | ------- |
+| `deckly_generation_jobs_admitted_total`                                    | `outcome`, `source`                 | API     |
+| `deckly_generation_jobs_cancelled_total`                                   |                                     | API     |
+| `deckly_generation_jobs_finished_total`                                    | `outcome`, `failure_code`, `source` | worker  |
+| `deckly_generation_job_duration_seconds`                                   | `outcome`, `source`                 | worker  |
+| `deckly_generation_stage_duration_seconds`                                 | `stage`, `outcome`, `source`        | worker  |
+| `deckly_provider_call_duration_seconds`                                    | `operation`, `outcome`              | both    |
+| `deckly_provider_call_retries_total`                                       | `operation`                         | both    |
+| `deckly_provider_circuit_rejections_total`, `deckly_provider_circuit_open` | `operation`                         | both    |
+| `deckly_generation_cache_lookups_total`                                    | `result`                            | worker  |
+| `deckly_generation_queue_depth`                                            | `queue`                             | API     |
+| `deckly_gate_in_flight`                                                    | `gate`                              | worker  |
+| `deckly_gate_limit`                                                        | `gate`                              | worker  |
+| `deckly_gate_wait_seconds`                                                 | `gate`, `outcome`                   | worker  |
+| `deckly_rate_limit_rejections_total`                                       | `limit`                             | API     |
 
 Throughput is the rate of `jobs_finished_total`; failure rates are the `failed` share of a
 histogram's `_count`; the cache hit rate is `hit` over all lookups. Queue depth is read from
 Redis (`ZCARD arq:queue`) on every scrape and is `NaN` when Redis does not answer, rather than a
 stale number; every API instance reports the same queue, so aggregate it with `max`. Every label
-takes a fixed set of values.
+takes a fixed set of values. `source` is `topic` or `document`, and empty on a job that ended before
+its request was read (skipped or unreadable); sum it away for totals.
 
 `deckly_gate_in_flight{gate="moderation"}` is how many calls hold a slot of the worker's moderation
 concurrency gate right now (content and image moderation share it), and
@@ -813,8 +817,9 @@ POST /v1/notes/regenerate                   (API, one per request)
 generation.run                              (worker, child of the POST through the queued job)
 ├── generation.stage.planning             (the cache lookup)
 ├── generation.stage.retrieving_sources
-│   └── provider.call web_search            (one per attempt)
+│   └── provider.call web_search            (one per attempt; document_download for a document)
 ├── generation.stage.parsing_sources
+│   └── provider.call document_moderation   (a document only)
 ├── generation.stage.generating_cards
 │   ├── provider.call card_generation
 │   └── provider.call content_moderation
@@ -933,8 +938,8 @@ The slot is held only by the uploads themselves, so `GET /documents/{id}` is not
 **Retention.** 24 hours from upload (`DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS`), the same window as
 job retention and idempotency keys: long enough for a user who uploaded, backgrounded the app and
 came back the next day, and no longer, because a document is the user's own content and the backend
-is not its system of record. Used documents are never swept; marking them is DEC-76's job (see the
-engineering guide).
+is not its system of record. A document a generation used is kept until job retention purges the
+last job that used it (see "Generating from a document").
 
 ### Parsing
 
@@ -949,9 +954,8 @@ font without a Unicode map extracts as garbage). Units without text are skipped 
 the numbering. Text is cut at a word boundary once `max_characters` is used, and later units are
 never read; a document with fewer than 50 visible characters in total fails with
 `DOCUMENT_HAS_NO_TEXT`. Extraction runs in a thread, bounded by a wall-clock deadline checked
-between units and, for PDFs, before every content-stream operator. It is not connected to the
-pipeline yet: DEC-76 does that, sets `max_characters` and the deadline from settings and removes
-the two `vulture` entries that keep the unwired port and adapter from being reported as unused.
+between units and, for PDFs, before every content-stream operator. The worker wires it with
+`DECKLY_LIMIT_DOCUMENT_MAX_SOURCE_CHARACTERS` and `DECKLY_LIMIT_DOCUMENT_PARSE_DEADLINE_SECONDS`.
 
 `ResilientDocumentStorage.get` (`GET` on the object store, its own `document_download` breaker and policy,
 `DECKLY_PROVIDER_STORAGE_DOWNLOAD_*`) streams the object with a cap of the size recorded at upload,
@@ -1027,6 +1031,99 @@ in under 1 MiB, a part that lies about its size, parts that together pass the ar
 slide listed 500 times, a 256 MiB Flate stream, a page tree past its limit and a one-page form
 replay. The bomb tests also assert peak memory with `tracemalloc`.
 
+### Generating from a document
+
+`POST /v1/generations` takes a `documentId` instead of a `topic`: exactly one of the two, checked by
+the transport schema and again by `GenerationRequest` itself (`InvalidGenerationRequestError`
+otherwise). Everything after admission is the same job: queue, polling, cancellation, stale-job
+sweep, retention, the generation quota (an upload spends the upload budget once; a generation from
+it spends one generation unit, like any other job), and the cache.
+
+**Admission.** Before the quota is touched, `CreateGeneration` reads the document through
+`DocumentStore.get`, scoped to the requesting `X-Client-Id`. Pending, foreign, missing and expired
+documents all return `None` there and the request is `404 DOCUMENT_NOT_FOUND`, the same answer
+`GET /v1/documents/{id}` gives, so it does not reveal which case applied. The document is then
+claimed in the same transaction that stores the job (`PostgresJobStore.add`): an `UPDATE documents
+SET used_at = COALESCE(used_at, now)` with the same conditions, and the job row's `document_id`
+foreign key. If the claim matches no row (the document was swept between the read and the insert),
+the transaction rolls back, the quota unit is given back and the request is `404`. If the
+idempotency key already names another job, the claim is rolled back with the insert, so a replay
+never marks a document it did not use. `used_at` is the first use; it is kept for audit and is not
+what retention looks at.
+
+**Retention after use.** `generation_jobs.document_id` references `documents` with `ON DELETE
+RESTRICT`, and a document is expired when it was uploaded more than
+`DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS` ago and no job refers to it
+(`is_expired` in `infrastructure/documents/store.py`). Admission and `GET` use the exact complement
+(`is_usable`: uploaded within the retention window, or referenced by a job). So a used document
+lives as long as the last job that used it, and is swept on the next run after job retention
+purges that job: `max(upload + document retention, last job finished + job retention)` plus one
+sweep interval. A document used once is gone 24 to about 48 hours after upload with the shipped
+settings, depending on how late in its first day it was used.
+There is no fixed ceiling: while a job still refers to a document, the client can generate from it
+again, and each new job extends its life by another job retention. That only happens through use
+the client pays for in generation quota; a document nobody uses again always goes. The sweep holds its batch
+`FOR UPDATE`, which both the claim and the foreign-key check conflict with, so a document the sweep
+may delete can never gain a reference while it does; an admission whose clock still sees such a
+document as usable waits for the sweep and then gets `404`. A `CASCADE` key was rejected because it
+would delete the jobs, `SET NULL` because a time-based rule would let a document go while a job
+still needed it; the foreign key is the database guaranteeing the one property that matters.
+
+**Pipeline.** `RunGeneration` routes `retrieving_sources` and `parsing_sources` through
+`DocumentSourcing` instead of the web retriever and parser: `retrieving_sources` reads the
+document's record (as the client that asked) and its object (`ResilientDocumentStorage.get`, capped
+at the recorded size); `parsing_sources` runs `DocumentTextParser` and then screens the material
+(below). Generation, content filtering, media, finalizing and caching are shared. The generator's
+prompt names the uploaded document as its subject instead of a topic, and the fallback deck title is
+the document's file name (`subject_of` in `card_generator/generator.py`, the subject passed to
+`ContentModerator.screen`). `DECKLY_LIMIT_DOCUMENT_MAX_SOURCE_CHARACTERS` (40000, between 50 and 200000) and `DECKLY_LIMIT_DOCUMENT_PARSE_DEADLINE_SECONDS` (30, at most 120) configure the parser.
+
+Failure codes on this path: `DOCUMENT_NOT_FOUND` when the record or the object is gone by the time
+the worker reads it (a document cannot expire under a job, so this means the object was deleted
+outside the sweep, by hand, by a lifecycle rule shorter than the bound above or by a storage
+restore; retrying cannot help, which is why it is not `GENERATION_FAILED`), `PROVIDER_UNAVAILABLE`
+for a storage or screening outage, the three `DOCUMENT_*` parser codes, and `DOCUMENT_REJECTED`.
+
+**Moderation without a topic.** Two layers. At admission the topic check (`LlmTopicModerator`)
+screens what the user wrote: `{"document": <file name>, "instructions": …}` instead of `{"topic":
+…}`. The file name has to be screened there because it reaches the result as the citation title and
+can become the deck title, which the content filter does not see. In the worker,
+`LlmMaterialModerator` screens the whole extracted text, every page or slide numbered, in one call
+before any of it reaches the card generator, and a block fails the job `DOCUMENT_REJECTED` (the unit
+is spent, like a topic rejection). The whole text rather than an excerpt: it is already bounded by
+the character budget, so one call to the cheap moderation model covers it, and a sample would leave
+exactly the pages it skipped unscreened. On the topic path the screened topic bounds what search
+returns; an upload is arbitrary user content whose file name says nothing about it, and without this
+step it would reach the generation provider unscreened. The generated cards still go through the
+content filter. The call uses the filter's retry policy and deadline, its own breaker and provider
+operation (`document_moderation`), and the moderation concurrency gate.
+
+**Cache.** A document job is cached like a topic job, keyed by `DocumentGenerationFingerprint`
+(document id, language, card count, difficulty, sorted note types, images, normalised instructions)
+under its own prefix, `deckly:generation-result:document:v1`, so topic keys are byte-for-byte what
+they were and the two can never collide. A document's content never changes and its id is
+unguessable and owned by one client, so a hit can only serve the client that uploaded it.
+
+**Job timeout.** The budget check is per path. A topic job needs search, model, media, media judge
+and filter deadlines plus two gated stages; a document job needs the download, parse and screening
+deadlines instead of search, plus three gated stages (`TOPIC_GATED_STAGES_PER_JOB`,
+`DOCUMENT_GATED_STAGES_PER_JOB`). With `.env.example`: 335 + 120 = 455 s and 375 + 180 = 555 s, so
+`DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS` is 570. Every deployment needs the new value, or the
+worker and the API refuse to start.
+
+**Observability.** Lifecycle lines (`generation_admitted`, `generation_started`,
+`generation_stage_entered`, `generation_succeeded`, `generation_failed`, `generation_abandoned`)
+carry `source_kind` (`topic` or `document`) and, for a document, `document_id`;
+`generation_document_not_found`, `document_fetched`, `document_parsed` and `document_screened`
+cover the document steps. The admission, job and stage metrics have a `source` label, the run and
+stage spans a `deckly.source_kind` attribute.
+
+**Not done here.** The mobile app's contract types, Zod schema and mock transport still describe a
+topic-only request; DEC-77 (calling `POST /v1/generations` with a `documentId`) regenerates them.
+Concurrent parsing holds the GIL in the worker's event loop and each job holds its whole document in
+memory (DEC-82), and note regeneration on a document-sourced deck still searches the web for a topic
+(DEC-83).
+
 ### Object storage client
 
 `infrastructure/storage/` talks to the store over raw `httpx2` with its own AWS Signature V4 signer
@@ -1040,7 +1137,7 @@ four signatures AWS publishes for its SigV4 examples, and the integration suite 
 S3Proxy with signature checking on, including a wrong-secret case that must be refused.
 
 Every call goes through `ResilientCaller` with its own operations (`document_upload`,
-`document_delete`), breakers and policies: uploads get a long attempt timeout and deadline (30 s,
+`document_delete`, `document_download`), breakers and policies: uploads get a long attempt timeout and deadline (30 s,
 60 s) sized for 25 MiB, deletes a short one (5 s, 10 s) so a sweep batch fits its interval. Network
 errors, `408`/`409`/`429`/`5xx` (S3's `SlowDown` is a `503`) are retried with jittered backoff; any
 other status, a `403` for a bad key above all, is a persistent failure that counts toward the
@@ -1087,7 +1184,7 @@ regeneration. Losing a queued job or a counter loses a job or a budget silently.
 | Instance     | Holds                    | `maxmemory`                     | `maxmemory-policy` | When full                               |
 | ------------ | ------------------------ | ------------------------------- | ------------------ | --------------------------------------- |
 | queue, quota | Arq keys, quota counters | explicit, sized for the backlog | `noeviction`       | writes fail loudly: `503`, alertable    |
-| cache        | `generation-result:v2:*` | explicit, its own budget        | `allkeys-lru`      | oldest entries go; a miss costs one run |
+| cache        | `generation-result:*`    | explicit, its own budget        | `allkeys-lru`      | oldest entries go; a miss costs one run |
 
 Alternatives that were rejected:
 
@@ -1138,12 +1235,14 @@ under test, while memory and eviction separation is a property of the Redis depl
 - **Private bucket.** No public access and no public bucket URL: documents are read only through the
   API. On R2 leave the `r2.dev` subdomain and custom domains off; on AWS keep Block Public Access on.
 - **Credentials scoped to the one bucket.** An R2 API token with Object Read & Write on that bucket
-  only, or an IAM user whose policy allows `s3:PutObject` and `s3:DeleteObject` on
-  `arn:aws:s3:::<bucket>/documents/*` and nothing else.
+  only, or an IAM user whose policy allows `s3:PutObject`, `s3:GetObject` and `s3:DeleteObject` on
+  `arn:aws:s3:::<bucket>/documents/*` and nothing else. The worker reads every document it
+  generates from, so `GetObject` is required.
 - **No lifecycle rule is needed.** Every object has a row from before it was written, and the sweep
   deletes the object before the row, so nothing escapes it. A rule that expires objects under
-  `documents/` is a reasonable second line only if it is longer than any document can live once
-  DEC-76 marks documents as used; with the current settings that is not yet bounded.
+  `documents/` cannot be a second line: a document a client keeps generating from has no fixed
+  lifetime (see "Generating from a document"), and a rule that deletes its object fails the next
+  job with `DOCUMENT_NOT_FOUND`.
 - **The reverse proxy must allow the body.** At least `DECKLY_LIMIT_DOCUMENT_MAX_BYTES` plus 16 KiB
   on `/v1/documents` (nginx's default `client_max_body_size` is 1 MiB), and a request-body read
   timeout: uvicorn does not bound how long a client may take to send its body, so a slow sender

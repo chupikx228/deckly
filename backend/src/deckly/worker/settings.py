@@ -21,7 +21,7 @@ from deckly.application.housekeeping import (
     StalenessPolicy,
     SweepStaleJobs,
 )
-from deckly.application.pipeline import RunGeneration
+from deckly.application.pipeline import DocumentSourcing, RunGeneration
 from deckly.config import (
     MINUTES_PER_HOUR,
     SECONDS_PER_MINUTE,
@@ -34,7 +34,12 @@ from deckly.infrastructure.card_generator.generator import LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.database import create_engine, create_session_factory, verify_connection
-from deckly.infrastructure.documents.store import PostgresDocumentHousekeeping
+from deckly.infrastructure.documents.parser import DocumentTextParser
+from deckly.infrastructure.documents.store import (
+    BoundedDocumentStore,
+    PostgresDocumentHousekeeping,
+    PostgresDocumentStore,
+)
 from deckly.infrastructure.job_store import BoundedJobStore, PostgresJobHousekeeping, PostgresJobStore
 from deckly.infrastructure.llm.anthropic_client import AnthropicLlmClient
 from deckly.infrastructure.llm.bounded import BoundedLlmClient
@@ -46,7 +51,7 @@ from deckly.infrastructure.media.client import MediaEndpoint
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
 from deckly.infrastructure.media.fetcher import CommonsMediaFetcher, MediaLimits
 from deckly.infrastructure.moderation.image_judge import LlmCandidateJudge
-from deckly.infrastructure.moderation.moderator import LlmContentModerator
+from deckly.infrastructure.moderation.moderator import LlmContentModerator, LlmMaterialModerator
 from deckly.infrastructure.observability.metrics import MODERATION_GATE, Metrics
 from deckly.infrastructure.observability.runtime import Observability
 from deckly.infrastructure.observability.tracing import continued_trace, trace_carrier_from
@@ -75,6 +80,7 @@ ENGINE_KEY = "engine"
 LLM_CLIENT_KEY = "llm_client"
 MODERATION_LLM_CLIENT_KEY = "moderation_llm_client"
 MEDIA_JUDGE_LLM_CLIENT_KEY = "media_judge_llm_client"
+DOCUMENT_MODERATION_LLM_CLIENT_KEY = "document_moderation_llm_client"
 SOURCE_RETRIEVER_KEY = "source_retriever"
 MEDIA_FETCHER_KEY = "media_fetcher"
 RUN_GENERATION_KEY = "run_generation_use_case"
@@ -452,6 +458,10 @@ async def startup(ctx: WorkerContext) -> None:
         settings.providers, observability.probe(ProviderOperation.IMAGE_MODERATION)
     )
     ctx[MEDIA_JUDGE_LLM_CLIENT_KEY] = media_judge_llm
+    document_moderation_llm = build_moderation_llm_client(
+        settings.providers, observability.probe(ProviderOperation.DOCUMENT_MODERATION)
+    )
+    ctx[DOCUMENT_MODERATION_LLM_CLIENT_KEY] = document_moderation_llm
     moderation_gate = asyncio.Semaphore(settings.providers.moderation_max_concurrency)
     observability.metrics.gate_limit.labels(gate=MODERATION_GATE).set(
         settings.providers.moderation_max_concurrency
@@ -469,18 +479,31 @@ async def startup(ctx: WorkerContext) -> None:
     )
     ctx[MEDIA_FETCHER_KEY] = media
     session_factory = create_session_factory(engine)
+    document_retention = timedelta(seconds=settings.cache.document_retention_seconds)
     store = BoundedJobStore(
-        PostgresJobStore(session_factory), timeout_seconds=settings.database.job_store_timeout_seconds
+        PostgresJobStore(session_factory, document_retention=document_retention),
+        timeout_seconds=settings.database.job_store_timeout_seconds,
     )
     housekeeping = PostgresJobHousekeeping(session_factory)
     ctx[SWEEP_STALE_JOBS_KEY] = build_sweep(store, housekeeping, settings)
     ctx[ENFORCE_JOB_RETENTION_KEY] = build_retention(housekeeping, settings)
     storage_client = build_storage_client(settings.providers)
     ctx[STORAGE_CLIENT_KEY] = storage_client
+    document_storage = build_document_storage(settings.providers, storage_client, observability)
     ctx[ENFORCE_DOCUMENT_RETENTION_KEY] = build_document_retention(
-        PostgresDocumentHousekeeping(session_factory),
-        build_document_storage(settings.providers, storage_client, observability),
-        settings,
+        PostgresDocumentHousekeeping(session_factory), document_storage, settings
+    )
+    documents = DocumentSourcing(
+        store=BoundedDocumentStore(
+            PostgresDocumentStore(session_factory, retention=document_retention, clock=utc_now),
+            timeout_seconds=settings.database.document_store_timeout_seconds,
+        ),
+        storage=document_storage,
+        parser=DocumentTextParser(
+            max_characters=settings.limits.document_max_source_characters,
+            deadline_seconds=settings.limits.document_parse_deadline_seconds,
+        ),
+        moderator=LlmMaterialModerator(llm=bounded(document_moderation_llm)),
     )
     cache_redis = build_cache_redis(settings)
     ctx[CACHE_REDIS_KEY] = cache_redis
@@ -489,6 +512,7 @@ async def startup(ctx: WorkerContext) -> None:
         cache=build_result_cache(cache_redis, settings, observability.metrics),
         retriever=retriever,
         parser=CleaningSourceParser(max_characters=settings.providers.search_max_source_characters),
+        documents=documents,
         generator=LlmCardGenerator(llm=llm, new_id=uuid4, handlers=NOTE_TYPE_HANDLERS),
         moderator=LlmContentModerator(llm=bounded(moderation_llm)),
         media=media,
@@ -504,6 +528,7 @@ async def shutdown(ctx: WorkerContext) -> None:
     media = ctx.get(MEDIA_FETCHER_KEY)
     retriever = ctx.get(SOURCE_RETRIEVER_KEY)
     llm_clients = (
+        ctx.get(DOCUMENT_MODERATION_LLM_CLIENT_KEY),
         ctx.get(MEDIA_JUDGE_LLM_CLIENT_KEY),
         ctx.get(MODERATION_LLM_CLIENT_KEY),
         ctx.get(LLM_CLIENT_KEY),

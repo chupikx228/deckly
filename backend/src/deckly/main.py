@@ -3,6 +3,7 @@ import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
+from datetime import timedelta
 from uuid import uuid4
 
 from fastapi import APIRouter, FastAPI, Request, Response
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deckly.application.documents import GetDocument, UploadDocument
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
 from deckly.application.health import CheckHealth
-from deckly.application.ports import RegenerationLimiter
+from deckly.application.ports import DocumentStore, RegenerationLimiter
 from deckly.application.regeneration import RegenerateNote
 from deckly.config import ProviderSettings, Settings, load_settings
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
@@ -97,9 +98,13 @@ class DocumentClients:
     observability: Observability
 
 
-def wire_documents(app: FastAPI, settings: Settings, clients: DocumentClients) -> None:
+def document_retention(settings: Settings) -> timedelta:
+    return timedelta(seconds=settings.cache.document_retention_seconds)
+
+
+def wire_documents(app: FastAPI, settings: Settings, clients: DocumentClients) -> DocumentStore:
     store = BoundedDocumentStore(
-        PostgresDocumentStore(clients.session_factory),
+        PostgresDocumentStore(clients.session_factory, retention=document_retention(settings), clock=utc_now),
         timeout_seconds=settings.database.document_store_timeout_seconds,
     )
     limits = settings.limits
@@ -129,6 +134,7 @@ def wire_documents(app: FastAPI, settings: Settings, clients: DocumentClients) -
         ),
     )
     setattr(app.state, GET_DOCUMENT_STATE, GetDocument(store=store))
+    return store
 
 
 def single_attempt(timeout_seconds: float, *, base_delay_seconds: int, max_delay_seconds: int) -> RetryPolicy:
@@ -301,7 +307,7 @@ def build_lifespan(settings: Settings, observability: Observability) -> Lifespan
             try:
                 session_factory = create_session_factory(engine)
                 store = BoundedJobStore(
-                    PostgresJobStore(session_factory),
+                    PostgresJobStore(session_factory, document_retention=document_retention(settings)),
                     timeout_seconds=settings.database.job_store_timeout_seconds,
                 )
                 app.state.settings = settings
@@ -354,7 +360,7 @@ def build_lifespan(settings: Settings, observability: Observability) -> Lifespan
                     regeneration_moderation_llm = regeneration_moderation_llm_client(settings)
                     clients.push_async_callback(regeneration_moderation_llm.aclose)
                     storage = await clients.enter_async_context(build_storage_client(settings.providers))
-                    wire_documents(
+                    document_store = wire_documents(
                         app, settings, DocumentClients(storage, session_factory, queue, observability)
                     )
                     setattr(
@@ -365,6 +371,7 @@ def build_lifespan(settings: Settings, observability: Observability) -> Lifespan
                             queue=jobs,
                             quota=quota,
                             moderator=build_topic_moderator(settings, moderation_llm, observability),
+                            documents=document_store,
                             clock=utc_now,
                             new_job_id=uuid4,
                             telemetry=telemetry,

@@ -24,7 +24,8 @@ raise it as a contract change first.
 
 Uploaded documents (`POST /documents`) are not user data the backend owns. They are short-lived
 inputs to generation, readable only by the client that uploaded them, and deleted 24 hours after
-upload unless a generation uses them.
+upload unless a generation uses them; a document a generation used is deleted once the last job
+that used it is.
 
 ## Conventions
 
@@ -73,13 +74,35 @@ Request:
 
 | Field           | Required | Notes                                                                   |
 | --------------- | -------- | ----------------------------------------------------------------------- |
-| `topic`         | yes      | 3–200 characters after trimming, at least 3 of them visible (see below) |
+| `topic`         | one of   | 3–200 characters after trimming, at least 3 of them visible (see below) |
+| `documentId`    | one of   | A `documentId` from `POST /documents` by the same client (see below)    |
 | `language`      | yes      | BCP 47 tag. The language of the **cards**, not the interface.           |
 | `cardCount`     | yes      | 5–200. A target, not a guarantee; the response may return fewer.        |
 | `difficulty`    | no       | `beginner` \| `intermediate` \| `advanced`. Defaults to `intermediate`. |
 | `noteTypes`     | no       | Which types the generator may produce. Defaults to `["basic"]`.         |
 | `includeImages` | no       | Defaults to `false`. Images add significant latency and cost.           |
 | `instructions`  | no       | Free-form user steering, up to 500 characters.                          |
+
+**Exactly one of `topic` and `documentId`.** A request names what to generate from: a `topic`,
+researched on the web, or a `documentId`, a document the same `X-Client-Id` uploaded with
+`POST /documents`, whose text the cards are written from and whose pages or slides they cite (see
+"Sources"). A request with both, with neither, or with either one sent as `null` is
+`400 VALIDATION_FAILED`. `documentId` must be a lowercase, hyphenated version 4 UUID, like the
+headers. Everything else in the request means the same for both.
+
+A `documentId` the client cannot use is `404 DOCUMENT_NOT_FOUND`: unknown, uploaded by another
+client, still being uploaded, or expired (see `GET /v1/documents/{documentId}`). It is checked
+before the quota is touched, so the refusal costs nothing. A document that a job has used stays
+usable for as long as that job can be polled, so a client can generate from it again with other
+settings. Generating from a document spends one unit of the generation quota like any other job;
+the upload spent its own budget once and is not charged again. The content check judges the
+document's file name together with `instructions` (a block is `422 TOPIC_REJECTED`), and the
+worker checks the document's text before any card is written from it; a document that violates
+the policy fails the job with `DOCUMENT_REJECTED`. A result for the same `documentId` and the same
+settings may be served from the cache, like a topic.
+
+The mobile app does not send `documentId` yet; DEC-77 adds it and regenerates
+`@deckly/api-contract` from `openapi.yaml`.
 
 **`image_occlusion` is not generated yet.** A request whose `noteTypes` contains
 `image_occlusion` is rejected up front with `400 VALIDATION_FAILED`, whatever `includeImages`
@@ -149,7 +172,8 @@ without colliding.
   so a key can keep replaying for up to one sweep interval past the 24 hours.
 
 Requests are compared after defaults are applied and `topic` is trimmed. Key order, defaults
-sent explicitly, and whitespace around the topic therefore do not count as differences.
+sent explicitly, and whitespace around the topic therefore do not count as differences. A
+`documentId` request and a `topic` request are never the same request.
 Everything else is compared exactly, including the case of `language` and the order of
 `noteTypes`. A client retrying a request should resend exactly the same body.
 
@@ -363,10 +387,11 @@ being uploaded, and one that has expired all get the same `404 DOCUMENT_NOT_FOUN
 response does not reveal whether a document exists. This differs deliberately from
 `GET /generations/{jobId}`: a document carries the user's own content and file name.
 
-**Retention.** A document that nothing uses is deleted 24 hours after it was uploaded
-(`DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS`), and reading it afterwards is `404`. Expired documents
-are removed by a scheduled task, so one can stay readable for up to one sweep interval past the
-24 hours.
+**Retention.** A document that nothing uses expires 24 hours after it was uploaded
+(`DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS`), and reading it or generating from it afterwards is
+`404`, even before the scheduled task has deleted it. A document a generation job used stays
+readable, and usable, for as long as any job that used it can be polled; it is deleted once job
+retention has deleted the last of them, within one sweep interval.
 
 ### `GET /v1/health`
 
@@ -570,7 +595,7 @@ localised and is for logs.
 | Code                        | Status              | Meaning                                           |
 | --------------------------- | ------------------- | ------------------------------------------------- |
 | `VALIDATION_FAILED`         | 400                 | Request body failed validation                    |
-| `TOPIC_REJECTED`            | 422                 | Topic (or rejected note) violates content policy  |
+| `TOPIC_REJECTED`            | 422                 | Topic, file name or rejected note violates policy |
 | `RATE_LIMITED`              | 429                 | A job, regeneration or upload budget; "Quota"     |
 | `JOB_NOT_FOUND`             | 404                 | Unknown job id                                    |
 | `JOB_ALREADY_TERMINAL`      | 409                 | Cancel on a finished job                          |
@@ -581,6 +606,8 @@ localised and is for logs.
 | `DOCUMENT_UNREADABLE`       | 200 in the job body | Uploaded document is damaged or over a limit      |
 | `DOCUMENT_ENCRYPTED`        | 200 in the job body | Uploaded PDF needs a password to open             |
 | `DOCUMENT_HAS_NO_TEXT`      | 200 in the job body | Uploaded document has no extractable text         |
+| `DOCUMENT_NOT_FOUND`        | 200 in the job body | Uploaded document was gone when the job read it   |
+| `DOCUMENT_REJECTED`         | 200 in the job body | Uploaded document's text violates content policy  |
 | `GENERATION_FAILED`         | 200 in the job body | The job failed for any other reason               |
 | `UPSTREAM_UNAVAILABLE`      | 503                 | A provider, quota store or object store is down   |
 | `DOCUMENT_NOT_FOUND`        | 404                 | Unknown, foreign or expired document id           |
@@ -613,10 +640,18 @@ A failed job's `error.code` is always exactly one of these, never any other code
   extractable text: a scan or photos without a text layer, slides that are only pictures, or an
   empty file. There is no OCR. Pages and slides without text are skipped silently as long as the
   document as a whole has text.
+- `DOCUMENT_NOT_FOUND` — the uploaded document was no longer in storage when the worker read it.
+  A document cannot expire while a job uses it, so this means it was removed outside the normal
+  lifecycle; generating from the same `documentId` again will fail the same way, and the user
+  should upload the file again.
+- `DOCUMENT_REJECTED` — the text of the uploaded document violates the content policy, so no card
+  was written from it. Like `TOPIC_REJECTED`, it spends the quota unit.
 - `GENERATION_FAILED` — the catch-all for any other failure.
 
-The three `DOCUMENT_*` codes appear only on jobs that generate from an uploaded document (DEC-76);
-a client must still handle any of them on any failed job.
+The five `DOCUMENT_*` codes appear only on jobs that generate from an uploaded document; a client
+must still handle any of them on any failed job. `DOCUMENT_NOT_FOUND` is also the `404` of
+`POST /generations` and the document endpoints; in a job body it has status `200`, like every
+failure code.
 
 `PROVIDER_UNAVAILABLE` and `UPSTREAM_UNAVAILABLE` describe the same kind of outage at different
 points. `UPSTREAM_UNAVAILABLE` is an HTTP `503` on a request the server could not serve at all.
@@ -644,8 +679,13 @@ carry an `Allow` header listing the methods the path does accept.
   the cache key. A cache hit is still a job: it goes `queued → running → succeeded` and is polled
   like any other, and it still counts against the client's daily quota.
 - Generated content must be filtered for policy violations before it reaches the client.
-- An uploaded document nothing uses is deleted 24 hours after upload. The object store is never
-  exposed to the client; documents are read only through the API.
+- An uploaded document nothing uses is deleted 24 hours after upload, and one a job used once
+  job retention has deleted the last job that used it. The object store is never exposed to the
+  client; documents are read only through the API.
+- Identical `(documentId, language, cardCount, difficulty, noteTypes, includeImages,
+instructions)` requests may share a cached result like topic requests. Only the client that
+  uploaded a document can name it, so a document's cached results are never served to anyone
+  else.
 
 ## Resolved decisions
 

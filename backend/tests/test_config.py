@@ -10,7 +10,9 @@ from deckly.config import (
     DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS,
     DEFAULT_MODERATION_MAX_CONCURRENCY,
     MAX_DOCUMENT_BYTES,
+    MAX_DOCUMENT_PARSE_DEADLINE_SECONDS,
     MAX_DOCUMENT_RETENTION_SECONDS,
+    MAX_DOCUMENT_SOURCE_CHARACTERS,
     MAX_DOCUMENT_UPLOAD_CONCURRENCY,
     MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS,
     MAX_JUDGED_CANDIDATES,
@@ -162,7 +164,7 @@ PROVIDER_ENVIRONMENT = {
     "DECKLY_PROVIDER_STORAGE_DELETE_TIMEOUT_SECONDS": "5",
     "DECKLY_PROVIDER_STORAGE_DELETE_DEADLINE_SECONDS": "10",
     "DECKLY_PROVIDER_STORAGE_DOWNLOAD_TIMEOUT_SECONDS": "15",
-    "DECKLY_PROVIDER_STORAGE_DOWNLOAD_DEADLINE_SECONDS": "30",
+    "DECKLY_PROVIDER_STORAGE_DOWNLOAD_DEADLINE_SECONDS": "15",
     "DECKLY_PROVIDER_STORAGE_MAX_ATTEMPTS": "2",
     "DECKLY_PROVIDER_STORAGE_RETRY_BASE_DELAY_SECONDS": "1",
     "DECKLY_PROVIDER_STORAGE_RETRY_MAX_DELAY_SECONDS": "5",
@@ -181,6 +183,8 @@ LIMIT_ENVIRONMENT = {
     "DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_WINDOW": "10",
     "DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_ADDRESS_PER_WINDOW": "50",
     "DECKLY_LIMIT_DOCUMENT_UPLOAD_WINDOW_SECONDS": "3600",
+    "DECKLY_LIMIT_DOCUMENT_MAX_SOURCE_CHARACTERS": "40000",
+    "DECKLY_LIMIT_DOCUMENT_PARSE_DEADLINE_SECONDS": "1",
 }
 ROOMY_JOB_TIMEOUT_SECONDS = "336"
 REGENERATE_ENVIRONMENT = {
@@ -456,6 +460,8 @@ def test_provider_deadlines_that_leave_room_in_the_job_timeout_are_accepted(
 
 DEADLINES_SECONDS = 40 + 240 + 20 + 15 + 20
 DEFAULT_GATE_WAIT_SECONDS = 2 * 3 * 20
+DOCUMENT_DEADLINES_SECONDS = 15 + 1 + 20 + 240 + 20 + 15 + 20
+DEFAULT_DOCUMENT_GATE_WAIT_SECONDS = 3 * 3 * 20
 
 
 def settings_at_default_moderation_concurrency(
@@ -520,14 +526,80 @@ def test_job_timeout_that_the_deadlines_fit_but_the_gate_wait_overflows_is_rejec
         settings_at_default_moderation_concurrency(clean_environment, job_timeout_seconds)
 
 
-def test_job_timeout_one_second_past_the_deadlines_and_the_gate_wait_is_accepted(
+def test_job_timeout_past_the_topic_path_but_not_the_document_path_with_its_extra_gated_stage_is_rejected(
     clean_environment: pytest.MonkeyPatch,
 ) -> None:
     timeout = DEADLINES_SECONDS + DEFAULT_GATE_WAIT_SECONDS + 1
 
+    with pytest.raises(ValueError, match=r"document-sourced job \(331s\).*3 gated stages \(180s\)"):
+        settings_at_default_moderation_concurrency(clean_environment, timeout)
+
+
+@pytest.mark.parametrize(
+    "job_timeout_seconds",
+    [DOCUMENT_DEADLINES_SECONDS + DEFAULT_DOCUMENT_GATE_WAIT_SECONDS, 500],
+)
+def test_job_timeout_that_the_document_deadlines_fit_but_its_gate_wait_overflows_is_rejected(
+    clean_environment: pytest.MonkeyPatch, job_timeout_seconds: int
+) -> None:
+    with pytest.raises(ValueError, match="document-sourced job"):
+        settings_at_default_moderation_concurrency(clean_environment, job_timeout_seconds)
+
+
+def test_job_timeout_one_second_past_the_document_deadlines_and_three_gate_waits_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    timeout = DOCUMENT_DEADLINES_SECONDS + DEFAULT_DOCUMENT_GATE_WAIT_SECONDS + 1
+
     settings = settings_at_default_moderation_concurrency(clean_environment, timeout)
 
     assert settings.limits.generation_job_timeout_seconds == timeout
+    assert settings.providers.document_moderation_gate_worst_case_wait_seconds == (
+        DEFAULT_DOCUMENT_GATE_WAIT_SECONDS
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "document_deadlines"),
+    [
+        ({"DECKLY_LIMIT_DOCUMENT_PARSE_DEADLINE_SECONDS": "6"}, 336),
+        ({"DECKLY_PROVIDER_STORAGE_DOWNLOAD_DEADLINE_SECONDS": "20"}, 336),
+        (
+            {
+                "DECKLY_PROVIDER_STORAGE_DOWNLOAD_DEADLINE_SECONDS": "30",
+                "DECKLY_LIMIT_DOCUMENT_PARSE_DEADLINE_SECONDS": "30",
+            },
+            375,
+        ),
+    ],
+    ids=["parse deadline", "download deadline", "shipped download and parse deadlines"],
+)
+def test_document_deadlines_that_fill_the_job_timeout_are_rejected_even_when_the_topic_path_fits(
+    clean_environment: pytest.MonkeyPatch, overrides: dict[str, str], document_deadlines: int
+) -> None:
+    with pytest.raises(ValueError, match="document download, document parse and document screening"):
+        settings_from_environment(
+            clean_environment,
+            DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS=str(document_deadlines),
+            **overrides,
+        )
+
+    settings = settings_from_environment(
+        clean_environment,
+        DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS=str(document_deadlines + 1),
+        **overrides,
+    )
+    assert settings.document_deadlines_seconds == document_deadlines
+    assert settings.topic_deadlines_seconds == DEADLINES_SECONDS
+
+
+def test_document_path_counts_the_screening_call_on_top_of_the_moderation_filter_after_generation(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_from_environment(clean_environment)
+
+    assert settings.document_deadlines_seconds == DOCUMENT_DEADLINES_SECONDS
+    assert DOCUMENT_DEADLINES_SECONDS - settings.card_deadlines_seconds == 15 + 1 + 20
 
 
 def test_gate_wait_error_reports_both_terms_so_the_operator_can_pick_which_to_change(
@@ -569,7 +641,12 @@ def test_shipped_env_example_passes_every_startup_check(
 
     assert (
         settings.limits.generation_job_timeout_seconds
-        > DEADLINES_SECONDS + settings.providers.moderation_gate_worst_case_wait_seconds
+        > settings.topic_deadlines_seconds + settings.providers.moderation_gate_worst_case_wait_seconds
+    )
+    assert (
+        settings.limits.generation_job_timeout_seconds
+        > settings.document_deadlines_seconds
+        + settings.providers.document_moderation_gate_worst_case_wait_seconds
     )
 
 
@@ -1371,6 +1448,8 @@ def test_address_upload_limit_equal_to_the_client_limit_is_accepted(
         "DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_WINDOW",
         "DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_ADDRESS_PER_WINDOW",
         "DECKLY_LIMIT_DOCUMENT_UPLOAD_WINDOW_SECONDS",
+        "DECKLY_LIMIT_DOCUMENT_MAX_SOURCE_CHARACTERS",
+        "DECKLY_LIMIT_DOCUMENT_PARSE_DEADLINE_SECONDS",
     ],
 )
 def test_every_document_limit_is_required(clean_environment: pytest.MonkeyPatch, variable: str) -> None:
@@ -1380,6 +1459,40 @@ def test_every_document_limit_is_required(clean_environment: pytest.MonkeyPatch,
 
     with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_LIMIT_").lower()):
         LimitSettings()
+
+
+@pytest.mark.parametrize("value", [MIN_VISIBLE_CHARACTERS, 40000, MAX_DOCUMENT_SOURCE_CHARACTERS])
+def test_document_character_budget_within_its_bounds_is_accepted(
+    clean_environment: pytest.MonkeyPatch, value: int
+) -> None:
+    settings = limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_MAX_SOURCE_CHARACTERS=str(value))
+
+    assert settings.document_max_source_characters == value
+
+
+@pytest.mark.parametrize("value", [str(MIN_VISIBLE_CHARACTERS - 1), str(MAX_DOCUMENT_SOURCE_CHARACTERS + 1)])
+def test_document_character_budget_outside_its_bounds_is_rejected(
+    clean_environment: pytest.MonkeyPatch, value: str
+) -> None:
+    with pytest.raises(ValidationError, match="document_max_source_characters"):
+        limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_MAX_SOURCE_CHARACTERS=value)
+
+
+@pytest.mark.parametrize("value", [1, MAX_DOCUMENT_PARSE_DEADLINE_SECONDS])
+def test_document_parse_deadline_within_its_bounds_is_accepted(
+    clean_environment: pytest.MonkeyPatch, value: int
+) -> None:
+    settings = limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_PARSE_DEADLINE_SECONDS=str(value))
+
+    assert settings.document_parse_deadline_seconds == value
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", str(MAX_DOCUMENT_PARSE_DEADLINE_SECONDS + 1)])
+def test_document_parse_deadline_outside_its_bounds_is_rejected(
+    clean_environment: pytest.MonkeyPatch, value: str
+) -> None:
+    with pytest.raises(ValidationError, match="document_parse_deadline_seconds"):
+        limit_settings_with(clean_environment, DECKLY_LIMIT_DOCUMENT_PARSE_DEADLINE_SECONDS=value)
 
 
 def test_document_upload_concurrency_defaults_to_eight(clean_environment: pytest.MonkeyPatch) -> None:

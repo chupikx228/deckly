@@ -70,6 +70,7 @@ FIELDS_BY_TYPE: dict[NoteType, NoteFields] = {
 
 class RequestChanges(TypedDict, total=False):
     topic: str
+    document_id: UUID
     language: str
     card_count: int
     difficulty: Difficulty
