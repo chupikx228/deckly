@@ -14,7 +14,8 @@ from deckly.application.ports import DocumentUpload, ExpiredDocument, Requester
 from deckly.domain.document import Document, DocumentFormat
 from deckly.infrastructure.documents.sniffing import ContentDocumentInspector
 from deckly.infrastructure.documents.store import DocumentStatus
-from deckly.infrastructure.observability.metrics import DOCUMENT_UPLOAD_GATE
+from deckly.infrastructure.observability.metrics import DOCUMENT_UPLOAD_GATE, RECORDING_UPLOAD_GATE
+from deckly.infrastructure.recordings.sniffing import ContentRecordingInspector
 from deckly.infrastructure.storage.client import StorageEndpoint
 from deckly.infrastructure.upload_gate import RejectingUploadGate
 from tests.domain.builders import T0
@@ -29,6 +30,7 @@ UPLOAD_LIMIT = 10
 UPLOAD_RETRY_AFTER_SECONDS = 1800
 STORAGE_RETRY_AFTER_SECONDS = 5
 MAX_TEST_DOCUMENT_BYTES = 64 * 1024
+TEST_RECORDING_MAX_SECONDS = 60
 TEST_UPLOAD_CONCURRENCY = 8
 TEST_UPLOAD_READ_TIMEOUT_SECONDS = 30.0
 ADDRESS = "203.0.113.7"
@@ -281,3 +283,15 @@ class LosesPutResponse(InMemoryDocumentStorage):
     async def put(self, key: str, content: bytes, content_type: str) -> None:
         self.objects[key] = (content, content_type)
         raise storage_outage()
+
+
+def recording_harness(
+    max_duration_seconds: int = TEST_RECORDING_MAX_SECONDS, concurrency: int = TEST_UPLOAD_CONCURRENCY
+) -> DocumentHarness:
+    harness = DocumentHarness(concurrency=concurrency)
+    harness.upload = replace(
+        harness.upload,
+        gate=RejectingUploadGate(harness.slots, RECORDING_UPLOAD_GATE, harness.metrics),
+        inspector=ContentRecordingInspector(max_duration_seconds=max_duration_seconds),
+    )
+    return harness

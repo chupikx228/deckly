@@ -15,8 +15,12 @@ from deckly.application.documents import GetDocument, UploadDocument
 from deckly.application.ports import DocumentUpload, Requester
 from deckly.domain.document import Document, DocumentFormat
 from deckly.domain.exceptions import DocumentNotFoundError, DocumentTooLargeError, InvalidDocumentError
-from deckly.transport.body import ResponseBody, UtcDateTime
-from deckly.transport.dependencies import get_document_use_case, upload_document_use_case
+from deckly.transport.body import ResponseBody, UtcDateTime, is_none
+from deckly.transport.dependencies import (
+    get_document_use_case,
+    upload_document_use_case,
+    upload_recording_use_case,
+)
 from deckly.transport.generations import CLIENT_ID_HEADER, HYPHENATED_UUID, CanonicalUuid, address_of
 
 logger = logging.getLogger(__name__)
@@ -37,6 +41,7 @@ class DocumentBody(ResponseBody):
     size_bytes: int = Field(alias="sizeBytes")
     content_type: DocumentFormat = Field(alias="contentType")
     uploaded_at: UtcDateTime = Field(alias="uploadedAt")
+    duration_seconds: float | None = Field(default=None, alias="durationSeconds", exclude_if=is_none)
 
     @classmethod
     def from_document(cls, document: Document) -> Self:
@@ -46,6 +51,7 @@ class DocumentBody(ResponseBody):
             size_bytes=document.size_bytes,
             content_type=document.document_format,
             uploaded_at=document.uploaded_at,
+            duration_seconds=document.duration_seconds,
         )
 
 
@@ -107,12 +113,8 @@ def parse_document_id(value: str) -> UUID:
 router = APIRouter()
 
 
-@router.post("/documents", status_code=HTTPStatus.CREATED)
-async def upload_document(
-    request: Request,
-    client_id: Annotated[CanonicalUuid, Header(alias=CLIENT_ID_HEADER)],
-    address: Annotated[str, Depends(address_of)],
-    upload: Annotated[UploadDocument, Depends(upload_document_use_case)],
+async def receive_upload(
+    request: Request, client_id: UUID, address: str, upload: UploadDocument
 ) -> DocumentBody:
     limit = body_limit(upload.max_bytes)
     reject_declared_oversize(request, limit)
@@ -120,6 +122,26 @@ async def upload_document(
     return DocumentBody.from_document(
         await upload(requester, partial(read_upload, request, limit, upload.read_timeout_seconds))
     )
+
+
+@router.post("/documents", status_code=HTTPStatus.CREATED)
+async def upload_document(
+    request: Request,
+    client_id: Annotated[CanonicalUuid, Header(alias=CLIENT_ID_HEADER)],
+    address: Annotated[str, Depends(address_of)],
+    upload: Annotated[UploadDocument, Depends(upload_document_use_case)],
+) -> DocumentBody:
+    return await receive_upload(request, client_id, address, upload)
+
+
+@router.post("/recordings", status_code=HTTPStatus.CREATED)
+async def upload_recording(
+    request: Request,
+    client_id: Annotated[CanonicalUuid, Header(alias=CLIENT_ID_HEADER)],
+    address: Annotated[str, Depends(address_of)],
+    upload: Annotated[UploadDocument, Depends(upload_recording_use_case)],
+) -> DocumentBody:
+    return await receive_upload(request, client_id, address, upload)
 
 
 @router.get("/documents/{document_id}")

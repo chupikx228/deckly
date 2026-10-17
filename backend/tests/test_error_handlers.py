@@ -9,11 +9,13 @@ from starlette.exceptions import HTTPException
 
 from deckly.application.exceptions import RateLimitedError, UpstreamUnavailableError
 from deckly.domain.exceptions import (
+    DocumentNotSupportedForGenerationError,
     DocumentRegenerationUnsupportedError,
     DomainError,
     JobAlreadyTerminalError,
     JobNotFoundError,
     NotFoundError,
+    RecordingTooLongError,
     TopicRejectedError,
 )
 from deckly.transport.error_handlers import register_error_handlers
@@ -57,6 +59,18 @@ def build_client(error_factory: Callable[[], Exception], base_url: str = PROBLEM
             HTTPStatus.UNPROCESSABLE_ENTITY,
             "DOCUMENT_REGENERATION_UNSUPPORTED",
             "document-regeneration-unsupported",
+        ),
+        (
+            DocumentNotSupportedForGenerationError(),
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            "DOCUMENT_NOT_SUPPORTED_FOR_GENERATION",
+            "document-not-supported-for-generation",
+        ),
+        (
+            RecordingTooLongError(),
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            "RECORDING_TOO_LONG",
+            "recording-too-long",
         ),
         (RateLimitedError(60), HTTPStatus.TOO_MANY_REQUESTS, "RATE_LIMITED", "rate-limited"),
         (

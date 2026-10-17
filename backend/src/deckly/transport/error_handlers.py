@@ -18,6 +18,7 @@ from deckly.application.exceptions import (
 )
 from deckly.domain.exceptions import (
     DocumentNotFoundError,
+    DocumentNotSupportedForGenerationError,
     DocumentRegenerationUnsupportedError,
     DocumentTooLargeError,
     DomainError,
@@ -25,6 +26,7 @@ from deckly.domain.exceptions import (
     InvalidGenerationRequestError,
     JobAlreadyTerminalError,
     JobNotFoundError,
+    RecordingTooLongError,
     TopicRejectedError,
     UnsupportedDocumentError,
 )
@@ -72,6 +74,11 @@ PROBLEM_KINDS: Mapping[type[Exception], ProblemKind] = {
         ErrorCode.DOCUMENT_REGENERATION_UNSUPPORTED,
         "Document regeneration unsupported",
     ),
+    DocumentNotSupportedForGenerationError: ProblemKind(
+        HTTPStatus.UNPROCESSABLE_ENTITY,
+        ErrorCode.DOCUMENT_NOT_SUPPORTED_FOR_GENERATION,
+        "Document not supported for generation",
+    ),
     RateLimitedError: ProblemKind(HTTPStatus.TOO_MANY_REQUESTS, ErrorCode.RATE_LIMITED, "Rate limited"),
     UpstreamUnavailableError: ProblemKind(
         HTTPStatus.SERVICE_UNAVAILABLE, ErrorCode.UPSTREAM_UNAVAILABLE, "Upstream unavailable"
@@ -88,6 +95,9 @@ PROBLEM_KINDS: Mapping[type[Exception], ProblemKind] = {
     ),
     UnsupportedDocumentError: ProblemKind(
         HTTPStatus.UNSUPPORTED_MEDIA_TYPE, ErrorCode.UNSUPPORTED_DOCUMENT_TYPE, "Unsupported document type"
+    ),
+    RecordingTooLongError: ProblemKind(
+        HTTPStatus.UNPROCESSABLE_ENTITY, ErrorCode.RECORDING_TOO_LONG, "Recording too long"
     ),
 }
 

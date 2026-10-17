@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -20,6 +21,20 @@ STORAGE_KEY_PREFIX = "documents"
 class DocumentFormat(StrEnum):
     PDF = "application/pdf"
     PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    MP3 = "audio/mpeg"
+    M4A = "audio/mp4"
+    WAV = "audio/wav"
+    MP4 = "video/mp4"
+    MOV = "video/quicktime"
+
+
+RECORDING_FORMATS = frozenset(
+    {DocumentFormat.MP3, DocumentFormat.M4A, DocumentFormat.WAV, DocumentFormat.MP4, DocumentFormat.MOV}
+)
+
+
+def is_recording(document_format: DocumentFormat) -> bool:
+    return document_format in RECORDING_FORMATS
 
 
 def last_path_component(raw: str) -> str:
@@ -53,6 +68,7 @@ class Document:
     size_bytes: int
     document_format: DocumentFormat
     uploaded_at: datetime
+    duration_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not is_uuid_v4(self.document_id):
@@ -67,6 +83,20 @@ class Document:
         if not is_timezone_aware(self.uploaded_at):
             message = "document timestamps must carry an explicit offset"
             raise InvalidTimestampError(message)
+        self._require_duration_only_for_recordings()
+
+    def _require_duration_only_for_recordings(self) -> None:
+        if not is_recording(self.document_format):
+            if self.duration_seconds is not None:
+                message = "only a recording has a duration"
+                raise InvalidDocumentError(message)
+            return
+        if self.duration_seconds is None or not math.isfinite(self.duration_seconds):
+            message = "a recording must have a finite duration"
+            raise InvalidDocumentError(message)
+        if self.duration_seconds <= 0:
+            message = "a recording must not be empty"
+            raise InvalidDocumentError(message)
 
     @property
     def storage_key(self) -> str:

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 
-from deckly.application.exceptions import DocumentHasNoTextError
+from deckly.application.exceptions import DocumentHasNoTextError, UnreadableDocumentError
 from deckly.application.ports import SourceMaterial
 from deckly.domain.document import Document, DocumentFormat
 from deckly.domain.source import CitationUnit, DocumentSource
@@ -58,7 +58,10 @@ class DocumentTextParser:
         return await asyncio.to_thread(self._parse, document, content)
 
     def _parse(self, document: Document, content: bytes) -> tuple[SourceMaterial, ...]:
-        reader = FORMAT_READERS[document.document_format]
+        reader = FORMAT_READERS.get(document.document_format)
+        if reader is None:
+            message = f"documents of type {document.document_format} have no text reader"
+            raise UnreadableDocumentError(message)
         deadline = ExtractionDeadline.after(self.deadline_seconds, self.clock)
         title = clean_title(document.filename)
         outcomes: Counter[UnitOutcome] = Counter()

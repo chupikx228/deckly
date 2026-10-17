@@ -8,6 +8,7 @@ JOB_BUCKETS = (0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 180.0, 240.0, 300.0,
 GENERATION_QUEUE = "generation"
 MODERATION_GATE = "moderation"
 DOCUMENT_UPLOAD_GATE = "document_upload"
+RECORDING_UPLOAD_GATE = "recording_upload"
 PROVIDER_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0, 90.0, 180.0)
 
 

@@ -5,6 +5,7 @@ import zipfile
 import zlib
 
 from deckly.application.exceptions import UnreadableDocumentError
+from deckly.application.ports import InspectedUpload
 from deckly.domain.document import DocumentFormat
 from deckly.domain.exceptions import UnsupportedDocumentError
 from deckly.infrastructure.documents.archive import check_directory_records
@@ -74,5 +75,5 @@ def detect_format(content: bytes) -> DocumentFormat:
 
 
 class ContentDocumentInspector:
-    async def identify(self, content: bytes) -> DocumentFormat:
-        return await asyncio.to_thread(detect_format, content)
+    async def identify(self, content: bytes) -> InspectedUpload:
+        return InspectedUpload(document_format=await asyncio.to_thread(detect_format, content))

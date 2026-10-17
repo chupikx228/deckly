@@ -3,7 +3,13 @@ from uuid import UUID
 
 import pytest
 
-from deckly.domain.document import MAX_FILENAME_LENGTH, clean_filename
+from deckly.domain.document import (
+    MAX_FILENAME_LENGTH,
+    RECORDING_FORMATS,
+    DocumentFormat,
+    clean_filename,
+    is_recording,
+)
 from deckly.domain.exceptions import InvalidDocumentError, InvalidTimestampError
 from tests.documents import document
 from tests.domain.builders import T0
@@ -81,3 +87,24 @@ def test_document_filename_must_already_be_clean() -> None:
 def test_document_timestamp_needs_an_offset() -> None:
     with pytest.raises(InvalidTimestampError):
         replace(document(1), uploaded_at=T0.replace(tzinfo=None))
+
+
+@pytest.mark.parametrize("document_format", sorted(RECORDING_FORMATS))
+def test_recording_keeps_its_duration(document_format: DocumentFormat) -> None:
+    recording = replace(document(1), document_format=document_format, duration_seconds=12.5)
+
+    assert is_recording(recording.document_format)
+    assert recording.duration_seconds == 12.5
+
+
+@pytest.mark.parametrize("document_format", [DocumentFormat.PDF, DocumentFormat.PPTX])
+def test_document_is_not_a_recording_and_has_no_duration(document_format: DocumentFormat) -> None:
+    assert not is_recording(document_format)
+    with pytest.raises(InvalidDocumentError, match="only a recording has a duration"):
+        replace(document(1), document_format=document_format, duration_seconds=1.0)
+
+
+@pytest.mark.parametrize("duration", [None, 0.0, -1.0, float("nan"), float("inf")])
+def test_recording_without_a_positive_finite_duration_is_rejected(duration: float | None) -> None:
+    with pytest.raises(InvalidDocumentError):
+        replace(document(1), document_format=DocumentFormat.MP3, duration_seconds=duration)

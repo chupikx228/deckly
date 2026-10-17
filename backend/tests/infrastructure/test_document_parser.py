@@ -126,6 +126,13 @@ async def test_corrupt_pdf_is_unreadable(content: bytes) -> None:
         await parse(PDF_DOCUMENT, content)
 
 
+async def test_recording_has_no_text_reader_and_is_unreadable_not_a_crash() -> None:
+    recording = replace(PDF_DOCUMENT, document_format=DocumentFormat.MP3, duration_seconds=2.0)
+
+    with pytest.raises(UnreadableDocumentError, match="no text reader"):
+        await parse(recording, b"ID3")
+
+
 async def test_page_whose_content_stream_cannot_be_decoded_reads_as_blank() -> None:
     broken = PdfPage(flate=b"\x00\x01\x02 not deflate data")
 

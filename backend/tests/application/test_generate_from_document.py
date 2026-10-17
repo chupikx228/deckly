@@ -12,7 +12,12 @@ from deckly.application.exceptions import (
     UpstreamUnavailableError,
 )
 from deckly.application.ports import IdempotencyScope, StoredJob
-from deckly.domain.exceptions import DocumentNotFoundError, TopicRejectedError
+from deckly.domain.document import DocumentFormat
+from deckly.domain.exceptions import (
+    DocumentNotFoundError,
+    DocumentNotSupportedForGenerationError,
+    TopicRejectedError,
+)
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import STAGE_ORDER, Cancelled, Failed, FailureCode, GenerationJob, JobStage, Succeeded
 from tests.fakes import (
@@ -119,6 +124,30 @@ async def test_document_the_client_cannot_use_is_refused_before_the_quota_or_the
     [refused] = logs.named("generation_document_not_found")
     assert refused["document_id"] == str(DOCUMENT_ID)
     assert sample(harness, "deckly_generation_jobs_admitted_total", outcome="document_not_found") == 1
+
+
+@pytest.mark.parametrize(
+    "document_format",
+    [DocumentFormat.MP3, DocumentFormat.M4A, DocumentFormat.WAV, DocumentFormat.MP4, DocumentFormat.MOV],
+)
+async def test_recording_is_refused_before_the_quota_or_the_screen_until_it_can_be_transcribed(
+    document_format: DocumentFormat,
+) -> None:
+    harness = Harness()
+    harness.documents.keep(replace(UPLOADED_DOCUMENT, document_format=document_format, duration_seconds=60.0))
+
+    with captured_json_logs() as logs, pytest.raises(DocumentNotSupportedForGenerationError):
+        await harness.create(document_request(), owner_scope(), ADDRESS)
+
+    assert harness.quota.used_by_client[DOCUMENT_CLIENT_ID] == 0
+    assert harness.quota.released == []
+    assert harness.moderator.screened == []
+    assert harness.store.jobs == {}
+    assert harness.queue.enqueued == []
+    [refused] = logs.named("generation_document_not_supported")
+    assert refused["document_id"] == str(DOCUMENT_ID)
+    assert refused["content_type"] == document_format
+    assert sample(harness, "deckly_generation_jobs_admitted_total", outcome="document_not_supported") == 1
 
 
 async def test_document_swept_while_the_request_was_screened_releases_the_quota() -> None:

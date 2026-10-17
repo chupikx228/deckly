@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -36,7 +37,8 @@ from deckly.infrastructure.documents.store import (
 )
 from deckly.infrastructure.job_store import PostgresJobHousekeeping, PostgresJobStore
 from deckly.infrastructure.moderation.moderator import LlmContentModerator, LlmMaterialModerator
-from deckly.infrastructure.observability.metrics import DOCUMENT_UPLOAD_GATE
+from deckly.infrastructure.observability.metrics import DOCUMENT_UPLOAD_GATE, RECORDING_UPLOAD_GATE
+from deckly.infrastructure.recordings.sniffing import detect_recording
 from deckly.infrastructure.tables import DocumentRow, GenerationJobRow
 from deckly.infrastructure.upload_gate import UPLOAD_CAPACITY_RETRY_AFTER_SECONDS, RejectingUploadGate
 from deckly.infrastructure.upload_limit import ADDRESS_KEY_PREFIX, CLIENT_KEY_PREFIX
@@ -63,8 +65,10 @@ from tests.fakes import (
     generation_request,
     model_reply,
 )
+from tests.ffmpeg import extract_audio
 from tests.integration.conftest import TEST_PEER_ADDRESSES, Cleanup, open_queue_pool
 from tests.integration.storage import ObjectBucket
+from tests.recording_files import fixture, pcm_wave
 from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
 
@@ -910,3 +914,188 @@ async def test_generation_from_a_document_the_client_cannot_use_is_a_404_that_sp
     quota = accepted["quota"]
     assert isinstance(quota, dict)
     assert quota["remaining"] == quota["limit"] - 1
+
+
+RECORDINGS_ENDPOINT = f"{API_PREFIX}/recordings"
+REAL_RECORDINGS = [
+    ("tone.mp3", DocumentFormat.MP3),
+    ("tone.m4a", DocumentFormat.M4A),
+    ("apple.m4a", DocumentFormat.M4A),
+    ("tone.wav", DocumentFormat.WAV),
+    ("clip.mp4", DocumentFormat.MP4),
+    ("clip.mov", DocumentFormat.MOV),
+    ("apple.mov", DocumentFormat.MOV),
+]
+VIDEOS = ["clip.mp4", "clip.mov", "apple.mov"]
+EXTRACTION_CAP_SECONDS = 3
+
+
+def upload_recording(client: TestClient, client_id: UUID, name: str) -> dict[str, object]:
+    response = client.post(
+        RECORDINGS_ENDPOINT,
+        files={"file": (name, fixture(name), "application/octet-stream")},
+        headers={"X-Client-Id": str(client_id)},
+    )
+    body: dict[str, object] = response.json()
+    body["status"] = response.status_code
+    return body
+
+
+def with_recording_cap(settings: Settings, seconds: int) -> Settings:
+    return replace(
+        settings, limits=settings.limits.model_copy(update={"recording_max_duration_seconds": seconds})
+    )
+
+
+def ancient_recording(client_id: UUID, uploaded_at: datetime) -> Document:
+    return replace(
+        ancient_document(client_id, uploaded_at),
+        filename="memo.m4a",
+        size_bytes=len(fixture("tone.m4a")),
+        document_format=DocumentFormat.M4A,
+        duration_seconds=2.064,
+    )
+
+
+async def placed_recording(
+    store: PostgresDocumentStore, storage: StorageProbe, recording: Document
+) -> Document:
+    await store.add_pending(recording)
+    await storage.put(recording.storage_key, fixture("tone.m4a"), recording.document_format)
+    await store.mark_stored(recording.document_id)
+    return recording
+
+
+@pytest.mark.parametrize(("name", "content_type"), REAL_RECORDINGS)
+async def test_uploaded_recording_has_a_stored_record_with_its_duration_and_its_object_and_reads_back(
+    settings: Settings, documents: DocumentCleanup, name: str, content_type: DocumentFormat
+) -> None:
+    client_id = documents.client_id()
+    with app_client(settings) as client:
+        body = upload_recording(client, client_id, name)
+        read = client.get(f"{ENDPOINT}/{body['documentId']}", headers={"X-Client-Id": str(client_id)})
+
+    assert body.pop("status") == HTTPStatus.CREATED, body
+    assert spec_errors("Document", body) == []
+    assert body["contentType"] == content_type
+    row = await stored_row(documents.session_factory, UUID(str(body["documentId"])))
+    assert row is not None
+    assert row.status == DocumentStatus.STORED
+    assert row.content_type == content_type
+    assert row.duration_seconds == body["durationSeconds"]
+    assert await documents.bucket.read(row.storage_key) == fixture(name)
+    assert read.status_code == HTTPStatus.OK
+    assert read.json() == body
+
+
+async def test_recording_over_the_configured_cap_is_refused_before_anything_is_stored(
+    settings: Settings, documents: DocumentCleanup
+) -> None:
+    client_id = documents.client_id()
+    with app_client(with_recording_cap(settings, 1)) as client:
+        body = upload_recording(client, client_id, "tone.m4a")
+
+    assert body["status"] == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert body["code"] == "RECORDING_TOO_LONG"
+    assert await rows_of(documents.session_factory, client_id) == []
+
+
+async def test_document_disguised_as_a_recording_is_refused_by_its_content(
+    settings: Settings, documents: DocumentCleanup
+) -> None:
+    client_id = documents.client_id()
+    with app_client(settings) as client:
+        response = client.post(
+            RECORDINGS_ENDPOINT,
+            files={"file": ("memo.mp3", pdf_bytes(), "audio/mpeg")},
+            headers={"X-Client-Id": str(client_id)},
+        )
+
+    assert response.status_code == HTTPStatus.UNSUPPORTED_MEDIA_TYPE
+    assert response.json()["code"] == "UNSUPPORTED_DOCUMENT_TYPE"
+    assert await rows_of(documents.session_factory, client_id) == []
+
+
+async def test_recording_gate_reports_its_own_limit_on_the_metrics_endpoint(settings: Settings) -> None:
+    with app_client(settings) as client:
+        scraped = client.get("/metrics").text
+
+    assert f'deckly_gate_limit{{gate="{RECORDING_UPLOAD_GATE}"}} 2.0' in scraped
+    assert f'deckly_gate_limit{{gate="{DOCUMENT_UPLOAD_GATE}"}} 4.0' in scraped
+
+
+async def test_sweep_deletes_old_unused_recordings_exactly_like_documents(
+    documents: DocumentCleanup, probe: StorageProbe
+) -> None:
+    session_factory, bucket = documents.session_factory, documents.bucket
+    store = document_store(session_factory)
+    client_id = documents.client_id()
+    expired = await placed_recording(store, probe, ancient_recording(client_id, CUTOFF - TICK))
+    recent = await placed_recording(store, probe, ancient_recording(client_id, CUTOFF))
+    used = await placed_recording(store, probe, ancient_recording(client_id, ANCIENT))
+    await generate_from(session_factory, used)
+
+    purged = await sweeper(session_factory, probe)()
+
+    assert purged >= 1
+    remaining = {row.document_id for row in await rows_of(session_factory, client_id)}
+    assert remaining == {recent.document_id, used.document_id}
+    assert not await bucket.holds(expired.storage_key)
+    assert await bucket.holds(recent.storage_key)
+    assert await bucket.holds(used.storage_key)
+    assert await store.get(recent.document_id, client_id) == recent
+
+
+async def test_generation_from_a_recording_is_a_422_that_spends_no_quota_and_leaves_no_job(
+    settings: Settings, documents: DocumentCleanup, cleanup: Cleanup
+) -> None:
+    client_id = documents.client_id()
+    with generation_api(settings, cleanup, client_id) as client:
+        recording = upload_recording(client, client_id, "tone.m4a")
+        refused = start_generation(
+            client, client_id, {"documentId": str(recording["documentId"]), "language": "en", "cardCount": 5}
+        )
+        accepted = start_generation(
+            client, client_id, {"topic": "Road signs", "language": "en", "cardCount": 5}
+        )
+        cleanup.job_ids.add(UUID(str(accepted["jobId"])))
+
+    assert refused["status_code"] == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert refused["code"] == "DOCUMENT_NOT_SUPPORTED_FOR_GENERATION"
+    assert (
+        spec_errors("Problem", {key: value for key, value in refused.items() if key != "status_code"}) == []
+    )
+    assert await jobs_referencing(documents.session_factory, UUID(str(recording["documentId"]))) == []
+    quota = accepted["quota"]
+    assert isinstance(quota, dict)
+    assert quota["remaining"] == quota["limit"] - 1
+
+
+@pytest.mark.parametrize("name", VIDEOS)
+async def test_stored_video_yields_its_audio_through_the_hardened_ffmpeg_extraction(
+    settings: Settings, documents: DocumentCleanup, tmp_path: Path, name: str
+) -> None:
+    client_id = documents.client_id()
+    with app_client(settings) as client:
+        body = upload_recording(client, client_id, name)
+    row = await stored_row(documents.session_factory, UUID(str(body["documentId"])))
+    assert row is not None
+    source, output = tmp_path / "stored", tmp_path / "audio.wav"
+    source.write_bytes(await documents.bucket.read(row.storage_key))
+
+    await extract_audio(source, DocumentFormat(row.content_type), EXTRACTION_CAP_SECONDS, output)
+
+    extracted = detect_recording(output.read_bytes(), EXTRACTION_CAP_SECONDS)
+    assert extracted.document_format is DocumentFormat.WAV
+    assert extracted.duration_seconds == pytest.approx(2.0, abs=0.1)
+
+
+async def test_extraction_stops_at_the_cap_whatever_the_recording_holds(tmp_path: Path) -> None:
+    source, output = tmp_path / "long.wav", tmp_path / "audio.wav"
+    source.write_bytes(pcm_wave(seconds=5))
+
+    await extract_audio(source, DocumentFormat.WAV, EXTRACTION_CAP_SECONDS, output)
+
+    assert detect_recording(output.read_bytes(), EXTRACTION_CAP_SECONDS).duration_seconds == pytest.approx(
+        EXTRACTION_CAP_SECONDS, abs=0.01
+    )

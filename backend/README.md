@@ -37,7 +37,8 @@ traceback and returned as `500 INTERNAL_ERROR` with no internal detail.
 
 ## Running locally
 
-Requires [uv](https://docs.astral.sh/uv/) and Docker. Run everything from `backend/`.
+Requires [uv](https://docs.astral.sh/uv/) and Docker, and ffmpeg for `make test-integration` (see
+"Recordings"). Run everything from `backend/`.
 
 ```bash
 make install        # uv sync --locked (installs Python 3.12 if needed)
@@ -856,7 +857,9 @@ logs). Exporting over OTLP to Jaeger or similar is a follow-up: it needs
 returns its metadata to the same client. The contract is in `api-contract.md`, the write order
 and the retention sweep in `engineering-guide.md` ("Document uploads", "Scheduled housekeeping").
 `application/documents.py` runs the upload; the adapters are in `infrastructure/documents/`
-(content sniffing, the `documents` table) and `infrastructure/storage/` (the object store).
+(content sniffing, the `documents` table) and `infrastructure/storage/` (the object store). Audio
+and video recordings are uploaded through `POST /v1/recordings` into the same table, store and
+retention, with their own gate and probe (see "Recordings" below).
 
 **Type detection** (`documents/sniffing.py`) reads the bytes, never the name or the declared
 `Content-Type`, and runs in a thread. A PDF needs a `%PDF-1.x`/`%PDF-2.x` header starting in its
@@ -883,17 +886,19 @@ counter is what keeps an oversized upload off the disk.
 keys (`deckly:document-upload:client:*`, `deckly:document-upload:address:*`): 10 uploads per client
 and 50 per address per hour by default. Uploads exist to feed generations, which are capped at 20 a
 day, so 10 an hour leaves room for retries and wrong files while capping one client at 250 MB of
-upload bandwidth an hour. The address backstop shares the generation quota's bucketing (IPv6 /56).
+upload bandwidth an hour (480 MiB if every upload is a full-size recording, which shares this
+budget). The address backstop shares the generation quota's bucketing (IPv6 /56).
 Both counters are incremented in one `MULTI`; a Redis that does not answer within
 `DECKLY_REDIS_CONNECT_TIMEOUT_SECONDS` fails the upload with `503`, like the generation quota.
 
-**Concurrency cap** (`infrastructure/upload_gate.py`, `DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY`,
-default 8, 1 to 32). The rate limits bound one client or address; nothing bounded the API process, and
-an upload is held in memory, so many clients uploading at once could exhaust it. The gate is an
-`asyncio.Semaphore` built once when the API starts, one per process, and an upload holds a slot from
-before the rate limit is checked until the object is stored (or the request fails or is cancelled).
+**Concurrency cap** (`infrastructure/upload_gate.py`,
+`DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY`, default 4 since DEC-84, 8 before, 1 to 32). The rate
+limits bound one client or address; nothing bounded the API process, and an upload is held in
+memory, so many clients uploading at once could exhaust it. The gate is an `asyncio.Semaphore` built
+once when the API starts, one per process, and an upload holds a slot from before the rate limit is
+checked until the object is stored (or the request fails or is cancelled).
 
-_Why 8._ There is no deployment to measure, so this is an assumption, stated so it can be revisited.
+_Why 8, originally (DEC-78)._ There is no deployment to measure, so this is an assumption, stated so it can be revisited.
 Reading a 25 MiB upload through `read_upload` holds 25.8 MiB of Python allocations at its peak
 (`tracemalloc`, measured in this repository, the multipart parser spools to disk past 1 MiB), and the
 PUT hashes and sends those same bytes without copying them. Allowing about twice that for allocator
@@ -905,13 +910,21 @@ upload only holds what it has received so far, so a typical few-MiB lecture deck
 slots is conservative for the usual mix. **The cap and `DECKLY_LIMIT_DOCUMENT_MAX_BYTES` are tied, and
 the tie is enforced at startup:** the process refuses to start when cap x size limit x 2 exceeds
 `DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES` (default 400 MiB, the budget above), and the error
-names the three values and the settings to change. With the defaults 8 x 25 MiB x 2 is exactly the
-budget, which passes. Raising the size limit to 100 MiB with a cap of 8 puts the worst case at 1.6 GiB,
-so the budget, the cap or the limit has to move with it. The 2 is the margin measured above and is not a
-setting. The budget is an assumption about the container, not something the process reads from it:
-set it to what the container can actually spare. **The check assumes a single process.** The limit and
-the budget are per process, so with several workers or replicas sharing one container's memory, divide
-the budget by their number (or lower the cap) yourself; the check cannot see them.
+names the three values and the settings to change. Raising the size limit to 100 MiB with a cap of 8
+puts the worst case at 1.6 GiB, so the budget, the cap or the limit has to move with it.
+
+_Since DEC-84 the budget is shared with recording uploads_, which have their own gate (2 slots of 48
+MiB) in the same process, so the check is the same formula summed over both gates: (document cap x
+document limit + recording cap x recording limit) x 2 <= budget. Keeping the 1 GiB container and the
+400 MiB budget, the document cap went from 8 to 4: (4 x 25 + 2 x 48) x 2 = 392 MiB, 8 MiB under the
+budget. Four concurrent document uploads is still far above what per-client limits produce with no
+production traffic; revisit with `deckly_gate_rejections_total{gate="document_upload"}` if 4 proves
+tight, by raising the budget to what the container really has rather than by trimming the margin.
+The 2 is the margin measured above and is not a setting. The budget is an assumption about the
+container, not something the process reads from it: set it to what the container can actually spare.
+**The check assumes a single process.** The limit and the budget are per process, so with several
+workers or replicas sharing one container's memory, divide the budget by their number (or lower the
+cap) yourself; the check cannot see them.
 
 The worker holds documents too, and has its own budget and check (see _Worker memory_ under
 _Generating from a document_).
@@ -927,10 +940,10 @@ faults): a typical upload finishes in a few seconds, so the first retry usually 
 deliberately differs from the moderation gate, which queues because its callers are background
 worker chunks with a job-length deadline. No new error code is needed (`UploadCapacityExceededError`
 is an `UpstreamUnavailableError`, so the client already retries it), and the retries are not
-jittered: with 8 slots and the per-client limits the herd is small.
+jittered: with 4 slots and the per-client limits the herd is small.
 
 _Read deadline_ (`DECKLY_LIMIT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS`, default 120, 1 to 900). A slot is
-held while the body is received, and the cap means that exactly 8 connections sending a few bytes a
+held while the body is received, and the cap means that exactly 4 connections sending a few bytes a
 minute would hold every slot and refuse every other upload. `read_upload` therefore runs under one
 `asyncio.timeout` around the whole receive loop, the same bounded-I/O pattern as the rest of the
 service. It is a deadline for the _whole body_, not an idle timeout: a trickling client sends
@@ -942,7 +955,7 @@ _Why 120 s._ A full 25 MiB body takes about 40 s at 5 Mbit/s, so 120 s is three 
 still admits a full-size upload at about 1.75 Mbit/s sustained (a poor but usable mobile link); a
 typical few-MiB deck at 1 Mbit/s takes well under a minute. A client slower than that is better
 served by a quick failure than by a connection that outlives the app's own request timeout. Longer
-would let an attacker hold a slot longer per connection; with the cap at 8, each slow connection
+would let an attacker hold a slot longer per connection; with the cap at 4, each slow connection
 costs at most 120 s of one slot, and each costs one unit of the upload budget (the limiter runs
 before the body is read), so one client or address cannot do this for long: 10 uploads per client
 per hour and 50 per address. Raise the value together with `DECKLY_LIMIT_DOCUMENT_MAX_BYTES`, since the
@@ -1154,7 +1167,12 @@ whose page content inflates to the 64 MiB limit peaked at 80.5 MiB with a 0.3 Mi
 plus one 16 MiB stream being decoded), and a PPTX reads at most 64 MiB of parts in total. The model
 takes the larger, 80 MiB (`DOCUMENT_PARSE_WORKING_SET_BYTES`, taken from the parser's own limits so
 it moves with them). With the default 25 MiB limit the parse phase is the larger one: 25 + 80 =
-105 MiB per job, 1050 MiB for ten. The download phase only dominates above 80 MiB.
+105 MiB per job, 1050 MiB for ten. The download phase only dominates above 80 MiB. **A third term
+since DEC-84:** two copies of the recording size limit, for the day a worker downloads a recording
+the way it downloads a document. At the 48 MiB default that is 96 MiB, under the 105 MiB parse
+peak, so it changes nothing today; it binds once the recording limit passes 52.5 MiB. The worker
+does not read recordings yet (generation refuses them at admission), and DEC-86's transcription
+working set is not in this model: see "Recordings".
 
 _Why a separate budget._ The API and the worker are different processes, and in a deployment they
 get different container limits, so one shared setting would be wrong for one of them. The default
@@ -1170,7 +1188,7 @@ divide the budget by their number yourself.
 
 Raising `DECKLY_LIMIT_DOCUMENT_MAX_BYTES` moves both checks. With the default worker budget the
 largest limit that passes is 48 MiB (48 + 80 = 128 MiB x 10 = 1280 MiB), and the API's upload check,
-at 8 slots, stops it at 25 MiB first.
+at 4 document slots next to the recordings' 2 x 48 MiB, stops it at 26 MiB first.
 
 **Parsing concurrency is not bounded, on purpose (DEC-82).** Parsing runs in a thread
 (`asyncio.to_thread`) in the worker's process, and pypdf and the XML parsing are pure Python, so
@@ -1208,12 +1226,14 @@ four signatures AWS publishes for its SigV4 examples, and the integration suite 
 S3Proxy with signature checking on, including a wrong-secret case that must be refused.
 
 Every call goes through `ResilientCaller` with its own operations (`document_upload`,
-`document_delete`, `document_download`), breakers and policies: uploads get a long attempt timeout and deadline (30 s,
-60 s) sized for 25 MiB, deletes a short one (5 s, 10 s) so a sweep batch fits its interval. Network
-errors, `408`/`409`/`429`/`5xx` (S3's `SlowDown` is a `503`) are retried with jittered backoff; any
-other status, a `403` for a bad key above all, is a persistent failure that counts toward the
-breaker and is not retried. A `404` on delete counts as deleted. Either way the API answers
-`503 UPSTREAM_UNAVAILABLE`, and the provider's error body is never logged or returned.
+`document_delete`, `document_download`), breakers and policies: uploads get a long attempt timeout
+and deadline (30 s, 60 s) sized for 25 MiB documents and still ample for 48 MiB recordings from a
+server's uplink (a 30 s attempt needs about 13 Mbit/s to the store), deletes a short one (5 s, 10 s)
+so a sweep batch fits its interval. Network errors, `408`/`409`/`429`/`5xx` (S3's `SlowDown` is a
+`503`) are retried with jittered backoff; any other status, a `403` for a bad key above all, is a
+persistent failure that counts toward the breaker and is not retried. A `404` on delete counts as
+deleted. Either way the API answers `503 UPSTREAM_UNAVAILABLE`, and the provider's error body is
+never logged or returned.
 
 This is the same choice DEC-8 and DEC-9 made for Tavily and Commons, and it adds no dependency.
 Alternatives that were rejected:
@@ -1237,6 +1257,233 @@ Local development uses **S3Proxy** (`andrewgaul/s3proxy:4.1.1`, filesystem backe
 on) in `docker-compose.yml`, which creates the `deckly-documents` bucket on start. MinIO's community
 edition is no longer published as an image, which is why it is not used. The integration tests
 create the bucket themselves (a signed `CreateBucket`), so CI needs only the service container.
+
+## Recordings
+
+`POST /v1/recordings` (DEC-84) stores an audio or video recording for transcription (DEC-86) to
+read later. It is the same `UploadDocument` use case wired a second time, into the same `documents`
+table, object store, upload rate limit, `GET /v1/documents/{id}` and retention sweep, so a recording
+is referred to by its `documentId` like any upload. What differs is wired separately: its own
+concurrency gate, size limit, read deadline and content probe (`infrastructure/recordings/`), which
+also reads the duration (`documents.duration_seconds`, migration `3f8a1c6d9e27`, present in the
+response as `durationSeconds`). Until DEC-86 exists, `POST /v1/generations` with a recording's
+`documentId` is `422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION`, decided with the document lookup before
+the quota is touched (`generation_document_not_supported`, admission outcome `document_not_supported`),
+and the parser refuses a format it has no reader for instead of raising `KeyError`.
+
+A separate endpoint rather than more types on `POST /documents`: the transport enforces the body
+limit and takes a gate slot before it knows what the file is, so one endpoint would force one size
+limit and one gate, sized for video, on every PDF upload.
+
+### Formats
+
+| Format | Where people have it                                                            | Detected as       |
+| ------ | ------------------------------------------------------------------------------- | ----------------- |
+| M4A    | iPhone Voice Memos, Android recorder apps, Zoom's audio-only file, iTunes audio | `audio/mp4`       |
+| MP3    | Podcasts, downloaded lectures, older recorders                                  | `audio/mpeg`      |
+| WAV    | Dictaphones and field recorders, desktop recording software                     | `audio/wav`       |
+| MP4    | Android camera, Zoom, Meet and screen recordings, messenger-compressed video    | `video/mp4`       |
+| MOV    | iPhone camera, QuickTime and macOS screen recordings                            | `video/quicktime` |
+
+M4A, MP4 and MOV are one container family (ISO base media / QuickTime), so one parser covers three
+of the five. Left out, each a `415`: **Ogg/Opus** (Telegram and WhatsApp voice notes; the most
+likely next format, and cheap to probe, the last page's granule position is the length),
+**WebM** (Chrome's MediaRecorder writes no Duration element, so there is nothing cheap to read),
+**3GP/AMR, raw ADTS `.aac`, FLAC** (rare, or no duration header), **fragmented MP4** (the duration
+lives in every `moof`, not in `moov`), and **QuickTime files without an `ftyp` box** (pre-2005; every
+iPhone writes `ftyp qt  `).
+
+### Sniffing and the duration probe
+
+The probe reads bytes, never the name or the declared type, in a thread, and **never decodes
+audio**: a test replaces the audio payload of a real M4A with random bytes and gets the same answer.
+It is plain standard-library parsing in the API process, with no new dependency. ffprobe was
+rejected because it would put ffmpeg's C code on the request path for untrusted files, and a pipe
+cannot seek to a `moov` box at the end of a file. mutagen is GPL-2.0-or-later. tinytag (MIT) picks
+its parser from the file extension first, which is exactly what sniffing must not do.
+
+**MP4 / M4A / MOV** (`recordings/isobmff.py`). The file must start with an `ftyp` box whose major or
+compatible brands include an accepted one (`M4A `, `M4B `, `qt  `, `isom`, `iso2`–`iso6`, `mp41`,
+`mp42`, `avc1`, `M4V `, `MSNV`), and whose major brand is not FairPlay (`M4P `) or an image (`heic`,
+`mif1`, `avif`, …). Boxes are walked by their 32- or 64-bit sizes; a box that runs past its parent
+is refused, which also catches truncated uploads. There must be exactly one `moov`, no `mvex` or
+`moof` (fragmented), and at least one `soun` track whose first sample entry is not encrypted
+(`enca`, `drms`). The duration is the largest of the movie header, each audio track's media header
+and the sum of its time-to-sample table (`stts`), which is what a decoder actually follows. Format:
+`qt  ` major brand is MOV, otherwise MP4 with a video track and M4A without one.
+
+**MP3** (`recordings/mpeg_audio.py`). Up to four leading ID3v2 tags are skipped by their syncsafe
+sizes, then up to 64 KiB of zero padding. The rest must be an unbroken chain of MPEG layer III frame
+headers at one sample rate; the duration is the frame count times samples per frame. The Xing/Info
+frame count is never trusted, since it can understate the stream. After the last frame only zero
+padding, a truncated frame, an ID3v1 tag (exactly the last 128 bytes) and at most 8 KiB of APEv2 or
+appended ID3v2 tags may follow. Anything else is a `415`: ffmpeg resyncs past junk and would decode
+frames hidden behind it.
+
+**WAV** (`recordings/wave.py`). `RIFF`/`WAVE`, a walk of at most 256 chunks to `data`, exactly one
+`fmt ` before it, PCM (8/16/24/32-bit) or float (32/64-bit), plain or `WAVE_FORMAT_EXTENSIBLE`, 1–8
+channels at 8–384 kHz, with a consistent block align and byte rate. The duration is every byte after
+the `data` header divided by the byte rate, whatever the declared size says, so understating it
+gains nothing. RF64 and compressed WAV are `415`.
+
+**Bounded work.** 4,096 boxes, 64 tracks and 1,048,576 time-to-sample entries per file (shared by
+the tracks), and every walk that accumulates duration stops as soon as it passes the cap. So the
+cost depends on the cap, not on the file. Measured in this repository: a 48 MiB MP3 of the shortest
+possible frames is refused after 31 ms at the 15-minute cap (0.4 s at the 4-hour ceiling), and a
+1M-entry time-to-sample table takes 94 ms with no allocation beyond the file. The adversarial tests
+assert under 0.25 s and under 1 MiB of `tracemalloc` peak.
+
+**Hardened against ffmpeg itself (found in DEC-84's bug hunt).** A probe is only as good as its
+agreement with the decoder that runs later, so each case below was built and run through ffmpeg 8.0
+before it was fixed:
+
+| Crafted file                                                | Probe said | ffmpeg decoded   | Now                                    |
+| ----------------------------------------------------------- | ---------- | ---------------- | -------------------------------------- |
+| MP3 frames inside an 834 KB trailing APEv2 or ID3v2 tag     | 1.04 s     | 53.3 s           | `415`, trailing tags over 8 KiB        |
+| `stts` timing fewer samples than `stsz` stores              | 0.06 s     | 2.05 s           | `415`, the tables must agree           |
+| Second `fmt ` chunk with a 768x higher byte rate            | 0.005 s    | 4.0 s            | `415`, one `fmt ` only                 |
+| Two `stts` in one track (any duplicate box the probe reads) | the first  | refused the file | `415`, one of each box the probe reads |
+
+The first three scale with file size: a 48 MiB file could hide hours. The fourth is a parser
+differential rather than a measured bypass; refusing it removes the question of which copy wins.
+Edit lists (`elst`) that repeat the media were tested too and do not amplify.
+
+**The probe is a gate, not the guarantee.** One case cannot be closed from metadata. A time-to-sample
+delta of 1 on AAC packets (1,024 samples each) makes the container claim 1/1024 of the real length.
+ffmpeg's CLI follows the timestamps and decoded 0.06 s of such a file, but a decoder that
+concatenates every packet (PyAV, which faster-whisper uses) would decode all of it. **DEC-86 must
+therefore bound transcription by decoded samples, not timestamps**: stop after cap x sample rate
+samples, or cap the extracted PCM's size (`-fs`), not only `-t`.
+
+### Duration cap
+
+`DECKLY_LIMIT_RECORDING_MAX_DURATION_SECONDS`, default 900 (15 minutes), 1 to 14,400. It is a
+compute assumption made before DEC-86 exists, stated here so DEC-86 can confirm or correct it:
+
+- **Engine:** faster-whisper `small`, int8, multilingual because `ru` is a target. `base` is too
+  weak outside English; `medium` and `large-v3` are roughly 2–3x slower than `small` on CPU.
+- **Speed:** faster-whisper's README measures 13 minutes of audio in 1 min 42 s on 8 threads of an
+  i7-12700K, a real-time factor of 0.13. A 4-vCPU cloud worker has half the threads, and a vCPU is a
+  hyperthread of a slower server core, so this README assumes about 0.5. That is an estimate for
+  DEC-86 to measure, not a measurement. 15 minutes of audio is then about 450 s of CPU, which already
+  does not fit beside the current 570 s job timeout's other deadlines: transcription needs its own
+  stage budget.
+- **Memory:** the same README measures about 1.5 GB of RAM for one `small` int8 run, more than the
+  worker's whole 1280 MiB document budget. Transcription needs its own process or a gate of one.
+- **Text:** lectures run at about 145 words per minute (a corpus study of Yale lectures), about 870
+  characters of transcript a minute, so 15 minutes is about 13,000 characters, a third of
+  `DECKLY_LIMIT_DOCUMENT_MAX_SOURCE_CHARACTERS` (40,000). That budget fills at about 45 minutes, so
+  raising the cap past that is pointless without raising the character budget too.
+
+**Designed to be raised.** The cap exists because transcription is assumed to be self-hosted on CPU.
+Once DEC-86's paid-API path removes that, raise it as ordinary config, keeping the text budget above
+in mind. It is a setting with a 4-hour ceiling, not a constant, for that reason. A paid API brings
+its own limits (OpenAI's transcription endpoint takes at most 25 MB per request, so long files need
+chunking or re-encoding there).
+
+### Size limit and memory
+
+`DECKLY_LIMIT_RECORDING_MAX_BYTES`, default 48 MiB, at most 100 MiB. What 15 minutes weighs:
+
+| Source                                   | Per minute        | 15 minutes   | Fits 48 MiB           |
+| ---------------------------------------- | ----------------- | ------------ | --------------------- |
+| MP3 320 kbps / M4A 256 kbps              | 2.4 / 1.9 MB      | 34 / 27 MiB  | yes                   |
+| iPhone Voice Memo (about 64 kbps AAC)    | 0.48 MB           | 7 MiB        | yes                   |
+| WAV 16-bit 16 kHz mono / 44.1 kHz stereo | 1.9 / 10.6 MB     | 27 / 151 MiB | mono yes, CD 4.75 min |
+| Zoom local recording (about 200 MB/hour) | 3.3 MB            | 48 MiB       | just                  |
+| iPhone 1080p30 HEVC / H.264              | 40–60 / 75–130 MB | 0.6–1.9 GB   | about 1 minute        |
+
+So the limit admits any compressed audio and already-compressed video (Zoom, Meet, screen
+recordings, messenger video) at the cap, and refuses raw phone-camera video. That video is
+gigabytes, which no mobile uplink sends in reasonable time whatever the server does. The fix for
+phone video is an audio-only export on the device (`AVAssetExportPresetAppleM4A` on iOS, a
+`MediaExtractor`/`MediaMuxer` remux on Android, neither needs ffmpeg), a frontend follow-up.
+
+The upload is held in memory like a document's (`read_upload`), so the limit is also a memory
+figure. The recording gate (`DECKLY_LIMIT_RECORDING_UPLOAD_MAX_CONCURRENCY`, default 2, 1 to 8,
+metric label `recording_upload`) shares the DEC-78 budget through the summed check described under
+"Concurrency cap", which is why document slots went from 8 to 4. A full recording gate refuses
+recordings at once with `503` and `Retry-After: 5` and does not touch document uploads. The read
+deadline (`DECKLY_LIMIT_RECORDING_UPLOAD_READ_TIMEOUT_SECONDS`, default 240): a full 48 MiB body
+takes about 80 s at 5 Mbit/s, so 240 s is three times that, as for documents. Making video limits
+independent of memory would mean streaming the spooled upload to the store instead of reading it
+into `bytes`, a rework of DEC-74's upload path left for when video uploads are seen hitting `413`.
+
+**Retention** is unchanged: 24 hours, or as long as a job refers to the recording, swept by the same
+task (its delete cost does not depend on object size). Storage cost is the only thing that grows:
+worst case per address is 50 uploads x 48 MiB an hour, pennies a month on R2.
+
+### Audio extraction: at transcription time, not at upload
+
+The original file is stored and DEC-86 extracts, or decodes directly:
+
+- faster-whisper decodes containers itself through PyAV, which bundles the FFmpeg libraries, so it
+  may need no separate extraction step at all, and paid transcription APIs accept MP4 and M4A
+  directly. Extracting at upload would pick an output format before DEC-86 picks an engine.
+- The API stays pure Python: no ffmpeg on the request path or in the API image, and upload latency
+  does not change.
+- The cost is small and lands on DEC-86. Video objects are larger than extracted audio, but for at
+  most 24–48 hours; and the worker should stream a recording to a temporary file rather than read
+  it into memory as it does a document (the worker memory check's recording term assumes the latter
+  for now).
+
+### ffmpeg: a system dependency, for tests and CI only
+
+DEC-84 adds no Python package. It does add **ffmpeg as a system binary, but only where tests run**:
+the integration suite extracts audio from the MP4 and MOV objects it stored in S3Proxy and checks
+the result's length, and checks that extraction stops at the cap however long the input is
+(`tests/ffmpeg.py`, `make test-integration`). Locally that needs `brew install ffmpeg` (8.0 at the
+time of writing). CI's `ubuntu-24.04` image does not include ffmpeg, so the backend job now runs
+`apt-get install --no-install-recommends ffmpeg` (6.1, signed by the Ubuntu archive) before the
+integration tests. The tests do not depend on version-specific output.
+
+`tests/ffmpeg.py` is also the recipe DEC-86 should start from:
+
+- An argument list to `asyncio.create_subprocess_exec`, never a shell.
+- The demuxer forced from the sniffed type (`-f mov`, `-f mp3`, `-f wav`), so a file cannot switch
+  ffmpeg to another format.
+- `-protocol_whitelist file`, which closes the playlist-style inputs that make ffmpeg read other
+  files or URLs.
+- `-nostdin -vn -sn -dn -map_metadata -1 -threads 1`.
+- `-t <cap>` plus, per the probe section above, a bound on decoded samples.
+- A wall-clock timeout that kills the process.
+
+Memory should be capped by the container's cgroup or `prlimit`, not `preexec_fn`, which Python
+documents as unsafe in a process with threads. No wrapper library: ffmpeg-python is unmaintained and
+untyped, and python-ffmpeg adds nothing over a dozen arguments. **Docker:** there is no backend
+image in this repository yet (`docker-compose.yml` only runs Postgres, Redis and S3Proxy). Whichever
+worker image DEC-86 adds must install ffmpeg (Debian `ffmpeg`) or rely on PyAV's bundled libraries;
+the API image needs neither.
+
+### Fixtures
+
+Real files from real muxers live in `tests/fixtures/recordings/` (92 KiB in all). The adversarial
+ones are built in code (`tests/recording_files.py`). The real ones were made on macOS with ffmpeg 8.0
+(`-bitexact`, `lavfi` sine and test-pattern sources) and Apple's own tools, so Apple's muxer is
+covered too:
+
+```bash
+q=(-hide_banner -loglevel error -y -bitexact)
+ffmpeg "${q[@]}" -f lavfi -i sine=frequency=440:sample_rate=22050:duration=2 -ac 1 -c:a libmp3lame -b:a 32k tone.mp3
+ffmpeg "${q[@]}" -f lavfi -i sine=frequency=440:sample_rate=16000:duration=2 -ac 1 -c:a aac -b:a 24k tone.m4a
+ffmpeg "${q[@]}" -f lavfi -i sine=frequency=440:sample_rate=8000:duration=1 -ac 1 -c:a pcm_s16le tone.wav
+ffmpeg "${q[@]}" -f lavfi -i testsrc=size=32x32:rate=5:duration=2 -f lavfi -i sine=frequency=440:sample_rate=16000:duration=2 \
+  -c:v libx264 -preset ultrafast -crf 51 -pix_fmt yuv420p -c:a aac -b:a 24k -ac 1 -shortest clip.mp4   # and -f mov clip.mov
+ffmpeg "${q[@]}" -f lavfi -i testsrc=size=32x32:rate=5:duration=2 -c:v libx264 -preset ultrafast -crf 51 -pix_fmt yuv420p silent.mp4
+afconvert -f m4af -d aac source.wav apple.m4a        # source.wav: the 44.1 kHz sine above
+avconvert --source clip.mp4 --preset PresetLowQuality --output apple.mov
+sips -s format heic red.png --out red.heic           # red.png: one 16x16 frame of lavfi color=c=red
+```
+
+### Not done here
+
+- **DEC-86:** transcription, its stage deadline and memory, decoding bounded by samples, and lifting
+  the generation refusal.
+- **Frontend:** the mobile app does not call `POST /v1/recordings`. Its generated contract types
+  are regenerated, but the Zod schemas and the mock transport do not know the endpoint. Audio-only
+  export of phone video belongs there too.
+- **Formats:** Ogg/Opus first, then fragmented MP4 if real files show up.
+- **Larger video:** streaming uploads to disk (see "Size limit and memory").
 
 ## Production deployment
 

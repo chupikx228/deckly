@@ -141,6 +141,12 @@ jobs:
       - name: Test (unit, contract; starts the coverage data)
         run: make test
 
+      - name: Install ffmpeg (integration tests extract audio from stored recordings)
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+          ffmpeg -version | head -n 1
+
       - name: Configure environment
         run: cp .env.example .env
 

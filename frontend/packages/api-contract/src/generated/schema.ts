@@ -15,7 +15,7 @@ export interface paths {
         put?: never;
         /**
          * Start a deck generation job
-         * @description A job generates either from a topic, researched on the web, or from a document the same X-Client-Id uploaded with POST /documents, named by its documentId; a request carries exactly one of the two. A documentId that is unknown, belongs to another client, is still being uploaded or has expired is 404 DOCUMENT_NOT_FOUND, checked before the quota is used. The request is screened against the content policy (the topic, or the document's file name, together with the instructions) and one that violates it is 422 TOPIC_REJECTED. A document's text is screened again by the worker before any card is written from it; a document that violates the policy fails the job with DOCUMENT_REJECTED.
+         * @description A job generates either from a topic, researched on the web, or from a document the same X-Client-Id uploaded with POST /documents, named by its documentId; a request carries exactly one of the two. A documentId that is unknown, belongs to another client, is still being uploaded or has expired is 404 DOCUMENT_NOT_FOUND, checked before the quota is used. The request is screened against the content policy (the topic, or the document's file name, together with the instructions) and one that violates it is 422 TOPIC_REJECTED. A document's text is screened again by the worker before any card is written from it; a document that violates the policy fails the job with DOCUMENT_REJECTED. A documentId that names an audio or video recording uploaded with POST /recordings is 422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION until transcription exists (DEC-86), refused before the quota is used.
          */
         post: operations["createGeneration"];
         delete?: never;
@@ -98,6 +98,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/recordings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload an audio or video recording
+         * @description Stores one MP3, M4A, WAV, MP4 or MOV file so a later request can refer to it by its documentId, like an uploaded document (it is read with GET /documents/{documentId} and expires the same way). The type is decided from the file's content, never from its name or the declared Content-Type, so a renamed file of another type is 415 UNSUPPORTED_DOCUMENT_TYPE, as are video files without an audio track, fragmented MP4, encrypted (DRM) audio, images in an MP4-family container (HEIC, AVIF), and damaged or truncated files. The duration is read from the container's own metadata, never by decoding the audio, and a recording longer than the limit (15 minutes by default) is 422 RECORDING_TOO_LONG. A file over the size limit (48 MiB by default) is 413 DOCUMENT_TOO_LARGE and is refused before it is stored. Uploads share the document upload budget (429 RATE_LIMITED) and have their own concurrency limit (503 UPSTREAM_UNAVAILABLE with Retry-After when every slot is taken). Generating from a recording is not supported yet: POST /generations answers 422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION.
+         */
+        post: operations["uploadRecording"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/documents/{documentId}": {
         parameters: {
             query?: never;
@@ -148,16 +168,16 @@ export interface components {
         /** @enum {string} */
         JobStage: "planning" | "retrieving_sources" | "parsing_sources" | "generating_cards" | "fetching_media" | "finalizing";
         /** @enum {string} */
-        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "DOCUMENT_UNREADABLE" | "DOCUMENT_ENCRYPTED" | "DOCUMENT_HAS_NO_TEXT" | "DOCUMENT_REJECTED" | "DOCUMENT_REGENERATION_UNSUPPORTED" | "UPSTREAM_UNAVAILABLE" | "DOCUMENT_NOT_FOUND" | "DOCUMENT_TOO_LARGE" | "UNSUPPORTED_DOCUMENT_TYPE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
+        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "DOCUMENT_UNREADABLE" | "DOCUMENT_ENCRYPTED" | "DOCUMENT_HAS_NO_TEXT" | "DOCUMENT_REJECTED" | "DOCUMENT_REGENERATION_UNSUPPORTED" | "DOCUMENT_NOT_SUPPORTED_FOR_GENERATION" | "UPSTREAM_UNAVAILABLE" | "DOCUMENT_NOT_FOUND" | "DOCUMENT_TOO_LARGE" | "UNSUPPORTED_DOCUMENT_TYPE" | "RECORDING_TOO_LONG" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
         /**
          * @description The type detected from the file's content.
          * @enum {string}
          */
-        DocumentContentType: "application/pdf" | "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+        DocumentContentType: "application/pdf" | "application/vnd.openxmlformats-officedocument.presentationml.presentation" | "audio/mpeg" | "audio/mp4" | "audio/wav" | "video/mp4" | "video/quicktime";
         DocumentUploadRequest: {
             /**
              * Format: binary
-             * @description The document, as the only part of the form. Its filename is kept for display, cut to its last path component and 255 characters, with control and invisible characters removed; a name with nothing left is 400 VALIDATION_FAILED.
+             * @description The document or recording, as the only part of the form. Its filename is kept for display, cut to its last path component and 255 characters, with control and invisible characters removed; a name with nothing left is 400 VALIDATION_FAILED.
              */
             file: string;
         };
@@ -169,6 +189,8 @@ export interface components {
             contentType: components["schemas"]["DocumentContentType"];
             /** Format: date-time */
             uploadedAt: string;
+            /** @description Present only for a recording: its length in seconds as its container's metadata gives it, never shorter than what a decoder would play. */
+            durationSeconds?: number;
         };
         /** @enum {string} */
         RejectionReason: "too_easy" | "too_hard" | "incorrect" | "duplicate" | "off_topic" | "other";
@@ -555,6 +577,39 @@ export interface operations {
             400: components["responses"]["Problem"];
             413: components["responses"]["Problem"];
             415: components["responses"]["Problem"];
+            429: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    uploadRecording: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Anonymous device identifier, used for rate limiting. Version 4 UUID in canonical form only: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. */
+                "X-Client-Id": components["parameters"]["ClientId"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["DocumentUploadRequest"];
+            };
+        };
+        responses: {
+            /** @description The recording was stored */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Document"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            413: components["responses"]["Problem"];
+            415: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
             429: components["responses"]["Problem"];
             503: components["responses"]["Problem"];
         };

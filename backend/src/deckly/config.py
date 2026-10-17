@@ -45,7 +45,7 @@ MINUTES_PER_HOUR = 60
 SECONDS_PER_MINUTE = 60
 MEBIBYTE = 1024 * 1024
 MAX_DOCUMENT_BYTES = 100 * MEBIBYTE
-DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY = 8
+DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY = 4
 MAX_DOCUMENT_UPLOAD_CONCURRENCY = 32
 DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES = 400 * MEBIBYTE
 DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN = 2
@@ -57,6 +57,13 @@ DOCUMENT_PARSE_WORKING_SET_BYTES = max(
 DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS = 120
 MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS = 900
 MAX_DOCUMENT_SOURCE_CHARACTERS = 200_000
+DEFAULT_RECORDING_MAX_BYTES = 48 * MEBIBYTE
+MAX_RECORDING_BYTES = 100 * MEBIBYTE
+DEFAULT_RECORDING_MAX_DURATION_SECONDS = 15 * SECONDS_PER_MINUTE
+MAX_RECORDING_DURATION_SECONDS = 4 * MINUTES_PER_HOUR * SECONDS_PER_MINUTE
+DEFAULT_RECORDING_UPLOAD_MAX_CONCURRENCY = 2
+MAX_RECORDING_UPLOAD_CONCURRENCY = 8
+DEFAULT_RECORDING_UPLOAD_READ_TIMEOUT_SECONDS = 240
 MAX_DOCUMENT_PARSE_DEADLINE_SECONDS = 120
 MIN_DOCUMENT_RETENTION_SECONDS = 60 * 60
 MAX_DOCUMENT_RETENTION_SECONDS = 7 * 24 * 60 * 60
@@ -321,13 +328,32 @@ class LimitSettings(BaseSettings):
         int, Field(ge=MIN_VISIBLE_CHARACTERS, le=MAX_DOCUMENT_SOURCE_CHARACTERS)
     ]
     document_parse_deadline_seconds: Annotated[int, Field(ge=1, le=MAX_DOCUMENT_PARSE_DEADLINE_SECONDS)]
+    recording_max_bytes: Annotated[int, Field(ge=1, le=MAX_RECORDING_BYTES)] = DEFAULT_RECORDING_MAX_BYTES
+    recording_max_duration_seconds: Annotated[int, Field(ge=1, le=MAX_RECORDING_DURATION_SECONDS)] = (
+        DEFAULT_RECORDING_MAX_DURATION_SECONDS
+    )
+    recording_upload_max_concurrency: Annotated[int, Field(ge=1, le=MAX_RECORDING_UPLOAD_CONCURRENCY)] = (
+        DEFAULT_RECORDING_UPLOAD_MAX_CONCURRENCY
+    )
+    recording_upload_read_timeout_seconds: Annotated[
+        int, Field(ge=1, le=MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS)
+    ] = DEFAULT_RECORDING_UPLOAD_READ_TIMEOUT_SECONDS
 
     @property
     def document_worker_job_peak_bytes(self) -> int:
         return max(
             DOCUMENT_DOWNLOAD_PEAK_COPIES * self.document_max_bytes,
             self.document_max_bytes + DOCUMENT_PARSE_WORKING_SET_BYTES,
+            DOCUMENT_DOWNLOAD_PEAK_COPIES * self.recording_max_bytes,
         )
+
+    @property
+    def upload_worst_case_bytes(self) -> int:
+        held = (
+            self.document_upload_max_concurrency * self.document_max_bytes
+            + self.recording_upload_max_concurrency * self.recording_max_bytes
+        )
+        return held * DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN
 
     @model_validator(mode="after")
     def require_address_limit_to_be_coarser(self) -> Self:
@@ -345,18 +371,17 @@ class LimitSettings(BaseSettings):
 
     @model_validator(mode="after")
     def require_concurrent_uploads_to_fit_the_memory_budget(self) -> Self:
-        worst_case_bytes = (
-            self.document_upload_max_concurrency
-            * self.document_max_bytes
-            * DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN
-        )
+        worst_case_bytes = self.upload_worst_case_bytes
         if worst_case_bytes > self.document_upload_memory_budget_bytes:
             message = (
-                f"the upload concurrency cap ({self.document_upload_max_concurrency}) times the document "
-                f"size limit ({self.document_max_bytes} bytes) times the safety margin "
+                f"the document upload concurrency cap ({self.document_upload_max_concurrency}) times the "
+                f"document size limit ({self.document_max_bytes} bytes), plus the recording upload "
+                f"concurrency cap ({self.recording_upload_max_concurrency}) times the recording size limit "
+                f"({self.recording_max_bytes} bytes), times the safety margin "
                 f"({DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN}) is {worst_case_bytes} bytes, which exceeds the "
                 f"upload memory budget ({self.document_upload_memory_budget_bytes} bytes); lower "
-                "DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY or DECKLY_LIMIT_DOCUMENT_MAX_BYTES, or raise "
+                "DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY, DECKLY_LIMIT_DOCUMENT_MAX_BYTES, "
+                "DECKLY_LIMIT_RECORDING_UPLOAD_MAX_CONCURRENCY or DECKLY_LIMIT_RECORDING_MAX_BYTES, or raise "
                 "DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES; the check assumes a single process, so "
                 "divide the budget by the number of workers or replicas sharing one container"
             )
@@ -369,13 +394,15 @@ class LimitSettings(BaseSettings):
         if worst_case_bytes > self.document_worker_memory_budget_bytes:
             message = (
                 f"the worker job concurrency ({WORKER_MAX_JOBS}) times the peak memory of one "
-                f"document-sourced job ({self.document_worker_job_peak_bytes} bytes, the larger of "
+                f"document-sourced job ({self.document_worker_job_peak_bytes} bytes, the largest of "
                 f"{DOCUMENT_DOWNLOAD_PEAK_COPIES} copies of the document size limit "
-                f"({self.document_max_bytes} bytes) while it downloads and the size limit plus "
-                f"{DOCUMENT_PARSE_WORKING_SET_BYTES} bytes of parser working set while it parses) is "
+                f"({self.document_max_bytes} bytes) while it downloads, the size limit plus "
+                f"{DOCUMENT_PARSE_WORKING_SET_BYTES} bytes of parser working set while it parses, and "
+                f"{DOCUMENT_DOWNLOAD_PEAK_COPIES} copies of the recording size limit "
+                f"({self.recording_max_bytes} bytes) while a recording downloads) is "
                 f"{worst_case_bytes} bytes, which exceeds the worker memory budget "
                 f"({self.document_worker_memory_budget_bytes} bytes); lower "
-                "DECKLY_LIMIT_DOCUMENT_MAX_BYTES, or raise "
+                "DECKLY_LIMIT_DOCUMENT_MAX_BYTES or DECKLY_LIMIT_RECORDING_MAX_BYTES, or raise "
                 "DECKLY_LIMIT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES; the check assumes a single worker "
                 "process, so divide the budget by the number of workers sharing one container"
             )

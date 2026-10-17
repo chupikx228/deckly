@@ -38,12 +38,13 @@ from deckly.infrastructure.observability.exposition import (
     MetricsExposition,
 )
 from deckly.infrastructure.observability.http import ObservedRequests
-from deckly.infrastructure.observability.metrics import DOCUMENT_UPLOAD_GATE
+from deckly.infrastructure.observability.metrics import DOCUMENT_UPLOAD_GATE, RECORDING_UPLOAD_GATE, Metrics
 from deckly.infrastructure.observability.runtime import Observability, create_observability
 from deckly.infrastructure.provider_faults import UpstreamFaultRegenerator, UpstreamFaultRetriever
 from deckly.infrastructure.queue import ArqJobQueue, create_queue_pool, create_redis_settings
 from deckly.infrastructure.quota import QuotaLimits, RedisGenerationQuota
 from deckly.infrastructure.rate_limit import RedisRegenerationLimiter, RegenerationWindow
+from deckly.infrastructure.recordings.sniffing import ContentRecordingInspector
 from deckly.infrastructure.resilience import ProviderOperation, ProviderProbe, RetryPolicy
 from deckly.infrastructure.search.client import SearchClient, SearchEndpoint
 from deckly.infrastructure.search.parser import CleaningSourceParser
@@ -61,6 +62,7 @@ from deckly.transport.dependencies import (
     GET_GENERATION_STATE,
     REGENERATE_NOTE_STATE,
     UPLOAD_DOCUMENT_STATE,
+    UPLOAD_RECORDING_STATE,
 )
 from deckly.transport.error_handlers import register_error_handlers
 from deckly.worker.settings import (
@@ -102,6 +104,11 @@ def document_retention(settings: Settings) -> timedelta:
     return timedelta(seconds=settings.cache.document_retention_seconds)
 
 
+def upload_gate(name: str, slots: int, metrics: Metrics) -> RejectingUploadGate:
+    metrics.gate_limit.labels(gate=name).set(slots)
+    return RejectingUploadGate(asyncio.Semaphore(slots), name, metrics)
+
+
 def wire_documents(app: FastAPI, settings: Settings, clients: DocumentClients) -> DocumentStore:
     store = BoundedDocumentStore(
         PostgresDocumentStore(clients.session_factory, retention=document_retention(settings), clock=utc_now),
@@ -115,22 +122,37 @@ def wire_documents(app: FastAPI, settings: Settings, clients: DocumentClients) -
         command_timeout_seconds=settings.redis.connect_timeout_seconds,
     )
     metrics = clients.observability.metrics
-    metrics.gate_limit.labels(gate=DOCUMENT_UPLOAD_GATE).set(limits.document_upload_max_concurrency)
+    limiter = RedisUploadLimiter(clients.redis, window, metrics)
+    storage = build_document_storage(settings.providers, clients.storage, clients.observability)
+
     setattr(
         app.state,
         UPLOAD_DOCUMENT_STATE,
         UploadDocument(
-            gate=RejectingUploadGate(
-                asyncio.Semaphore(limits.document_upload_max_concurrency), DOCUMENT_UPLOAD_GATE, metrics
-            ),
-            limiter=RedisUploadLimiter(clients.redis, window, metrics),
+            gate=upload_gate(DOCUMENT_UPLOAD_GATE, limits.document_upload_max_concurrency, metrics),
+            limiter=limiter,
             inspector=ContentDocumentInspector(),
-            storage=build_document_storage(settings.providers, clients.storage, clients.observability),
+            storage=storage,
             store=store,
             clock=utc_now,
             new_document_id=uuid4,
             max_bytes=limits.document_max_bytes,
             read_timeout_seconds=limits.document_upload_read_timeout_seconds,
+        ),
+    )
+    setattr(
+        app.state,
+        UPLOAD_RECORDING_STATE,
+        UploadDocument(
+            gate=upload_gate(RECORDING_UPLOAD_GATE, limits.recording_upload_max_concurrency, metrics),
+            limiter=limiter,
+            inspector=ContentRecordingInspector(max_duration_seconds=limits.recording_max_duration_seconds),
+            storage=storage,
+            store=store,
+            clock=utc_now,
+            new_document_id=uuid4,
+            max_bytes=limits.recording_max_bytes,
+            read_timeout_seconds=limits.recording_upload_read_timeout_seconds,
         ),
     )
     setattr(app.state, GET_DOCUMENT_STATE, GetDocument(store=store))

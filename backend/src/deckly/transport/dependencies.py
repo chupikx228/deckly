@@ -12,6 +12,7 @@ CANCEL_GENERATION_STATE = "cancel_generation"
 REGENERATE_NOTE_STATE = "regenerate_note"
 CHECK_HEALTH_STATE = "check_health"
 UPLOAD_DOCUMENT_STATE = "upload_document"
+UPLOAD_RECORDING_STATE = "upload_recording"
 GET_DOCUMENT_STATE = "get_document"
 
 
@@ -45,6 +46,10 @@ def check_health_use_case(request: Request) -> CheckHealth:
 
 def upload_document_use_case(request: Request) -> UploadDocument:
     return wired(request, UPLOAD_DOCUMENT_STATE, UploadDocument)
+
+
+def upload_recording_use_case(request: Request) -> UploadDocument:
+    return wired(request, UPLOAD_RECORDING_STATE, UploadDocument)
 
 
 def get_document_use_case(request: Request) -> GetDocument:
