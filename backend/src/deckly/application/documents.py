@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from uuid import UUID
 
 from deckly.application.exceptions import UpstreamUnavailableError
@@ -10,6 +11,7 @@ from deckly.application.ports import (
     DocumentStorage,
     DocumentStore,
     DocumentUpload,
+    RecordingFetcher,
     Requester,
     UploadGate,
     UploadLimiter,
@@ -17,6 +19,7 @@ from deckly.application.ports import (
 )
 from deckly.domain.document import Document, clean_filename
 from deckly.domain.exceptions import DocumentNotFoundError, DocumentTooLargeError
+from deckly.domain.recording_url import parse_youtube_video
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +95,16 @@ class UploadDocument:
             await self.store.discard(document.document_id)
         except Exception:
             logger.exception("document_not_discarded", extra=context)
+
+
+@dataclass(frozen=True, slots=True)
+class FetchRecording:
+    upload: UploadDocument
+    fetcher: RecordingFetcher
+
+    async def __call__(self, requester: Requester, url: str) -> Document:
+        video = parse_youtube_video(url)
+        return await self.upload(requester, partial(self.fetcher.fetch, video))
 
 
 @dataclass(frozen=True, slots=True)

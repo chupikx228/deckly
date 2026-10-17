@@ -6,17 +6,19 @@ from typing import Annotated, Self
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Request
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import UploadFile
 from starlette.requests import ClientDisconnect
 from starlette.types import Message, Receive
 
-from deckly.application.documents import GetDocument, UploadDocument
+from deckly.application.documents import FetchRecording, GetDocument, UploadDocument
 from deckly.application.ports import DocumentUpload, Requester
 from deckly.domain.document import Document, DocumentFormat
 from deckly.domain.exceptions import DocumentNotFoundError, DocumentTooLargeError, InvalidDocumentError
+from deckly.domain.recording_url import MAX_RECORDING_URL_LENGTH
 from deckly.transport.body import ResponseBody, UtcDateTime, is_none
 from deckly.transport.dependencies import (
+    fetch_recording_use_case,
     get_document_use_case,
     upload_document_use_case,
     upload_recording_use_case,
@@ -53,6 +55,12 @@ class DocumentBody(ResponseBody):
             uploaded_at=document.uploaded_at,
             duration_seconds=document.duration_seconds,
         )
+
+
+class RecordingUrlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    url: str = Field(min_length=1, max_length=MAX_RECORDING_URL_LENGTH)
 
 
 def body_limit(max_bytes: int) -> int:
@@ -142,6 +150,17 @@ async def upload_recording(
     upload: Annotated[UploadDocument, Depends(upload_recording_use_case)],
 ) -> DocumentBody:
     return await receive_upload(request, client_id, address, upload)
+
+
+@router.post("/recordings/from-url", status_code=HTTPStatus.CREATED)
+async def fetch_recording(
+    body: RecordingUrlRequest,
+    client_id: Annotated[CanonicalUuid, Header(alias=CLIENT_ID_HEADER)],
+    address: Annotated[str, Depends(address_of)],
+    fetch: Annotated[FetchRecording, Depends(fetch_recording_use_case)],
+) -> DocumentBody:
+    requester = Requester(client_id=client_id, address=address)
+    return DocumentBody.from_document(await fetch(requester, body.url))
 
 
 @router.get("/documents/{document_id}")

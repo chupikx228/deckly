@@ -59,8 +59,51 @@ def handler(kind: bytes) -> bytes:
     return full_box(b"hdlr", b"\x00" * 4 + kind + b"\x00" * 13)
 
 
-def sample_description(entry_format: bytes = b"mp4a") -> bytes:
-    return full_box(b"stsd", struct.pack(">I", 1) + box(entry_format, b"\x00" * 28))
+SOUND_ENTRY_EXTRA_BYTES = {0: 0, 1: 16, 2: 36}
+MPEG4_AUDIO = 0x40
+MPEG1_AUDIO = 0x6B
+AAC_LOW_COMPLEXITY = 2
+FREQUENCY_INDEX_16000 = 8
+EXPLICIT_FREQUENCY_INDEX = 15
+
+
+def descriptor(tag: int, body: bytes) -> bytes:
+    return bytes([tag, len(body)]) + body
+
+
+def audio_specific_config(
+    frequency_index: int = FREQUENCY_INDEX_16000,
+    object_type: int = AAC_LOW_COMPLEXITY,
+    explicit_rate: int | None = None,
+) -> bytes:
+    value, width = (object_type, 5) if object_type < 31 else ((31 << 6) | (object_type - 32), 11)
+    value, width = (value << 4) | frequency_index, width + 4
+    if frequency_index == EXPLICIT_FREQUENCY_INDEX:
+        value, width = (value << 24) | (explicit_rate or 0), width + 24
+    value, width = (value << 4) | 1, width + 4
+    padding = -width % 8
+    return (value << padding).to_bytes((width + padding) // 8, "big")
+
+
+def decoder_configuration(
+    specific: bytes | None = None, object_type_indication: int = MPEG4_AUDIO, *, raw: bytes | None = None
+) -> bytes:
+    if raw is not None:
+        return full_box(b"esds", raw)
+    info = descriptor(5, audio_specific_config() if specific is None else specific)
+    decoder = descriptor(4, bytes([object_type_indication, 0x15]) + b"\x00" * 11 + info)
+    return full_box(b"esds", descriptor(3, b"\x00\x01\x00" + decoder))
+
+
+def sound_entry(version: int = 0, children: bytes | None = None) -> bytes:
+    fixed = b"\x00" * 6 + struct.pack(">HHH4xHHHHI", 1, version, 0, 1, 16, 0, 0, SOUND_TIMESCALE << 16)
+    extra = b"\x00" * SOUND_ENTRY_EXTRA_BYTES.get(version, 0)
+    return fixed + extra + (decoder_configuration() if children is None else children)
+
+
+def sample_description(entry_format: bytes = b"mp4a", entry: bytes | None = None) -> bytes:
+    default = sound_entry() if entry_format == b"mp4a" else sound_entry(children=b"")
+    return full_box(b"stsd", struct.pack(">I", 1) + box(entry_format, default if entry is None else entry))
 
 
 def time_to_sample(entries: Sequence[tuple[int, int]], declared: int | None = None) -> bytes:
@@ -99,6 +142,8 @@ class Track:
     sizes: bytes | None = None
     extra_media: bytes = b""
     extra_samples: bytes = b""
+    header: bytes = b""
+    entry: bytes | None = None
 
     def encode(self) -> bytes:
         duration = (
@@ -106,9 +151,12 @@ class Track:
         )
         table = time_to_sample(frames_for(self.seconds)) if self.stts is None else self.stts
         sizes = sample_sizes(sampled_count(table)) if self.sizes is None else self.sizes
-        samples = box(b"stbl", sample_description(self.entry_format), table, sizes, self.extra_samples)
+        samples = box(
+            b"stbl", sample_description(self.entry_format, self.entry), table, sizes, self.extra_samples
+        )
         return box(
             b"trak",
+            self.header,
             box(
                 b"mdia",
                 media_header(duration),
@@ -139,6 +187,145 @@ def isobmff(
 
 def audio_mp4(seconds: float = 2, *, brand: bytes = b"M4A ", mdat: bytes = b"\x00" * 64) -> bytes:
     return isobmff(movie(track(seconds=seconds), seconds=seconds), box(b"mdat", mdat), brand=brand)
+
+
+DEFAULT_BASE_IS_MOOF = 0x020000
+BASE_DATA_OFFSET_PRESENT = 0x000001
+SAMPLE_DESCRIPTION_INDEX_PRESENT = 0x000002
+DEFAULT_SAMPLE_DURATION_PRESENT = 0x000008
+DATA_OFFSET_PRESENT = 0x000001
+FIRST_SAMPLE_FLAGS_PRESENT = 0x000004
+SAMPLE_DURATION_PRESENT = 0x000100
+SAMPLE_SIZE_PRESENT = 0x000200
+SAMPLE_FLAGS_PRESENT = 0x000400
+COMPOSITION_OFFSET_PRESENT = 0x000800
+AUDIO_TRACK_ID = 1
+VIDEO_TRACK_ID = 2
+
+
+def flagged_box(kind: bytes, flags: int, payload: bytes, version: int = 0) -> bytes:
+    return box(kind, bytes([version]) + flags.to_bytes(3, "big"), payload)
+
+
+def track_header(track_id: int = AUDIO_TRACK_ID, version: int = 0) -> bytes:
+    if version == 1:
+        return full_box(b"tkhd", struct.pack(">QQII", 0, 0, track_id, 0) + b"\x00" * 60, version)
+    return full_box(b"tkhd", struct.pack(">IIII", 0, 0, track_id, 0) + b"\x00" * 64, version)
+
+
+def track_extends(track_id: int = AUDIO_TRACK_ID, default_duration: int = 0) -> bytes:
+    return full_box(b"trex", struct.pack(">IIIII", track_id, 1, default_duration, 0, 0))
+
+
+def movie_extends(*children: bytes) -> bytes:
+    return box(b"mvex", *(children or (track_extends(),)))
+
+
+def movie_extends_header(duration: int, version: int = 0) -> bytes:
+    packed = struct.pack(">Q", duration) if version == 1 else struct.pack(">I", duration)
+    return full_box(b"mehd", packed, version)
+
+
+def fragment_header(
+    track_id: int = AUDIO_TRACK_ID,
+    default_duration: int | None = AAC_FRAME_SAMPLES,
+    *,
+    base_data_offset: bool = False,
+    description_index: bool = False,
+) -> bytes:
+    flags = DEFAULT_BASE_IS_MOOF
+    payload = struct.pack(">I", track_id)
+    if base_data_offset:
+        flags |= BASE_DATA_OFFSET_PRESENT
+        payload += struct.pack(">Q", 0)
+    if description_index:
+        flags |= SAMPLE_DESCRIPTION_INDEX_PRESENT
+        payload += struct.pack(">I", 1)
+    if default_duration is not None:
+        flags |= DEFAULT_SAMPLE_DURATION_PRESENT
+        payload += struct.pack(">I", default_duration)
+    return flagged_box(b"tfhd", flags, payload)
+
+
+@dataclass(frozen=True, slots=True)
+class TrackRun:
+    count: int
+    durations: Sequence[int] | None = None
+    sizes: bool = True
+    sample_flags: bool = False
+    composition_offsets: bool = False
+    first_sample_flags: bool = False
+    declared: int | None = None
+
+    def encode(self) -> bytes:
+        flags = DATA_OFFSET_PRESENT | (FIRST_SAMPLE_FLAGS_PRESENT if self.first_sample_flags else 0)
+        fields = [
+            (self.durations is not None, SAMPLE_DURATION_PRESENT),
+            (self.sizes, SAMPLE_SIZE_PRESENT),
+            (self.sample_flags, SAMPLE_FLAGS_PRESENT),
+            (self.composition_offsets, COMPOSITION_OFFSET_PRESENT),
+        ]
+        for present, flag in fields:
+            flags |= flag if present else 0
+        header = struct.pack(">Ii", self.count if self.declared is None else self.declared, 0)
+        if self.first_sample_flags:
+            header += struct.pack(">I", 0)
+        records = b"".join(self._record(index) for index in range(self.count))
+        return flagged_box(b"trun", flags, header + records)
+
+    def _record(self, index: int) -> bytes:
+        record = b""
+        if self.durations is not None:
+            record += struct.pack(">I", self.durations[index])
+        if self.sizes:
+            record += struct.pack(">I", 6)
+        if self.sample_flags:
+            record += struct.pack(">I", 0)
+        if self.composition_offsets:
+            record += struct.pack(">i", 0)
+        return record
+
+
+def track_run(count: int, durations: Sequence[int] | None = None) -> bytes:
+    return TrackRun(count=count, durations=durations).encode()
+
+
+def track_fragment(header: bytes, *runs: bytes) -> bytes:
+    return box(b"traf", header, *runs)
+
+
+def movie_fragment(*track_fragments: bytes, sequence: int = 1) -> bytes:
+    return box(b"moof", full_box(b"mfhd", struct.pack(">I", sequence)), *track_fragments)
+
+
+def audio_fragment(seconds: float, sequence: int = 1) -> bytes:
+    samples = round(seconds * SOUND_TIMESCALE / AAC_FRAME_SAMPLES)
+    return movie_fragment(track_fragment(fragment_header(), track_run(samples)), sequence=sequence) + box(
+        b"mdat", b"\x00" * 6 * samples
+    )
+
+
+def fragmented_track(track_id: int = AUDIO_TRACK_ID, kind: bytes = b"soun", *, seconds: float = 0) -> bytes:
+    return Track(
+        kind=kind,
+        seconds=seconds,
+        stts=time_to_sample(frames_for(seconds)) if seconds else time_to_sample([]),
+        header=track_header(track_id),
+    ).encode()
+
+
+def fragmented_movie(
+    *fragments: bytes,
+    header_seconds: float = 0,
+    extends: bytes | None = None,
+    tracks: Sequence[bytes] | None = None,
+) -> bytes:
+    moov = movie(
+        *(tracks or (fragmented_track(),)),
+        movie_extends() if extends is None else extends,
+        seconds=header_seconds,
+    )
+    return isobmff(moov, *fragments, brand=b"iso5", compatible=(b"iso5", b"iso6", b"mp41", b"dash"))
 
 
 @dataclass(frozen=True, slots=True)

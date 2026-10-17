@@ -10,10 +10,10 @@ from fastapi import APIRouter, FastAPI, Request, Response
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deckly.application.documents import GetDocument, UploadDocument
+from deckly.application.documents import FetchRecording, GetDocument, UploadDocument
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
 from deckly.application.health import CheckHealth
-from deckly.application.ports import DocumentStore, RegenerationLimiter
+from deckly.application.ports import DocumentStorage, DocumentStore, RegenerationLimiter
 from deckly.application.regeneration import RegenerateNote
 from deckly.config import ProviderSettings, Settings, load_settings
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
@@ -38,12 +38,18 @@ from deckly.infrastructure.observability.exposition import (
     MetricsExposition,
 )
 from deckly.infrastructure.observability.http import ObservedRequests
-from deckly.infrastructure.observability.metrics import DOCUMENT_UPLOAD_GATE, RECORDING_UPLOAD_GATE, Metrics
+from deckly.infrastructure.observability.metrics import (
+    DOCUMENT_UPLOAD_GATE,
+    RECORDING_UPLOAD_GATE,
+    RECORDING_URL_GATE,
+    Metrics,
+)
 from deckly.infrastructure.observability.runtime import Observability, create_observability
 from deckly.infrastructure.provider_faults import UpstreamFaultRegenerator, UpstreamFaultRetriever
 from deckly.infrastructure.queue import ArqJobQueue, create_queue_pool, create_redis_settings
 from deckly.infrastructure.quota import QuotaLimits, RedisGenerationQuota
 from deckly.infrastructure.rate_limit import RedisRegenerationLimiter, RegenerationWindow
+from deckly.infrastructure.recording_url.fetcher import FetchLimits, build_youtube_fetcher
 from deckly.infrastructure.recordings.sniffing import ContentRecordingInspector
 from deckly.infrastructure.resilience import ProviderOperation, ProviderProbe, RetryPolicy
 from deckly.infrastructure.search.client import SearchClient, SearchEndpoint
@@ -52,12 +58,18 @@ from deckly.infrastructure.search.retriever import WebSourceRetriever
 from deckly.infrastructure.search.tavily_client import TavilySearchClient
 from deckly.infrastructure.storage.client import StorageClient
 from deckly.infrastructure.upload_gate import RejectingUploadGate
-from deckly.infrastructure.upload_limit import RedisUploadLimiter, UploadWindow
+from deckly.infrastructure.upload_limit import (
+    FetchWindow,
+    RedisRecordingUrlLimiter,
+    RedisUploadLimiter,
+    UploadWindow,
+)
 from deckly.transport import documents, generations, health, notes
 from deckly.transport.dependencies import (
     CANCEL_GENERATION_STATE,
     CHECK_HEALTH_STATE,
     CREATE_GENERATION_STATE,
+    FETCH_RECORDING_STATE,
     GET_DOCUMENT_STATE,
     GET_GENERATION_STATE,
     REGENERATE_NOTE_STATE,
@@ -155,8 +167,42 @@ def wire_documents(app: FastAPI, settings: Settings, clients: DocumentClients) -
             read_timeout_seconds=limits.recording_upload_read_timeout_seconds,
         ),
     )
+    setattr(app.state, FETCH_RECORDING_STATE, fetch_recording(settings, clients, store, storage))
     setattr(app.state, GET_DOCUMENT_STATE, GetDocument(store=store))
     return store
+
+
+def fetch_recording(
+    settings: Settings, clients: DocumentClients, store: DocumentStore, storage: DocumentStorage
+) -> FetchRecording:
+    limits = settings.limits
+    metrics = clients.observability.metrics
+    window = FetchWindow(
+        fetches_per_client=limits.recording_url_fetches_per_window,
+        fetches_per_address=limits.recording_url_fetches_per_address_per_window,
+        fetches_per_server=limits.recording_url_server_fetches_per_window,
+        window_seconds=limits.recording_url_window_seconds,
+        command_timeout_seconds=settings.redis.connect_timeout_seconds,
+    )
+    fetch_limits = FetchLimits(
+        max_bytes=limits.recording_max_bytes,
+        max_duration_seconds=limits.recording_max_duration_seconds,
+        timeout_seconds=limits.recording_url_timeout_seconds,
+    )
+    return FetchRecording(
+        upload=UploadDocument(
+            gate=upload_gate(RECORDING_URL_GATE, limits.recording_url_max_concurrency, metrics),
+            limiter=RedisRecordingUrlLimiter(clients.redis, window, metrics),
+            inspector=ContentRecordingInspector(max_duration_seconds=limits.recording_max_duration_seconds),
+            storage=storage,
+            store=store,
+            clock=utc_now,
+            new_document_id=uuid4,
+            max_bytes=limits.recording_max_bytes,
+            read_timeout_seconds=limits.recording_url_timeout_seconds,
+        ),
+        fetcher=build_youtube_fetcher(fetch_limits, metrics),
+    )
 
 
 def single_attempt(timeout_seconds: float, *, base_delay_seconds: int, max_delay_seconds: int) -> RetryPolicy:

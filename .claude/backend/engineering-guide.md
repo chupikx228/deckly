@@ -279,7 +279,8 @@ soon as it picks it up; if it is never picked up, the queued threshold catches i
 ## Document uploads
 
 `POST /documents` (and `POST /recordings`, which runs the same use case with its own gate, size
-limit, read deadline and content probe) stores the file in S3-compatible object storage (Cloudflare
+limit, read deadline and content probe, and `POST /recordings/from-url`, which runs it once more with
+a fetch from YouTube in place of the request body, see "Server-side fetches" below) stores the file in S3-compatible object storage (Cloudflare
 R2, AWS S3 or any store that speaks SigV4, chosen by `DECKLY_PROVIDER_STORAGE_*`) and its metadata
 in the `documents` table. The order is fixed so that no object can exist without a row pointing at
 it:
@@ -367,6 +368,28 @@ The model and search providers _will_ be slow, rate-limited or down. Design for 
   failed write is logged and ignored. This is the opposite of the quota check, which fails closed
   because it guards spend. Only fully successful results are stored; a deck whose media step failed
   is returned but not cached, so an image outage is not pinned for the whole TTL.
+
+## Server-side fetches
+
+`POST /recordings/from-url` is the only endpoint where a client makes the server fetch something
+from the internet, so it is the service's SSRF surface. Its rules, for any similar endpoint later:
+
+- **Allowlist the input, then rebuild it.** The client's URL is parsed by a strict pattern in
+  `domain/recording_url.py` and reduced to a video id; the URL the server fetches is built from that
+  id. Untrusted text never reaches a command line or an outbound request as-is.
+- **Constrain the network, not only the input.** The downloader (yt-dlp, a subprocess) reaches the
+  network only through a per-fetch egress proxy in the API process
+  (`infrastructure/recording_url/egress.py`) that accepts `CONNECT` to port 443 of allowlisted hosts
+  only, resolves each host once, refuses unless every address is public, connects to the address it
+  checked (no DNS rebinding) and caps the bytes and tunnels of the whole fetch. Redirects open new
+  tunnels, so they pass the same checks.
+- **A subprocess is isolated like ffmpeg in DEC-84:** an argument list, never a shell; no user
+  configuration, plugins, cache or cookies; an empty `PATH`; a fresh working directory and `HOME`;
+  its own process group, killed as a whole on the deadline or on cancellation.
+- **Cheap checks before expensive work, and the expensive result is checked again.** Metadata is
+  checked before the download; the downloaded bytes go through the same probe as an upload.
+- **Its own, tighter budget**, including a server-wide one: every fetch spends the server's
+  bandwidth and its standing with the remote platform, whoever asked for it.
 
 ## Rate limiting and abuse
 

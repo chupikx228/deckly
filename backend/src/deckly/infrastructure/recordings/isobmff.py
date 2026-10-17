@@ -1,34 +1,49 @@
 import struct
-from collections.abc import Iterator
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from deckly.application.ports import InspectedUpload
 from deckly.domain.document import DocumentFormat
-from deckly.domain.exceptions import UnsupportedDocumentError
 from deckly.infrastructure.recordings.binary import big_endian
-from deckly.infrastructure.recordings.duration import DurationLimit
+from deckly.infrastructure.recordings.boxes import (
+    FULL_BOX_PREFIX_BYTES,
+    SIZE_BYTES,
+    VERSION_1,
+    Box,
+    Budget,
+    Container,
+    Sampling,
+    field,
+    unsupported,
+    version_of,
+)
+from deckly.infrastructure.recordings.duration import DurationLimit, PacketFloor
+from deckly.infrastructure.recordings.esds import aac_configuration, decoder_configuration, first_sample_entry
+from deckly.infrastructure.recordings.fragments import (
+    MOVIE_FRAGMENT,
+    FragmentedTrack,
+    FragmentWalk,
+    fragment_duration,
+    track_extends_defaults,
+)
 
-SIZE_BYTES = 4
-LARGE_SIZE_BYTES = 8
-BOX_HEADER_BYTES = 8
-LARGE_BOX_HEADER_BYTES = 16
 BITS_PER_BYTE = 8
-SIZE_TO_END = 0
-LARGE_SIZE = 1
 MAX_BOXES = 4096
+MAX_FRAGMENT_BOXES = 16_384
 MAX_TRACKS = 64
 MAX_TIME_TO_SAMPLE_ENTRIES = 1_048_576
 TIME_TO_SAMPLE_ENTRY_BYTES = 8
-FULL_BOX_PREFIX_BYTES = 4
 BRAND_BYTES = 4
 FILE_TYPE_PREFIX_BYTES = 8
-VERSION_1 = 1
+TRACK_ID_OFFSET_V0 = 12
+TRACK_ID_OFFSET_V1 = 20
 FILE_TYPE = b"ftyp"
 MOVIE = b"moov"
 MOVIE_HEADER = b"mvhd"
 MOVIE_EXTENDS = b"mvex"
-MOVIE_FRAGMENT = b"moof"
+MEDIA_DATA = b"mdat"
 TRACK = b"trak"
+TRACK_HEADER = b"tkhd"
 MEDIA = b"mdia"
 MEDIA_HEADER = b"mdhd"
 HANDLER = b"hdlr"
@@ -49,84 +64,10 @@ MP4_BRANDS = frozenset(
 ACCEPTED_BRANDS = AUDIO_BRANDS | MP4_BRANDS | {QUICKTIME_BRAND}
 REFUSED_BRANDS = frozenset({b"M4P ", b"heic", b"heix", b"mif1", b"msf1", b"avif", b"avis"})
 ENCRYPTED_SAMPLE_ENTRIES = frozenset({b"enca", b"drms"})
+FRAGMENT_LEVEL_BOXES = frozenset({MOVIE_FRAGMENT, MEDIA_DATA})
 HANDLER_TYPE_OFFSET = 8
 SAMPLE_ENTRY_FORMAT_OFFSET = 12
-
-
-def unsupported(message: str) -> UnsupportedDocumentError:
-    return UnsupportedDocumentError(message)
-
-
-@dataclass(frozen=True, slots=True)
-class Box:
-    kind: bytes
-    start: int
-    end: int
-
-    @property
-    def size(self) -> int:
-        return self.end - self.start
-
-
-class Budget:
-    def __init__(self, allowance: int, subject: str) -> None:
-        self._remaining = allowance
-        self._subject = subject
-
-    def spend(self, amount: int = 1) -> None:
-        self._remaining -= amount
-        if self._remaining < 0:
-            message = f"the recording has too many {self._subject}"
-            raise unsupported(message)
-
-
-@dataclass(frozen=True, slots=True)
-class Container:
-    content: bytes
-    boxes: Budget
-    entries: Budget
-
-    def children(self, start: int, end: int) -> Iterator[Box]:
-        position = start
-        while position < end:
-            self.boxes.spend()
-            box = self.box_at(position, end)
-            yield box
-            position = box.end
-
-    def box_at(self, position: int, end: int) -> Box:
-        if end - position < BOX_HEADER_BYTES:
-            message = "the recording ends inside a box header"
-            raise unsupported(message)
-        size = big_endian(self.content, position, SIZE_BYTES)
-        kind = self.content[position + SIZE_BYTES : position + BOX_HEADER_BYTES]
-        header = BOX_HEADER_BYTES
-        if size == LARGE_SIZE:
-            if end - position < LARGE_BOX_HEADER_BYTES:
-                message = "the recording ends inside a box header"
-                raise unsupported(message)
-            size = big_endian(self.content, position + BOX_HEADER_BYTES, LARGE_SIZE_BYTES)
-            header = LARGE_BOX_HEADER_BYTES
-        elif size == SIZE_TO_END:
-            size = end - position
-        if size < header or size > end - position:
-            message = f"a {kind!r} box runs past the end of what contains it"
-            raise unsupported(message)
-        return Box(kind=kind, start=position + header, end=position + size)
-
-    def single(self, parent: Box, kind: bytes) -> Box | None:
-        found = [box for box in self.children(parent.start, parent.end) if box.kind == kind]
-        if len(found) > 1:
-            message = f"the recording has more than one {kind!r} box inside {parent.kind!r}"
-            raise unsupported(message)
-        return found[0] if found else None
-
-    def required(self, parent: Box, kind: bytes) -> Box:
-        box = self.single(parent, kind)
-        if box is None:
-            message = f"the recording has no {kind!r} box inside {parent.kind!r}"
-            raise unsupported(message)
-        return box
+AAC_SAMPLE_ENTRY = b"mp4a"
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +80,13 @@ class Timing:
 class SoundTrack:
     timing: Timing
     sampled_duration: int
+    packets: int = 0
+    floor: PacketFloor | None = None
+
+    @property
+    def seconds(self) -> float:
+        sampled = seconds_of(self.sampled_duration, self.timing.timescale)
+        return sampled if self.floor is None else max(sampled, self.floor.seconds(self.packets))
 
 
 def read_major_brand(content: bytes, file_type: Box) -> bytes:
@@ -202,12 +150,6 @@ def four_cc_at(content: bytes, box: Box, offset: int) -> bytes:
     return content[box.start + offset : box.start + offset + BRAND_BYTES]
 
 
-@dataclass(frozen=True, slots=True)
-class Sampling:
-    duration: int
-    samples: int
-
-
 def sampled_duration(container: Container, table: Box, timing: Timing, limit: DurationLimit) -> Sampling:
     if table.size < FULL_BOX_PREFIX_BYTES + SIZE_BYTES:
         message = "the recording's time-to-sample box is too short"
@@ -248,6 +190,18 @@ def stored_samples(container: Container, samples: Box) -> int:
     return big_endian(container.content, table.start + SAMPLE_COUNT_OFFSET, SIZE_BYTES)
 
 
+def packet_floor(container: Container, description: Box) -> PacketFloor | None:
+    entry = first_sample_entry(container, description)
+    configuration = decoder_configuration(container, entry)
+    if configuration is None:
+        if entry.kind == AAC_SAMPLE_ENTRY:
+            message = "the recording's AAC audio has no decoder configuration"
+            raise unsupported(message)
+        return None
+    aac = aac_configuration(container.content, configuration)
+    return None if aac is None else aac.floor
+
+
 def read_sound_track(container: Container, media: Box, limit: DurationLimit) -> SoundTrack:
     timing = read_timing(container.content, container.required(media, MEDIA_HEADER))
     check_timing(timing, limit)
@@ -256,11 +210,16 @@ def read_sound_track(container: Container, media: Box, limit: DurationLimit) -> 
     if four_cc_at(container.content, description, SAMPLE_ENTRY_FORMAT_OFFSET) in ENCRYPTED_SAMPLE_ENTRIES:
         message = "the recording's audio is encrypted"
         raise unsupported(message)
+    floor = packet_floor(container, description)
     sampling = sampled_duration(container, container.required(samples, TIME_TO_SAMPLE), timing, limit)
     if sampling.samples != stored_samples(container, samples):
         message = "the recording's time-to-sample table does not cover exactly the samples it stores"
         raise unsupported(message)
-    return SoundTrack(timing=timing, sampled_duration=sampling.duration)
+    if floor is not None:
+        limit.check_packets(sampling.samples, floor)
+    return SoundTrack(
+        timing=timing, sampled_duration=sampling.duration, packets=sampling.samples, floor=floor
+    )
 
 
 def seconds_of(units: int, timescale: int) -> float:
@@ -272,61 +231,181 @@ class MovieSummary:
     movie_timing: Timing
     sound_tracks: tuple[SoundTrack, ...]
     has_video: bool
+    fragment_timing: Timing | None = None
 
     @property
     def audio_seconds(self) -> float:
-        return max(
-            (seconds_of(track.sampled_duration, track.timing.timescale) for track in self.sound_tracks),
-            default=0.0,
-        )
+        return max((track.seconds for track in self.sound_tracks), default=0.0)
 
     @property
     def seconds(self) -> float:
         candidates = [self.audio_seconds]
         timings = [self.movie_timing, *(track.timing for track in self.sound_tracks)]
+        if self.fragment_timing is not None:
+            timings.append(self.fragment_timing)
         candidates.extend(
             seconds_of(timing.duration, timing.timescale) for timing in timings if timing.duration is not None
         )
         return max(candidates)
 
 
-def summarise_movie(container: Container, movie: Box, limit: DurationLimit) -> MovieSummary:
-    header: Box | None = None
-    tracks: list[Box] = []
-    for box in container.children(movie.start, movie.end):
-        if box.kind == MOVIE_EXTENDS:
-            message = "fragmented MP4 recordings are not supported"
-            raise unsupported(message)
-        if box.kind == MOVIE_HEADER:
-            if header is not None:
-                message = "the recording has more than one movie header"
-                raise unsupported(message)
-            header = box
-        if box.kind == TRACK:
-            tracks.append(box)
-    if header is None:
+@dataclass(frozen=True, slots=True)
+class MovieContents:
+    header: Box
+    tracks: tuple[Box, ...]
+    extends: Box | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReadTrack:
+    box: Box
+    handler: bytes
+    sound: SoundTrack | None
+
+
+def movie_contents(container: Container, movie: Box) -> MovieContents:
+    children = list(container.children(movie.start, movie.end))
+    headers = [box for box in children if box.kind == MOVIE_HEADER]
+    if not headers:
         message = "the recording has no movie header"
         raise unsupported(message)
+    if len(headers) > 1:
+        message = "the recording has more than one movie header"
+        raise unsupported(message)
+    extends = [box for box in children if box.kind == MOVIE_EXTENDS]
+    if len(extends) > 1:
+        message = "the recording has more than one movie extends box"
+        raise unsupported(message)
+    tracks = tuple(box for box in children if box.kind == TRACK)
     if len(tracks) > MAX_TRACKS:
         message = f"the recording has more than {MAX_TRACKS} tracks"
         raise unsupported(message)
-    movie_timing = read_timing(container.content, header)
-    check_timing(movie_timing, limit)
-    sound_tracks: list[SoundTrack] = []
-    has_video = False
+    return MovieContents(header=headers[0], tracks=tracks, extends=extends[0] if extends else None)
+
+
+def read_track(container: Container, track: Box, limit: DurationLimit) -> ReadTrack:
+    media = container.required(track, MEDIA)
+    handler = four_cc_at(container.content, container.required(media, HANDLER), HANDLER_TYPE_OFFSET)
+    sound = read_sound_track(container, media, limit) if handler == SOUND_HANDLER else None
+    return ReadTrack(box=track, handler=handler, sound=sound)
+
+
+def read_track_id(content: bytes, track_header: Box) -> int:
+    offset = TRACK_ID_OFFSET_V1 if version_of(content, track_header) == VERSION_1 else TRACK_ID_OFFSET_V0
+    return field(content, track_header, offset, SIZE_BYTES)
+
+
+def tracks_by_id(container: Container, tracks: Sequence[ReadTrack]) -> dict[int, ReadTrack]:
+    by_id: dict[int, ReadTrack] = {}
     for track in tracks:
-        media = container.required(track, MEDIA)
-        handler = four_cc_at(container.content, container.required(media, HANDLER), HANDLER_TYPE_OFFSET)
-        if handler == SOUND_HANDLER:
-            sound_tracks.append(read_sound_track(container, media, limit))
-        has_video = has_video or handler == VIDEO_HANDLER
-    return MovieSummary(movie_timing=movie_timing, sound_tracks=tuple(sound_tracks), has_video=has_video)
+        track_id = read_track_id(container.content, container.required(track.box, TRACK_HEADER))
+        if track_id in by_id:
+            message = f"the recording has more than one track with id {track_id}"
+            raise unsupported(message)
+        by_id[track_id] = track
+    return by_id
+
+
+def unfragmented_sound(tracks: Sequence[ReadTrack]) -> tuple[SoundTrack, ...]:
+    return tuple(sound for sound in (track.sound for track in tracks) if sound is not None)
+
+
+@dataclass(frozen=True, slots=True)
+class Fragmented:
+    extends: Box
+    fragments: tuple[Box, ...]
+
+
+def fragmented_sound(
+    container: Container, fragmented: Fragmented, tracks: Sequence[ReadTrack], limit: DurationLimit
+) -> tuple[SoundTrack, ...]:
+    defaults = track_extends_defaults(container, fragmented.extends)
+    by_id = tracks_by_id(container, tracks)
+    sounds = {
+        track_id: sound
+        for track_id, sound in ((key, track.sound) for key, track in by_id.items())
+        if sound is not None
+    }
+    if any(sound.floor is None for sound in sounds.values()):
+        message = "a fragmented recording's audio must be AAC"
+        raise unsupported(message)
+    walk = FragmentWalk(
+        container=container,
+        sound={
+            track_id: FragmentedTrack(
+                timescale=sound.timing.timescale, default_duration=defaults.get(track_id), floor=sound.floor
+            )
+            for track_id, sound in sounds.items()
+        },
+        others=frozenset(by_id.keys() - sounds.keys()),
+        limit=limit,
+    )
+    totals = walk.samplings(
+        fragmented.fragments,
+        {
+            track_id: Sampling(duration=sound.sampled_duration, samples=sound.packets)
+            for track_id, sound in sounds.items()
+        },
+    )
+    return tuple(
+        SoundTrack(
+            timing=sound.timing,
+            sampled_duration=totals[track_id].duration,
+            packets=totals[track_id].samples,
+            floor=sound.floor,
+        )
+        for track_id, sound in sounds.items()
+    )
+
+
+def fragment_timing(
+    container: Container, extends: Box, movie_timing: Timing, limit: DurationLimit
+) -> Timing | None:
+    duration = fragment_duration(container, extends)
+    if duration is None:
+        return None
+    timing = Timing(timescale=movie_timing.timescale, duration=duration)
+    check_timing(timing, limit)
+    return timing
+
+
+def summarise_movie(
+    container: Container, movie: Box, fragments: tuple[Box, ...], limit: DurationLimit
+) -> MovieSummary:
+    contents = movie_contents(container, movie)
+    if fragments and contents.extends is None:
+        message = "the recording has movie fragments but no movie extends box"
+        raise unsupported(message)
+    movie_timing = read_timing(container.content, contents.header)
+    check_timing(movie_timing, limit)
+    tracks = tuple(read_track(container, track, limit) for track in contents.tracks)
+    has_video = any(track.handler == VIDEO_HANDLER for track in tracks)
+    if contents.extends is None:
+        return MovieSummary(
+            movie_timing=movie_timing, sound_tracks=unfragmented_sound(tracks), has_video=has_video
+        )
+    return MovieSummary(
+        movie_timing=movie_timing,
+        sound_tracks=fragmented_sound(container, Fragmented(contents.extends, fragments), tracks, limit),
+        has_video=has_video,
+        fragment_timing=fragment_timing(container, contents.extends, movie_timing, limit),
+    )
+
+
+def top_level_boxes(container: Container) -> list[Box]:
+    boxes: list[Box] = []
+    end = len(container.content)
+    position = 0
+    while position < end:
+        box = container.box_at(position, end)
+        budget = container.fragment_boxes if box.kind in FRAGMENT_LEVEL_BOXES else container.boxes
+        budget.spend()
+        boxes.append(box)
+        position = box.end
+    return boxes
 
 
 def single_movie(top_level: list[Box]) -> Box:
-    if any(box.kind == MOVIE_FRAGMENT for box in top_level):
-        message = "fragmented MP4 recordings are not supported"
-        raise unsupported(message)
     movies = [box for box in top_level if box.kind == MOVIE]
     if len(movies) != 1:
         message = f"the recording has {len(movies)} movie boxes instead of one"
@@ -349,10 +428,12 @@ def probe_isobmff(content: bytes, limit: DurationLimit) -> InspectedUpload:
         content=content,
         boxes=Budget(MAX_BOXES, "boxes"),
         entries=Budget(MAX_TIME_TO_SAMPLE_ENTRIES, "time-to-sample entries"),
+        fragment_boxes=Budget(MAX_FRAGMENT_BOXES, "fragment boxes"),
     )
-    top_level = list(container.children(0, len(content)))
+    top_level = top_level_boxes(container)
     major = read_major_brand(content, top_level[0])
-    summary = summarise_movie(container, single_movie(top_level), limit)
+    fragments = tuple(box for box in top_level if box.kind == MOVIE_FRAGMENT)
+    summary = summarise_movie(container, single_movie(top_level), fragments, limit)
     if summary.audio_seconds <= 0:
         message = "the recording has no audio"
         raise unsupported(message)

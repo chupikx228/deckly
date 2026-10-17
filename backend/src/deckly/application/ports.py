@@ -12,6 +12,7 @@ from deckly.domain.generation import GenerationRequest, SourceKind
 from deckly.domain.job import FailureCode, GenerationJob, JobStage, JobStatus
 from deckly.domain.media import Media
 from deckly.domain.notes.note import Note
+from deckly.domain.recording_url import YouTubeVideo
 from deckly.domain.regeneration import RegenerationRequest
 from deckly.domain.source import Source, SourceQuery, WebSource
 
@@ -237,6 +238,10 @@ class UploadGate(Protocol):
 
 class DocumentInspector(Protocol):
     async def identify(self, content: bytes) -> InspectedUpload: ...
+
+
+class RecordingFetcher(Protocol):
+    async def fetch(self, video: YouTubeVideo) -> DocumentUpload: ...
 
 
 class DocumentStorage(Protocol):

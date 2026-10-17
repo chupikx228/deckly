@@ -55,3 +55,57 @@ class RedisUploadLimiter:
     def _reject(self, limit: RateLimit, now: datetime) -> NoReturn:
         record_rejection(self._metrics, limit)
         raise RateLimitedError(seconds_until_window_end(now, self._window.window_seconds))
+
+
+RECORDING_URL_CLIENT_KEY_PREFIX = "deckly:recording-url:client"
+RECORDING_URL_ADDRESS_KEY_PREFIX = "deckly:recording-url:address"
+RECORDING_URL_SERVER_KEY_PREFIX = "deckly:recording-url:server"
+SERVER_SUBJECT = "all"
+
+
+@dataclass(frozen=True, slots=True)
+class FetchWindow:
+    fetches_per_client: int
+    fetches_per_address: int
+    fetches_per_server: int
+    window_seconds: int
+    command_timeout_seconds: float
+
+
+class RedisRecordingUrlLimiter:
+    def __init__(self, redis: Redis, window: FetchWindow, metrics: Metrics) -> None:
+        self._redis = redis
+        self._window = window
+        self._metrics = metrics
+
+    async def acquire(self, requester: Requester, now: datetime) -> None:
+        window = self._window
+        keys = (
+            window_key(RECORDING_URL_CLIENT_KEY_PREFIX, requester.client_id, now, window.window_seconds),
+            window_key(
+                RECORDING_URL_ADDRESS_KEY_PREFIX,
+                address_bucket(requester.address),
+                now,
+                window.window_seconds,
+            ),
+            window_key(RECORDING_URL_SERVER_KEY_PREFIX, SERVER_SUBJECT, now, window.window_seconds),
+        )
+        async with (
+            bounded_redis("recording_url_limit_unavailable", window.command_timeout_seconds),
+            self._redis.pipeline(transaction=True) as pipeline,
+        ):
+            for key in keys:
+                pipeline.incr(key)
+                pipeline.expire(key, window.window_seconds)
+            answers = await pipeline.execute()
+        client_count, address_count, server_count = (require_count(count, "INCR") for count in answers[::2])
+        if client_count > window.fetches_per_client:
+            self._reject(RateLimit.RECORDING_URL_CLIENT, now)
+        if address_count > window.fetches_per_address:
+            self._reject(RateLimit.RECORDING_URL_ADDRESS, now)
+        if server_count > window.fetches_per_server:
+            self._reject(RateLimit.RECORDING_URL_SERVER, now)
+
+    def _reject(self, limit: RateLimit, now: datetime) -> NoReturn:
+        record_rejection(self._metrics, limit)
+        raise RateLimitedError(seconds_until_window_end(now, self._window.window_seconds))

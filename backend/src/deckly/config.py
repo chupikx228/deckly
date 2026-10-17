@@ -47,7 +47,7 @@ MEBIBYTE = 1024 * 1024
 MAX_DOCUMENT_BYTES = 100 * MEBIBYTE
 DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY = 4
 MAX_DOCUMENT_UPLOAD_CONCURRENCY = 32
-DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES = 400 * MEBIBYTE
+DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES = 1288 * MEBIBYTE
 DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN = 2
 DEFAULT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES = 1280 * MEBIBYTE
 DOCUMENT_DOWNLOAD_PEAK_COPIES = 2
@@ -61,9 +61,18 @@ DEFAULT_RECORDING_MAX_BYTES = 48 * MEBIBYTE
 MAX_RECORDING_BYTES = 100 * MEBIBYTE
 DEFAULT_RECORDING_MAX_DURATION_SECONDS = 15 * SECONDS_PER_MINUTE
 MAX_RECORDING_DURATION_SECONDS = 4 * MINUTES_PER_HOUR * SECONDS_PER_MINUTE
-DEFAULT_RECORDING_UPLOAD_MAX_CONCURRENCY = 2
+DEFAULT_RECORDING_UPLOAD_MAX_CONCURRENCY = 1
 MAX_RECORDING_UPLOAD_CONCURRENCY = 8
 DEFAULT_RECORDING_UPLOAD_READ_TIMEOUT_SECONDS = 240
+DEFAULT_RECORDING_URL_MAX_CONCURRENCY = 1
+RECORDING_URL_SUBPROCESS_PEAK_BYTES = 448 * MEBIBYTE
+MAX_RECORDING_URL_CONCURRENCY = 4
+DEFAULT_RECORDING_URL_TIMEOUT_SECONDS = 120
+MAX_RECORDING_URL_TIMEOUT_SECONDS = 600
+DEFAULT_RECORDING_URL_FETCHES_PER_WINDOW = 5
+DEFAULT_RECORDING_URL_FETCHES_PER_ADDRESS_PER_WINDOW = 20
+DEFAULT_RECORDING_URL_SERVER_FETCHES_PER_WINDOW = 200
+DEFAULT_RECORDING_URL_WINDOW_SECONDS = 60 * 60
 MAX_DOCUMENT_PARSE_DEADLINE_SECONDS = 120
 MIN_DOCUMENT_RETENTION_SECONDS = 60 * 60
 MAX_DOCUMENT_RETENTION_SECONDS = 7 * 24 * 60 * 60
@@ -338,6 +347,18 @@ class LimitSettings(BaseSettings):
     recording_upload_read_timeout_seconds: Annotated[
         int, Field(ge=1, le=MAX_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS)
     ] = DEFAULT_RECORDING_UPLOAD_READ_TIMEOUT_SECONDS
+    recording_url_max_concurrency: Annotated[int, Field(ge=1, le=MAX_RECORDING_URL_CONCURRENCY)] = (
+        DEFAULT_RECORDING_URL_MAX_CONCURRENCY
+    )
+    recording_url_timeout_seconds: Annotated[int, Field(ge=1, le=MAX_RECORDING_URL_TIMEOUT_SECONDS)] = (
+        DEFAULT_RECORDING_URL_TIMEOUT_SECONDS
+    )
+    recording_url_fetches_per_window: PositiveInt = DEFAULT_RECORDING_URL_FETCHES_PER_WINDOW
+    recording_url_fetches_per_address_per_window: PositiveInt = (
+        DEFAULT_RECORDING_URL_FETCHES_PER_ADDRESS_PER_WINDOW
+    )
+    recording_url_server_fetches_per_window: PositiveInt = DEFAULT_RECORDING_URL_SERVER_FETCHES_PER_WINDOW
+    recording_url_window_seconds: PositiveInt = DEFAULT_RECORDING_URL_WINDOW_SECONDS
 
     @property
     def document_worker_job_peak_bytes(self) -> int:
@@ -351,7 +372,9 @@ class LimitSettings(BaseSettings):
     def upload_worst_case_bytes(self) -> int:
         held = (
             self.document_upload_max_concurrency * self.document_max_bytes
-            + self.recording_upload_max_concurrency * self.recording_max_bytes
+            + (self.recording_upload_max_concurrency + self.recording_url_max_concurrency)
+            * self.recording_max_bytes
+            + self.recording_url_max_concurrency * RECORDING_URL_SUBPROCESS_PEAK_BYTES
         )
         return held * DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN
 
@@ -370,18 +393,32 @@ class LimitSettings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def require_recording_url_limits_to_get_coarser(self) -> Self:
+        if self.recording_url_fetches_per_address_per_window < self.recording_url_fetches_per_window:
+            message = "the per-address recording url fetch limit must be at least the per-client limit"
+            raise ValueError(message)
+        if self.recording_url_server_fetches_per_window < self.recording_url_fetches_per_address_per_window:
+            message = "the server-wide recording url fetch limit must be at least the per-address limit"
+            raise ValueError(message)
+        return self
+
+    @model_validator(mode="after")
     def require_concurrent_uploads_to_fit_the_memory_budget(self) -> Self:
         worst_case_bytes = self.upload_worst_case_bytes
         if worst_case_bytes > self.document_upload_memory_budget_bytes:
             message = (
                 f"the document upload concurrency cap ({self.document_upload_max_concurrency}) times the "
                 f"document size limit ({self.document_max_bytes} bytes), plus the recording upload "
-                f"concurrency cap ({self.recording_upload_max_concurrency}) times the recording size limit "
-                f"({self.recording_max_bytes} bytes), times the safety margin "
+                f"concurrency cap ({self.recording_upload_max_concurrency}) and the recording url fetch "
+                f"concurrency cap ({self.recording_url_max_concurrency}) times the recording size limit "
+                f"({self.recording_max_bytes} bytes), plus the recording url fetch concurrency cap times "
+                f"the measured yt-dlp and deno peak ({RECORDING_URL_SUBPROCESS_PEAK_BYTES} bytes), times the "
+                "safety margin "
                 f"({DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN}) is {worst_case_bytes} bytes, which exceeds the "
                 f"upload memory budget ({self.document_upload_memory_budget_bytes} bytes); lower "
                 "DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY, DECKLY_LIMIT_DOCUMENT_MAX_BYTES, "
-                "DECKLY_LIMIT_RECORDING_UPLOAD_MAX_CONCURRENCY or DECKLY_LIMIT_RECORDING_MAX_BYTES, or raise "
+                "DECKLY_LIMIT_RECORDING_UPLOAD_MAX_CONCURRENCY, "
+                "DECKLY_LIMIT_RECORDING_URL_MAX_CONCURRENCY or DECKLY_LIMIT_RECORDING_MAX_BYTES, or raise "
                 "DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES; the check assumes a single process, so "
                 "divide the budget by the number of workers or replicas sharing one container"
             )

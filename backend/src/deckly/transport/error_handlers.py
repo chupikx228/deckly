@@ -27,8 +27,10 @@ from deckly.domain.exceptions import (
     JobAlreadyTerminalError,
     JobNotFoundError,
     RecordingTooLongError,
+    RecordingUnavailableError,
     TopicRejectedError,
     UnsupportedDocumentError,
+    UnsupportedRecordingUrlError,
 )
 from deckly.domain.job import FailureCode
 from deckly.transport.problem import PROBLEM_JSON_MEDIA_TYPE, ErrorCode, Problem
@@ -98,6 +100,12 @@ PROBLEM_KINDS: Mapping[type[Exception], ProblemKind] = {
     ),
     RecordingTooLongError: ProblemKind(
         HTTPStatus.UNPROCESSABLE_ENTITY, ErrorCode.RECORDING_TOO_LONG, "Recording too long"
+    ),
+    UnsupportedRecordingUrlError: ProblemKind(
+        HTTPStatus.UNPROCESSABLE_ENTITY, ErrorCode.UNSUPPORTED_RECORDING_URL, "Unsupported recording URL"
+    ),
+    RecordingUnavailableError: ProblemKind(
+        HTTPStatus.UNPROCESSABLE_ENTITY, ErrorCode.RECORDING_UNAVAILABLE, "Recording unavailable"
     ),
 }
 

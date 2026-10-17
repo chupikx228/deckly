@@ -4,6 +4,15 @@ from deckly.domain.exceptions import RecordingTooLongError
 
 
 @dataclass(frozen=True, slots=True)
+class PacketFloor:
+    frames_per_packet: int
+    sample_rate: int
+
+    def seconds(self, packets: int) -> float:
+        return packets * self.frames_per_packet / self.sample_rate
+
+
+@dataclass(frozen=True, slots=True)
 class DurationLimit:
     max_seconds: int
 
@@ -16,3 +25,6 @@ class DurationLimit:
     def check(self, units: int, units_per_second: int) -> None:
         if units > self.units(units_per_second):
             raise self.too_long()
+
+    def check_packets(self, packets: int, floor: PacketFloor) -> None:
+        self.check(packets * floor.frames_per_packet, floor.sample_rate)

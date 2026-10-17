@@ -124,3 +124,11 @@ class UnsupportedDocumentError(InvalidDocumentError):
 
 class RecordingTooLongError(InvalidDocumentError):
     pass
+
+
+class UnsupportedRecordingUrlError(InvalidDocumentError):
+    pass
+
+
+class RecordingUnavailableError(InvalidDocumentError):
+    pass
