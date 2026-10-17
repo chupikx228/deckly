@@ -22,7 +22,8 @@ Therefore in v1 there are:
 Adding any of these silently would break the offline guarantee. If the backend needs one,
 raise it as a contract change first.
 
-Uploaded documents (`POST /documents`) are not user data the backend owns. They are short-lived
+Uploaded documents (`POST /documents`) and recordings (`POST /recordings`) are not user data the
+backend owns. They are short-lived
 inputs to generation, readable only by the client that uploaded them, and deleted 24 hours after
 upload unless a generation uses them; a document a generation used is deleted once the last job
 that used it is.
@@ -98,8 +99,10 @@ settings. Generating from a document spends one unit of the generation quota lik
 the upload spent its own budget once and is not charged again. The content check judges the
 document's file name together with `instructions` (a block is `422 TOPIC_REJECTED`), and the
 worker checks the document's text before any card is written from it; a document that violates
-the policy fails the job with `DOCUMENT_REJECTED`. A result for the same `documentId` and the same
-settings may be served from the cache, like a topic.
+the policy fails the job with `DOCUMENT_REJECTED`. A `documentId` that names a recording
+(`POST /recordings`) is `422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION`, checked with the document
+lookup before the quota is touched. A result for the same `documentId` and the same settings may
+be served from the cache, like a topic.
 
 The mobile app does not send `documentId` yet; DEC-77 adds it and regenerates
 `@deckly/api-contract` from `openapi.yaml`.
@@ -379,16 +382,60 @@ metadata. The file goes in a `multipart/form-data` body as the only part, named 
 - `429 RATE_LIMITED` when the client's upload budget is used up (see "Quota").
 - `503 UPSTREAM_UNAVAILABLE` when the object store or the rate-limit store fails or is too slow,
   or when the server is already handling its maximum number of uploads at once
-  (`DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY`, 8 by default, per API process). The latter is
+  (`DECKLY_LIMIT_DOCUMENT_UPLOAD_MAX_CONCURRENCY`, 4 by default, per API process). The latter is
   answered immediately, never queued, with `Retry-After: 5` and `retryAfterSeconds`, before the
   body is read and before the upload is counted against the client's budget, so retrying costs
   nothing. A failed upload leaves nothing behind that a client can read.
 - **No idempotency key.** Retrying an upload stores a second copy with a new `documentId`; the
   copy nothing uses expires like any other.
 
+### `POST /v1/recordings`
+
+Uploads one audio or video recording to generate from later and returns `201` with the same metadata
+body as `POST /documents`, plus `durationSeconds`. Same request shape (`multipart/form-data`, one
+part named `file`, `X-Client-Id` required), same filename rules, same malformed-request `400`s and
+same `GET /documents/{documentId}` to read it back. The reply's `documentId` is what a later request
+refers to.
+
+```json
+{
+  "documentId": "…",
+  "filename": "lecture-3.m4a",
+  "sizeBytes": 7308,
+  "contentType": "audio/mp4",
+  "uploadedAt": "2026-08-14T10:30:00Z",
+  "durationSeconds": 2.064
+}
+```
+
+- **Type is decided by content.** MP3 (MPEG-1/2/2.5 layer III, optionally ID3-tagged), M4A
+  (`audio/mp4`), WAV (uncompressed PCM or floating point), MP4 (`video/mp4`) and MOV
+  (`video/quicktime`). Everything else is `415 UNSUPPORTED_DOCUMENT_TYPE`: PDFs and other files
+  renamed to `.mp3`, Ogg/Opus, WebM, FLAC, AMR, 3GP, raw AAC, fragmented MP4, DRM-protected audio,
+  HEIC and AVIF images (they share the MP4 container), a video with no audio track, a recording
+  whose metadata is internally inconsistent, and damaged or truncated files. `contentType` is the
+  detected type. A recording sent to `POST /documents` is `415` there too.
+- **Duration.** `durationSeconds` is read from the container's metadata, never by decoding the
+  audio, and is never shorter than what a decoder would play. A recording longer than
+  `DECKLY_LIMIT_RECORDING_MAX_DURATION_SECONDS` (15 minutes by default) is
+  `422 RECORDING_TOO_LONG`. The cap is expected to rise once transcription is not bound to
+  self-hosted CPU (DEC-86).
+- **Size.** At most 48 MiB (`DECKLY_LIMIT_RECORDING_MAX_BYTES`), `413 DOCUMENT_TOO_LARGE` otherwise,
+  enforced exactly as for documents.
+- **Budget and capacity.** Recording uploads count against the same upload budget as documents
+  (`429 RATE_LIMITED`). They have their own concurrency limit
+  (`DECKLY_LIMIT_RECORDING_UPLOAD_MAX_CONCURRENCY`, 2 by default, per API process): a full one is
+  `503 UPSTREAM_UNAVAILABLE` with `Retry-After: 5`, refused before the body is read or the budget
+  is spent, and does not affect document uploads. The body must arrive within
+  `DECKLY_LIMIT_RECORDING_UPLOAD_READ_TIMEOUT_SECONDS` (240 by default), else `400`.
+- **Retention** is the same as for documents.
+- **Not yet a generation source.** `POST /generations` with a recording's `documentId` is
+  `422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION` until transcription exists (DEC-86).
+
 ### `GET /v1/documents/{documentId}`
 
 Returns `200` with the same metadata body as the upload. It never returns the file itself.
+`durationSeconds` is present only for a recording.
 
 **Access.** Unlike a job, a document is scoped to the client that uploaded it: the request must
 carry that client's `X-Client-Id`. Any other client, an unknown or malformed id, a document still
@@ -471,14 +518,15 @@ across a window boundary. Every call that passes request validation counts, incl
 then fails upstream. Over the budget, the call is rejected with `429 RATE_LIMITED` and
 `retryAfterSeconds` until the window resets. This budget is not reported in `quota`.
 
-`POST /documents` has a third budget of its own, counted in fixed windows like regeneration: by
-default 10 uploads per hour per `X-Client-Id` (`DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_WINDOW`,
-`DECKLY_LIMIT_DOCUMENT_UPLOAD_WINDOW_SECONDS`) and, as a backstop against rotated client ids, 50 per
-hour per network address (`DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_ADDRESS_PER_WINDOW`, IPv6 grouped by
-/56). Every upload with valid headers counts, including one later refused for its size or type. The
-budget is checked before the body is read, and an upload whose `Content-Length` is already over the
-size limit is refused before it is counted. When Redis cannot be reached in time the upload is
-`503 UPSTREAM_UNAVAILABLE`, never accepted unmetered. This budget is not reported in `quota`.
+`POST /documents` and `POST /recordings` share a third budget, counted in fixed windows like
+regeneration: by default 10 uploads per hour per `X-Client-Id`
+(`DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_WINDOW`, `DECKLY_LIMIT_DOCUMENT_UPLOAD_WINDOW_SECONDS`) and, as
+a backstop against rotated client ids, 50 per hour per network address
+(`DECKLY_LIMIT_DOCUMENT_UPLOADS_PER_ADDRESS_PER_WINDOW`, IPv6 grouped by /56). Every upload with
+valid headers counts, including one later refused for its size or type. The budget is checked before
+the body is read, and an upload whose `Content-Length` is already over the size limit is refused
+before it is counted. When Redis cannot be reached in time the upload is `503 UPSTREAM_UNAVAILABLE`,
+never accepted unmetered. This budget is not reported in `quota`.
 
 ## Note field shapes
 
@@ -601,31 +649,33 @@ localised and is for logs.
 }
 ```
 
-| Code                                | Status              | Meaning                                                 |
-| ----------------------------------- | ------------------- | ------------------------------------------------------- |
-| `VALIDATION_FAILED`                 | 400                 | Request body failed validation                          |
-| `TOPIC_REJECTED`                    | 422                 | Topic, file name or rejected note violates policy       |
-| `RATE_LIMITED`                      | 429                 | A job, regeneration or upload budget; "Quota"           |
-| `JOB_NOT_FOUND`                     | 404                 | Unknown job id                                          |
-| `JOB_ALREADY_TERMINAL`              | 409                 | Cancel on a finished job                                |
-| `IDEMPOTENCY_KEY_CONFLICT`          | 409                 | `Idempotency-Key` reused with a different request       |
-| `PROVIDER_UNAVAILABLE`              | 200 in the job body | The model or search provider failed the job             |
-| `NO_VALID_CONTENT`                  | 200 in the job body | Every note was dropped; nothing safe to return          |
-| `NO_VALID_CONTENT`                  | 503 on regenerate   | No valid replacement note could be produced             |
-| `DOCUMENT_UNREADABLE`               | 200 in the job body | Uploaded document is damaged or over a limit            |
-| `DOCUMENT_ENCRYPTED`                | 200 in the job body | Uploaded PDF needs a password to open                   |
-| `DOCUMENT_HAS_NO_TEXT`              | 200 in the job body | Uploaded document has no extractable text               |
-| `DOCUMENT_NOT_FOUND`                | 200 in the job body | Uploaded document was gone when the job read it         |
-| `DOCUMENT_REJECTED`                 | 200 in the job body | Uploaded document's text violates content policy        |
-| `DOCUMENT_REGENERATION_UNSUPPORTED` | 422 on regenerate   | A note of a document-sourced deck cannot be regenerated |
-| `GENERATION_FAILED`                 | 200 in the job body | The job failed for any other reason                     |
-| `UPSTREAM_UNAVAILABLE`              | 503                 | A provider, quota store or object store is down         |
-| `DOCUMENT_NOT_FOUND`                | 404                 | Unknown, foreign or expired document id                 |
-| `DOCUMENT_TOO_LARGE`                | 413                 | Uploaded document is over the size limit                |
-| `UNSUPPORTED_DOCUMENT_TYPE`         | 415                 | Uploaded file is not a PDF or a `.pptx`                 |
-| `ROUTE_NOT_FOUND`                   | 404                 | No endpoint exists at this path                         |
-| `METHOD_NOT_ALLOWED`                | 405                 | Endpoint exists but not for this HTTP method            |
-| `INTERNAL_ERROR`                    | 500                 | Anything else                                           |
+| Code                                    | Status              | Meaning                                                 |
+| --------------------------------------- | ------------------- | ------------------------------------------------------- |
+| `VALIDATION_FAILED`                     | 400                 | Request body failed validation                          |
+| `TOPIC_REJECTED`                        | 422                 | Topic, file name or rejected note violates policy       |
+| `RATE_LIMITED`                          | 429                 | A job, regeneration or upload budget; "Quota"           |
+| `JOB_NOT_FOUND`                         | 404                 | Unknown job id                                          |
+| `JOB_ALREADY_TERMINAL`                  | 409                 | Cancel on a finished job                                |
+| `IDEMPOTENCY_KEY_CONFLICT`              | 409                 | `Idempotency-Key` reused with a different request       |
+| `PROVIDER_UNAVAILABLE`                  | 200 in the job body | The model or search provider failed the job             |
+| `NO_VALID_CONTENT`                      | 200 in the job body | Every note was dropped; nothing safe to return          |
+| `NO_VALID_CONTENT`                      | 503 on regenerate   | No valid replacement note could be produced             |
+| `DOCUMENT_UNREADABLE`                   | 200 in the job body | Uploaded document is damaged or over a limit            |
+| `DOCUMENT_ENCRYPTED`                    | 200 in the job body | Uploaded PDF needs a password to open                   |
+| `DOCUMENT_HAS_NO_TEXT`                  | 200 in the job body | Uploaded document has no extractable text               |
+| `DOCUMENT_NOT_FOUND`                    | 200 in the job body | Uploaded document was gone when the job read it         |
+| `DOCUMENT_REJECTED`                     | 200 in the job body | Uploaded document's text violates content policy        |
+| `DOCUMENT_REGENERATION_UNSUPPORTED`     | 422 on regenerate   | A note of a document-sourced deck cannot be regenerated |
+| `DOCUMENT_NOT_SUPPORTED_FOR_GENERATION` | 422                 | The `documentId` names a recording, not generable yet   |
+| `GENERATION_FAILED`                     | 200 in the job body | The job failed for any other reason                     |
+| `UPSTREAM_UNAVAILABLE`                  | 503                 | A provider, quota store or object store is down         |
+| `DOCUMENT_NOT_FOUND`                    | 404                 | Unknown, foreign or expired document id                 |
+| `DOCUMENT_TOO_LARGE`                    | 413                 | Uploaded document is over the size limit                |
+| `UNSUPPORTED_DOCUMENT_TYPE`             | 415                 | Uploaded file is not a type the endpoint accepts        |
+| `RECORDING_TOO_LONG`                    | 422                 | Uploaded recording is over the duration cap             |
+| `ROUTE_NOT_FOUND`                       | 404                 | No endpoint exists at this path                         |
+| `METHOD_NOT_ALLOWED`                    | 405                 | Endpoint exists but not for this HTTP method            |
+| `INTERNAL_ERROR`                        | 500                 | Anything else                                           |
 
 Note the "200 in the job body" rows: a **failed job is not an HTTP error**. `GET
 /generations/{jobId}` returns `200` with `status: "failed"` and a populated `error` object.

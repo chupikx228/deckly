@@ -38,6 +38,10 @@ class DocumentRegenerationUnsupportedError(PolicyViolationError):
     pass
 
 
+class DocumentNotSupportedForGenerationError(PolicyViolationError):
+    pass
+
+
 class InvalidJobIdError(InvariantViolationError):
     pass
 
@@ -115,4 +119,8 @@ class DocumentTooLargeError(InvalidDocumentError):
 
 
 class UnsupportedDocumentError(InvalidDocumentError):
+    pass
+
+
+class RecordingTooLongError(InvalidDocumentError):
     pass

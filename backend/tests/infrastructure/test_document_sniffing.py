@@ -3,6 +3,7 @@ import zipfile
 
 import pytest
 
+from deckly.application.ports import InspectedUpload
 from deckly.domain.document import DocumentFormat
 from deckly.domain.exceptions import UnsupportedDocumentError
 from deckly.infrastructure.documents.archive import MAX_ARCHIVE_ENTRIES
@@ -154,7 +155,7 @@ def test_empty_file_is_rejected() -> None:
 
 
 async def test_inspector_reports_the_detected_format() -> None:
-    assert await ContentDocumentInspector().identify(pptx_bytes()) is DocumentFormat.PPTX
+    assert await ContentDocumentInspector().identify(pptx_bytes()) == InspectedUpload(DocumentFormat.PPTX)
 
 
 async def test_inspector_rejects_what_detection_rejects() -> None:

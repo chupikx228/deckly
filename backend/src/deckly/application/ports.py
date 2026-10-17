@@ -23,6 +23,7 @@ class AdmissionOutcome(StrEnum):
     REPLAYED = "replayed"
     TOPIC_REJECTED = "topic_rejected"
     DOCUMENT_NOT_FOUND = "document_not_found"
+    DOCUMENT_NOT_SUPPORTED = "document_not_supported"
 
 
 class JobOutcome(StrEnum):
@@ -112,6 +113,12 @@ class DocumentUpload:
 
 
 type UploadReader = Callable[[], Awaitable[DocumentUpload]]
+
+
+@dataclass(frozen=True, slots=True)
+class InspectedUpload:
+    document_format: DocumentFormat
+    duration_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,7 +236,7 @@ class UploadGate(Protocol):
 
 
 class DocumentInspector(Protocol):
-    async def identify(self, content: bytes) -> DocumentFormat: ...
+    async def identify(self, content: bytes) -> InspectedUpload: ...
 
 
 class DocumentStorage(Protocol):

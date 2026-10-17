@@ -22,8 +22,13 @@ from deckly.application.ports import (
     StoredJob,
     TopicModerator,
 )
-from deckly.domain.document import Document
-from deckly.domain.exceptions import DocumentNotFoundError, JobNotFoundError, TopicRejectedError
+from deckly.domain.document import Document, is_recording
+from deckly.domain.exceptions import (
+    DocumentNotFoundError,
+    DocumentNotSupportedForGenerationError,
+    JobNotFoundError,
+    TopicRejectedError,
+)
 from deckly.domain.generation import GenerationRequest
 from deckly.domain.job import GenerationJob, JobStatus
 
@@ -111,6 +116,14 @@ class CreateGeneration:
             self._document_missing(request)
             message = f"document {request.document_id} does not exist for this client"
             raise DocumentNotFoundError(message)
+        if is_recording(document.document_format):
+            logger.info(
+                "generation_document_not_supported",
+                extra={"document_id": str(document.document_id), "content_type": document.document_format},
+            )
+            self.telemetry.admitted(AdmissionOutcome.DOCUMENT_NOT_SUPPORTED, request.source_kind)
+            message = f"document {document.document_id} is a recording, which cannot be generated from yet"
+            raise DocumentNotSupportedForGenerationError(message)
         return document
 
     def _document_missing(self, request: GenerationRequest) -> None:

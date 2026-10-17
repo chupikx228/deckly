@@ -56,6 +56,7 @@ class UploadDocument:
                 "document_id": str(document.document_id),
                 "size_bytes": document.size_bytes,
                 "content_type": document.document_format,
+                "duration_seconds": document.duration_seconds,
             },
         )
         return document
@@ -66,14 +67,15 @@ class UploadDocument:
             message = f"the document is {size_bytes} bytes, over the {self.max_bytes} byte limit"
             raise DocumentTooLargeError(message)
         filename = clean_filename(upload.filename)
-        document_format = await self.inspector.identify(upload.content)
+        inspected = await self.inspector.identify(upload.content)
         return Document(
             document_id=self.new_document_id(),
             client_id=client_id,
             filename=filename,
             size_bytes=size_bytes,
-            document_format=document_format,
+            document_format=inspected.document_format,
             uploaded_at=self.clock(),
+            duration_seconds=inspected.duration_seconds,
         )
 
     async def _withdraw(self, document: Document) -> None:

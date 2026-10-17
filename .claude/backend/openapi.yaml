@@ -23,7 +23,7 @@ tags:
   - name: notes
     description: Single-note operations
   - name: documents
-    description: Source documents uploaded as generation input
+    description: Source documents and recordings uploaded as generation input
   - name: system
 
 paths:
@@ -40,7 +40,10 @@ paths:
         The request is screened against the content policy (the topic, or the document's file
         name, together with the instructions) and one that violates it is 422 TOPIC_REJECTED. A
         document's text is screened again by the worker before any card is written from it; a
-        document that violates the policy fails the job with DOCUMENT_REJECTED.
+        document that violates the policy fails the job with DOCUMENT_REJECTED. A documentId that
+        names an audio or video recording uploaded with POST /recordings is 422
+        DOCUMENT_NOT_SUPPORTED_FOR_GENERATION until transcription exists (DEC-86), refused before
+        the quota is used.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/ClientId'
@@ -198,6 +201,53 @@ paths:
         '413':
           $ref: '#/components/responses/Problem'
         '415':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+
+  /recordings:
+    post:
+      tags: [documents]
+      operationId: uploadRecording
+      summary: Upload an audio or video recording
+      description: >
+        Stores one MP3, M4A, WAV, MP4 or MOV file so a later request can refer to it by its
+        documentId, like an uploaded document (it is read with GET /documents/{documentId} and
+        expires the same way). The type is decided from the file's content, never from its name or
+        the declared Content-Type, so a renamed file of another type is 415
+        UNSUPPORTED_DOCUMENT_TYPE, as are video files without an audio track, fragmented MP4,
+        encrypted (DRM) audio, images in an MP4-family container (HEIC, AVIF), and damaged or
+        truncated files. The duration is read from the container's own metadata, never by decoding
+        the audio, and a recording longer than the limit (15 minutes by default) is 422
+        RECORDING_TOO_LONG. A file over the size limit (48 MiB by default) is 413
+        DOCUMENT_TOO_LARGE and is refused before it is stored. Uploads share the document upload
+        budget (429 RATE_LIMITED) and have their own concurrency limit (503 UPSTREAM_UNAVAILABLE
+        with Retry-After when every slot is taken). Generating from a recording is not supported
+        yet: POST /generations answers 422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION.
+      parameters:
+        - $ref: '#/components/parameters/ClientId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/DocumentUploadRequest'
+      responses:
+        '201':
+          description: The recording was stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '413':
+          $ref: '#/components/responses/Problem'
+        '415':
+          $ref: '#/components/responses/Problem'
+        '422':
           $ref: '#/components/responses/Problem'
         '429':
           $ref: '#/components/responses/Problem'
@@ -362,10 +412,12 @@ components:
         - DOCUMENT_HAS_NO_TEXT
         - DOCUMENT_REJECTED
         - DOCUMENT_REGENERATION_UNSUPPORTED
+        - DOCUMENT_NOT_SUPPORTED_FOR_GENERATION
         - UPSTREAM_UNAVAILABLE
         - DOCUMENT_NOT_FOUND
         - DOCUMENT_TOO_LARGE
         - UNSUPPORTED_DOCUMENT_TYPE
+        - RECORDING_TOO_LONG
         - ROUTE_NOT_FOUND
         - METHOD_NOT_ALLOWED
         - INTERNAL_ERROR
@@ -376,6 +428,11 @@ components:
       enum:
         - application/pdf
         - application/vnd.openxmlformats-officedocument.presentationml.presentation
+        - audio/mpeg
+        - audio/mp4
+        - audio/wav
+        - video/mp4
+        - video/quicktime
 
     DocumentUploadRequest:
       type: object
@@ -386,9 +443,9 @@ components:
           type: string
           format: binary
           description: >
-            The document, as the only part of the form. Its filename is kept for display, cut to
-            its last path component and 255 characters, with control and invisible characters
-            removed; a name with nothing left is 400 VALIDATION_FAILED.
+            The document or recording, as the only part of the form. Its filename is kept for
+            display, cut to its last path component and 255 characters, with control and invisible
+            characters removed; a name with nothing left is 400 VALIDATION_FAILED.
 
     Document:
       type: object
@@ -410,6 +467,12 @@ components:
         uploadedAt:
           type: string
           format: date-time
+        durationSeconds:
+          type: number
+          exclusiveMinimum: 0
+          description: >
+            Present only for a recording: its length in seconds as its container's metadata gives
+            it, never shorter than what a decoder would play.
 
     RejectionReason:
       type: string
