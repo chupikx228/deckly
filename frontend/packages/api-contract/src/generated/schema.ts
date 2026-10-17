@@ -109,9 +109,29 @@ export interface paths {
         put?: never;
         /**
          * Upload an audio or video recording
-         * @description Stores one MP3, M4A, WAV, MP4 or MOV file so a later request can refer to it by its documentId, like an uploaded document (it is read with GET /documents/{documentId} and expires the same way). The type is decided from the file's content, never from its name or the declared Content-Type, so a renamed file of another type is 415 UNSUPPORTED_DOCUMENT_TYPE, as are video files without an audio track, fragmented MP4, encrypted (DRM) audio, images in an MP4-family container (HEIC, AVIF), and damaged or truncated files. The duration is read from the container's own metadata, never by decoding the audio, and a recording longer than the limit (15 minutes by default) is 422 RECORDING_TOO_LONG. A file over the size limit (48 MiB by default) is 413 DOCUMENT_TOO_LARGE and is refused before it is stored. Uploads share the document upload budget (429 RATE_LIMITED) and have their own concurrency limit (503 UPSTREAM_UNAVAILABLE with Retry-After when every slot is taken). Generating from a recording is not supported yet: POST /generations answers 422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION.
+         * @description Stores one MP3, M4A, WAV, MP4 or MOV file so a later request can refer to it by its documentId, like an uploaded document (it is read with GET /documents/{documentId} and expires the same way). The type is decided from the file's content, never from its name or the declared Content-Type, so a renamed file of another type is 415 UNSUPPORTED_DOCUMENT_TYPE, as are video files without an audio track, encrypted (DRM) audio, images in an MP4-family container (HEIC, AVIF), and damaged or truncated files. Fragmented MP4 (DASH) is accepted. The duration is read from the container's own metadata, never by decoding the audio, and a recording longer than the limit (15 minutes by default) is 422 RECORDING_TOO_LONG. A file over the size limit (48 MiB by default) is 413 DOCUMENT_TOO_LARGE and is refused before it is stored. Uploads share the document upload budget (429 RATE_LIMITED) and have their own concurrency limit (503 UPSTREAM_UNAVAILABLE with Retry-After when every slot is taken). Generating from a recording is not supported yet: POST /generations answers 422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION.
          */
         post: operations["uploadRecording"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/recordings/from-url": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Store the audio of a YouTube video
+         * @description Fetches the audio-only M4A stream of one YouTube video and stores it exactly like an uploaded recording: the same documentId, GET /documents/{documentId}, retention, and Document body (contentType audio/mp4, durationSeconds from the stored file). Only links to a single video on youtube.com, www/m/music.youtube.com or youtu.be are accepted (watch, shorts, live and embed links); anything else, including playlists, channels and other sites, is 422 UNSUPPORTED_RECORDING_URL before anything is fetched or counted. The duration is checked against the cap (15 minutes by default) from the platform's metadata before any audio is downloaded, and again from the downloaded file (422 RECORDING_TOO_LONG either way). A private, removed, age- or region-restricted, members-only, live or upcoming video is 422 RECORDING_UNAVAILABLE. Audio over the size limit is 413 DOCUMENT_TOO_LARGE. URL fetches have their own budget (429 RATE_LIMITED), separate from uploads, and their own concurrency limit; a full one, a fetch the server could not complete (including YouTube refusing the server), or one that took too long is 503 UPSTREAM_UNAVAILABLE with Retry-After. The request is answered when the audio is stored, which can take up to the fetch deadline (120 seconds by default).
+         */
+        post: operations["fetchRecording"];
         delete?: never;
         options?: never;
         head?: never;
@@ -168,7 +188,7 @@ export interface components {
         /** @enum {string} */
         JobStage: "planning" | "retrieving_sources" | "parsing_sources" | "generating_cards" | "fetching_media" | "finalizing";
         /** @enum {string} */
-        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "DOCUMENT_UNREADABLE" | "DOCUMENT_ENCRYPTED" | "DOCUMENT_HAS_NO_TEXT" | "DOCUMENT_REJECTED" | "DOCUMENT_REGENERATION_UNSUPPORTED" | "DOCUMENT_NOT_SUPPORTED_FOR_GENERATION" | "UPSTREAM_UNAVAILABLE" | "DOCUMENT_NOT_FOUND" | "DOCUMENT_TOO_LARGE" | "UNSUPPORTED_DOCUMENT_TYPE" | "RECORDING_TOO_LONG" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
+        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "DOCUMENT_UNREADABLE" | "DOCUMENT_ENCRYPTED" | "DOCUMENT_HAS_NO_TEXT" | "DOCUMENT_REJECTED" | "DOCUMENT_REGENERATION_UNSUPPORTED" | "DOCUMENT_NOT_SUPPORTED_FOR_GENERATION" | "UPSTREAM_UNAVAILABLE" | "DOCUMENT_NOT_FOUND" | "DOCUMENT_TOO_LARGE" | "UNSUPPORTED_DOCUMENT_TYPE" | "RECORDING_TOO_LONG" | "UNSUPPORTED_RECORDING_URL" | "RECORDING_UNAVAILABLE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
         /**
          * @description The type detected from the file's content.
          * @enum {string}
@@ -180,6 +200,10 @@ export interface components {
              * @description The document or recording, as the only part of the form. Its filename is kept for display, cut to its last path component and 255 characters, with control and invisible characters removed; a name with nothing left is 400 VALIDATION_FAILED.
              */
             file: string;
+        };
+        RecordingUrlRequest: {
+            /** @description A link to one YouTube video, e.g. https://www.youtube.com/watch?v=jNQXAC9IVRw or https://youtu.be/jNQXAC9IVRw. Surrounding whitespace is ignored. */
+            url: string;
         };
         Document: {
             /** Format: uuid */
@@ -598,6 +622,39 @@ export interface operations {
         };
         responses: {
             /** @description The recording was stored */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Document"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            413: components["responses"]["Problem"];
+            415: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+            429: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    fetchRecording: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Anonymous device identifier, used for rate limiting. Version 4 UUID in canonical form only: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. */
+                "X-Client-Id": components["parameters"]["ClientId"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecordingUrlRequest"];
+            };
+        };
+        responses: {
+            /** @description The recording was fetched and stored */
             201: {
                 headers: {
                     [name: string]: unknown;

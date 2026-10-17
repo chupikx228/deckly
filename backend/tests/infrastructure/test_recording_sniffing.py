@@ -263,7 +263,10 @@ def test_sample_table_with_more_entries_than_the_budget_is_rejected_quickly() ->
 
 def test_entry_budget_is_shared_by_every_track() -> None:
     half = uniform_time_to_sample(MAX_TIME_TO_SAMPLE_ENTRIES // 2 + 1, 0)
-    tracks = [track(stts=half), track(stts=half)]
+    tracks = [
+        Track(entry_format=b"sowt", stts=half).encode(),
+        Track(entry_format=b"sowt", stts=half).encode(),
+    ]
 
     unsupported(isobmff(movie(*tracks)))
 
@@ -748,7 +751,7 @@ def test_mp3_exactly_at_the_cap_is_accepted_and_one_frame_more_is_too_long() -> 
 def test_sample_table_exactly_at_the_cap_is_accepted_and_one_tick_more_is_too_long() -> None:
     def lying(extra: int) -> bytes:
         table = time_to_sample([(SHORT_CAP_SECONDS * SOUND_TIMESCALE + extra, 1)])
-        return isobmff(movie(track(media_duration=1, stts=table), seconds=1))
+        return isobmff(movie(Track(entry_format=b"sowt", media_duration=1, stts=table).encode(), seconds=1))
 
     assert probe(lying(0), cap=SHORT_CAP_SECONDS).duration_seconds == SHORT_CAP_SECONDS
     too_long(lying(1), cap=SHORT_CAP_SECONDS)

@@ -9,6 +9,7 @@ GENERATION_QUEUE = "generation"
 MODERATION_GATE = "moderation"
 DOCUMENT_UPLOAD_GATE = "document_upload"
 RECORDING_UPLOAD_GATE = "recording_upload"
+RECORDING_URL_GATE = "recording_url"
 PROVIDER_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0, 90.0, 180.0)
 
 
@@ -30,6 +31,9 @@ class RateLimit(StrEnum):
     NOTE_REGENERATION = "note_regeneration"
     DOCUMENT_UPLOAD_CLIENT = "document_upload_client"
     DOCUMENT_UPLOAD_ADDRESS = "document_upload_address"
+    RECORDING_URL_CLIENT = "recording_url_client"
+    RECORDING_URL_ADDRESS = "recording_url_address"
+    RECORDING_URL_SERVER = "recording_url_server"
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +55,8 @@ class Metrics:
     gate_wait: Histogram
     gate_rejections: Counter
     rate_limit_rejections: Counter
+    recording_url_fetches: Counter
+    recording_url_egress_refusals: Counter
 
 
 def create_metrics() -> Metrics:
@@ -154,6 +160,18 @@ def create_metrics() -> Metrics:
             "deckly_rate_limit_rejections",
             "Requests refused by a rate limit, by limit.",
             ["limit"],
+            registry=registry,
+        ),
+        recording_url_fetches=Counter(
+            "deckly_recording_url_fetches",
+            "Recordings fetched from a URL, by outcome.",
+            ["outcome"],
+            registry=registry,
+        ),
+        recording_url_egress_refusals=Counter(
+            "deckly_recording_url_egress_refusals",
+            "Connections the recording fetch egress proxy refused, by reason.",
+            ["reason"],
             registry=registry,
         ),
     )

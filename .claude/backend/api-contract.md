@@ -22,8 +22,8 @@ Therefore in v1 there are:
 Adding any of these silently would break the offline guarantee. If the backend needs one,
 raise it as a contract change first.
 
-Uploaded documents (`POST /documents`) and recordings (`POST /recordings`) are not user data the
-backend owns. They are short-lived
+Uploaded documents (`POST /documents`) and recordings (`POST /recordings`, or fetched with
+`POST /recordings/from-url`) are not user data the backend owns. They are short-lived
 inputs to generation, readable only by the client that uploaded them, and deleted 24 hours after
 upload unless a generation uses them; a document a generation used is deleted once the last job
 that used it is.
@@ -411,7 +411,7 @@ refers to.
 - **Type is decided by content.** MP3 (MPEG-1/2/2.5 layer III, optionally ID3-tagged), M4A
   (`audio/mp4`), WAV (uncompressed PCM or floating point), MP4 (`video/mp4`) and MOV
   (`video/quicktime`). Everything else is `415 UNSUPPORTED_DOCUMENT_TYPE`: PDFs and other files
-  renamed to `.mp3`, Ogg/Opus, WebM, FLAC, AMR, 3GP, raw AAC, fragmented MP4, DRM-protected audio,
+  renamed to `.mp3`, Ogg/Opus, WebM, FLAC, AMR, 3GP, raw AAC, DRM-protected audio,
   HEIC and AVIF images (they share the MP4 container), a video with no audio track, a recording
   whose metadata is internally inconsistent, and damaged or truncated files. `contentType` is the
   detected type. A recording sent to `POST /documents` is `415` there too.
@@ -431,6 +431,56 @@ refers to.
 - **Retention** is the same as for documents.
 - **Not yet a generation source.** `POST /generations` with a recording's `documentId` is
   `422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION` until transcription exists (DEC-86).
+
+### `POST /v1/recordings/from-url`
+
+Fetches the audio of one YouTube video and stores it as a recording. Returns `201` with the same
+metadata body as `POST /recordings`; the reply's `documentId` is used exactly like an uploaded
+recording's, and nothing downstream can tell the two apart. `X-Client-Id` is required.
+
+```json
+{ "url": "https://youtu.be/jNQXAC9IVRw" }
+```
+
+```json
+{
+  "documentId": "…",
+  "filename": "Me at the zoo.m4a",
+  "sizeBytes": 309288,
+  "contentType": "audio/mp4",
+  "uploadedAt": "2026-10-17T10:30:00Z",
+  "durationSeconds": 19.064
+}
+```
+
+- **Which links.** A link to a single video on `youtube.com`, `www.youtube.com`, `m.youtube.com`,
+  `music.youtube.com` (`/watch?v=…`, `/shorts/…`, `/live/…`, `/embed/…`) or `youtu.be/…`, `http` or
+  `https`, with no credentials or port. Extra query parameters (`t`, `list`, `si`) are ignored.
+  Anything else — other sites, playlists and channels, IP addresses, look-alike hosts — is
+  `422 UNSUPPORTED_RECORDING_URL`, decided before anything is fetched, counted or queued. Only the
+  11-character video id is taken from the link; the server builds the YouTube URL itself.
+- **Body.** JSON with exactly one field, `url` (1–2048 characters). Anything else is
+  `400 VALIDATION_FAILED`.
+- **Duration.** Checked twice: from YouTube's metadata before any audio is downloaded, and from the
+  stored file with the same probe as uploads. Over the cap either way is `422 RECORDING_TOO_LONG`.
+  `durationSeconds` comes from the file, not from YouTube.
+- **Unavailable videos.** A private, removed, age-restricted, region-blocked or members-only video,
+  a live stream, an upcoming premiere, and a video without an audio-only M4A stream are
+  `422 RECORDING_UNAVAILABLE`.
+- **Size.** The audio counts against the recording size limit (48 MiB by default):
+  `413 DOCUMENT_TOO_LARGE`, refused from the metadata when YouTube states a size, and otherwise as
+  soon as the download passes the limit.
+- **Budget and capacity.** URL fetches have their **own** budget, separate from uploads: 5 per hour
+  per `X-Client-Id`, 20 per network address and 200 per hour for the whole server
+  (`429 RATE_LIMITED`, see "Quota"). Their own concurrency limit
+  (`DECKLY_LIMIT_RECORDING_URL_MAX_CONCURRENCY`, 1 by default, per API process) is
+  `503 UPSTREAM_UNAVAILABLE` with `Retry-After: 5` when full, before the budget is spent.
+- **Slow by nature.** The response is sent once the audio is stored, typically a few seconds and at
+  most `DECKLY_LIMIT_RECORDING_URL_TIMEOUT_SECONDS` (120 by default). A fetch that does not finish in
+  time, that YouTube refuses (YouTube blocks many datacenter addresses), or that fails for any other
+  upstream reason is `503 UPSTREAM_UNAVAILABLE` with `Retry-After: 60`; the attempt was counted.
+- **Retention** is the same as for documents. **No idempotency key**: retrying stores a second copy.
+- **Not yet a generation source**, like any recording (DEC-86).
 
 ### `GET /v1/documents/{documentId}`
 
@@ -527,6 +577,16 @@ valid headers counts, including one later refused for its size or type. The budg
 the body is read, and an upload whose `Content-Length` is already over the size limit is refused
 before it is counted. When Redis cannot be reached in time the upload is `503 UPSTREAM_UNAVAILABLE`,
 never accepted unmetered. This budget is not reported in `quota`.
+
+`POST /recordings/from-url` has a fourth budget of its own, because every fetch makes the server
+download from YouTube on the client's behalf: by default 5 per hour per `X-Client-Id`
+(`DECKLY_LIMIT_RECORDING_URL_FETCHES_PER_WINDOW`), 20 per network address
+(`DECKLY_LIMIT_RECORDING_URL_FETCHES_PER_ADDRESS_PER_WINDOW`, IPv6 grouped by /56) and 200 for the
+whole server (`DECKLY_LIMIT_RECORDING_URL_SERVER_FETCHES_PER_WINDOW`), in fixed one-hour windows
+(`DECKLY_LIMIT_RECORDING_URL_WINDOW_SECONDS`). Every request with a supported link counts, including
+one later refused for its duration, size or availability; an unsupported link and a request refused
+because every fetch slot is busy do not. When Redis cannot be reached in time the fetch is
+`503 UPSTREAM_UNAVAILABLE`. This budget is not reported in `quota`.
 
 ## Note field shapes
 
@@ -672,7 +732,9 @@ localised and is for logs.
 | `DOCUMENT_NOT_FOUND`                    | 404                 | Unknown, foreign or expired document id                 |
 | `DOCUMENT_TOO_LARGE`                    | 413                 | Uploaded document is over the size limit                |
 | `UNSUPPORTED_DOCUMENT_TYPE`             | 415                 | Uploaded file is not a type the endpoint accepts        |
-| `RECORDING_TOO_LONG`                    | 422                 | Uploaded recording is over the duration cap             |
+| `RECORDING_TOO_LONG`                    | 422                 | Uploaded or fetched recording is over the duration cap  |
+| `UNSUPPORTED_RECORDING_URL`             | 422                 | The link is not to a single YouTube video               |
+| `RECORDING_UNAVAILABLE`                 | 422                 | The video is private, removed, restricted or live       |
 | `ROUTE_NOT_FOUND`                       | 404                 | No endpoint exists at this path                         |
 | `METHOD_NOT_ALLOWED`                    | 405                 | Endpoint exists but not for this HTTP method            |
 | `INTERNAL_ERROR`                        | 500                 | Anything else                                           |

@@ -37,7 +37,11 @@ from deckly.infrastructure.documents.store import (
 )
 from deckly.infrastructure.job_store import PostgresJobHousekeeping, PostgresJobStore
 from deckly.infrastructure.moderation.moderator import LlmContentModerator, LlmMaterialModerator
-from deckly.infrastructure.observability.metrics import DOCUMENT_UPLOAD_GATE, RECORDING_UPLOAD_GATE
+from deckly.infrastructure.observability.metrics import (
+    DOCUMENT_UPLOAD_GATE,
+    RECORDING_UPLOAD_GATE,
+    RECORDING_URL_GATE,
+)
 from deckly.infrastructure.recordings.sniffing import detect_recording
 from deckly.infrastructure.tables import DocumentRow, GenerationJobRow
 from deckly.infrastructure.upload_gate import UPLOAD_CAPACITY_RETRY_AFTER_SECONDS, RejectingUploadGate
@@ -1020,7 +1024,8 @@ async def test_recording_gate_reports_its_own_limit_on_the_metrics_endpoint(sett
     with app_client(settings) as client:
         scraped = client.get("/metrics").text
 
-    assert f'deckly_gate_limit{{gate="{RECORDING_UPLOAD_GATE}"}} 2.0' in scraped
+    assert f'deckly_gate_limit{{gate="{RECORDING_UPLOAD_GATE}"}} 1.0' in scraped
+    assert f'deckly_gate_limit{{gate="{RECORDING_URL_GATE}"}} 1.0' in scraped
     assert f'deckly_gate_limit{{gate="{DOCUMENT_UPLOAD_GATE}"}} 4.0' in scraped
 
 

@@ -15,7 +15,8 @@ src/deckly/
   domain/            pure business rules; domain errors
   infrastructure/    adapters: async SQLAlchemy + asyncpg, Arq/Redis, JSON logging, web search and
                      source parsing (Tavily), the LLM card generator (Anthropic, DeepSeek or
-                     Gemini), S3-compatible document storage and the retry/circuit-breaker layer
+                     Gemini), S3-compatible document storage, recording fetches from YouTube
+                     (yt-dlp behind an egress proxy) and the retry/circuit-breaker layer
   worker/            Arq worker entrypoint, WorkerSettings and its composition root
 migrations/          Alembic (async)
 ```
@@ -909,7 +910,8 @@ garbage collection: roughly 400 MiB, and 400 / 50 = 8. A slot is sized for a ful
 upload only holds what it has received so far, so a typical few-MiB lecture deck costs far less and 8
 slots is conservative for the usual mix. **The cap and `DECKLY_LIMIT_DOCUMENT_MAX_BYTES` are tied, and
 the tie is enforced at startup:** the process refuses to start when cap x size limit x 2 exceeds
-`DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES` (default 400 MiB, the budget above), and the error
+`DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES` (400 MiB, the budget above, until DEC-85 raised it to
+1,288 MiB, see below), and the error
 names the three values and the settings to change. Raising the size limit to 100 MiB with a cap of 8
 puts the worst case at 1.6 GiB, so the budget, the cap or the limit has to move with it.
 
@@ -917,7 +919,26 @@ _Since DEC-84 the budget is shared with recording uploads_, which have their own
 MiB) in the same process, so the check is the same formula summed over both gates: (document cap x
 document limit + recording cap x recording limit) x 2 <= budget. Keeping the 1 GiB container and the
 400 MiB budget, the document cap went from 8 to 4: (4 x 25 + 2 x 48) x 2 = 392 MiB, 8 MiB under the
-budget. Four concurrent document uploads is still far above what per-client limits produce with no
+budget.
+
+_Since DEC-85 the check also carries the URL fetch's subprocesses._ The two recording slots became one
+for uploads and one for URL fetches (`DECKLY_LIMIT_RECORDING_URL_MAX_CONCURRENCY`). A URL slot holds
+up to a recording's worth of bytes in the API process, like an upload, and while it runs, yt-dlp and
+deno run beside the API in the same container. Their summed resident memory peaked at **394–422 MiB**
+during the metadata step (three runs that needed deno's JavaScript solver; 59 MiB in one that did not)
+and 48–55 MiB during the download, measured on macOS by polling the RSS of the whole process group
+every 10 ms for a 19-second and a 3.5-minute video. `RECORDING_URL_SUBPROCESS_PEAK_BYTES` is that peak
+rounded up to 448 MiB, per URL slot, and it goes **inside the same x 2 margin** as every other term:
+the figure comes from four samples on macOS, the deployment is likely Linux with a different Deno/V8
+memory profile, and the check treats every term the same way rather than special-casing one. So the
+check is now (document cap x document limit + (recording cap + URL cap) x recording limit + URL cap x
+448 MiB) x 2 <= budget, and the defaults need (4 x 25 + 1 x 48 + 1 x 48 + 1 x 448) x 2 = **1,288 MiB**,
+which is the new default budget, with nothing to spare (the old 400 MiB cannot hold even one URL
+slot: 448 x 2 alone is 896 MiB). **The container assumption moves from 1 GiB to about 2 GiB:** 200 MiB
+of baseline plus the 1,288 MiB budget leaves about 560 MiB for the other endpoints and garbage
+collection, less than the half DEC-78 kept free (that posture would need about 2.75 GiB); the slack now
+lives in the margin inside the budget. Measure the subprocess peak on the deployment target and adjust
+the constant if Linux differs. Four concurrent document uploads is still far above what per-client limits produce with no
 production traffic; revisit with `deckly_gate_rejections_total{gate="document_upload"}` if 4 proves
 tight, by raising the budget to what the container really has rather than by trimming the margin.
 The 2 is the margin measured above and is not a setting. The budget is an assumption about the
@@ -1289,9 +1310,9 @@ M4A, MP4 and MOV are one container family (ISO base media / QuickTime), so one p
 of the five. Left out, each a `415`: **Ogg/Opus** (Telegram and WhatsApp voice notes; the most
 likely next format, and cheap to probe, the last page's granule position is the length),
 **WebM** (Chrome's MediaRecorder writes no Duration element, so there is nothing cheap to read),
-**3GP/AMR, raw ADTS `.aac`, FLAC** (rare, or no duration header), **fragmented MP4** (the duration
-lives in every `moof`, not in `moov`), and **QuickTime files without an `ftyp` box** (pre-2005; every
-iPhone writes `ftyp qt  `).
+**3GP/AMR, raw ADTS `.aac`, FLAC** (rare, or no duration header), and **QuickTime files without an
+`ftyp` box** (pre-2005; every iPhone writes `ftyp qt  `). **Fragmented MP4** (DASH, what YouTube
+serves) is accepted since DEC-85, with AAC audio only (see "Fragmented MP4" below).
 
 ### Sniffing and the duration probe
 
@@ -1306,8 +1327,8 @@ its parser from the file extension first, which is exactly what sniffing must no
 compatible brands include an accepted one (`M4A `, `M4B `, `qt  `, `isom`, `iso2`–`iso6`, `mp41`,
 `mp42`, `avc1`, `M4V `, `MSNV`), and whose major brand is not FairPlay (`M4P `) or an image (`heic`,
 `mif1`, `avif`, …). Boxes are walked by their 32- or 64-bit sizes; a box that runs past its parent
-is refused, which also catches truncated uploads. There must be exactly one `moov`, no `mvex` or
-`moof` (fragmented), and at least one `soun` track whose first sample entry is not encrypted
+is refused, which also catches truncated uploads. There must be exactly one `moov`, `moof` boxes only
+when it has an `mvex`, and at least one `soun` track whose first sample entry is not encrypted
 (`enca`, `drms`). The duration is the largest of the movie header, each audio track's media header
 and the sum of its time-to-sample table (`stts`), which is what a decoder actually follows. Format:
 `qt  ` major brand is MOV, otherwise MP4 with a video track and M4A without one.
@@ -1348,12 +1369,36 @@ The first three scale with file size: a 48 MiB file could hide hours. The fourth
 differential rather than a measured bypass; refusing it removes the question of which copy wins.
 Edit lists (`elst`) that repeat the media were tested too and do not amplify.
 
-**The probe is a gate, not the guarantee.** One case cannot be closed from metadata. A time-to-sample
-delta of 1 on AAC packets (1,024 samples each) makes the container claim 1/1024 of the real length.
-ffmpeg's CLI follows the timestamps and decoded 0.06 s of such a file, but a decoder that
-concatenates every packet (PyAV, which faster-whisper uses) would decode all of it. **DEC-86 must
-therefore bound transcription by decoded samples, not timestamps**: stop after cap x sample rate
-samples, or cap the extracted PCM's size (`-fs`), not only `-t`.
+**Fragmented MP4** (`recordings/fragments.py`, DEC-85). Each `moof`'s `traf` is matched to its track
+by the `tfhd` track id (a fragment of an undeclared track is refused), and each `trun` adds its
+samples: per-sample durations when present, otherwise the `tfhd` default, otherwise the track's `trex`
+default; samples with no duration from any of the three are refused. A sound track's length is its
+`moov` samples plus every fragment's, and the movie-extends header (`mehd`) joins the candidates the
+duration is the largest of. `sidx` is an index and is ignored. Fragment boxes have their own budget,
+16,384, which is about 1,600 fragments as YouTube lays them out (ten boxes each) and so about 4.5
+hours of its 10-second fragments, above the 4-hour duration ceiling; a flood of empty `moof`s is
+refused in 11 ms, and the walk still stops as soon as a track passes the cap. A fragmented recording's audio must be
+AAC (below), because fragments are where ffmpeg decodes every packet whatever the timestamps say.
+
+**The AAC packet floor (DEC-85).** DEC-84 left one case open: a time-to-sample delta of 1 on AAC
+packets (1,024 samples each) makes the container claim 1/1024 of the real length. DEC-85's bug hunt
+found it worse in fragments, where **ffmpeg's CLI decodes all of it** (a fragmented file with `tfhd`
+defaults of 1 probed at 0.002 s and decoded 2.11 s). It is now closed for AAC, in fragmented and plain
+files alike: every AAC track is at least `packets x 960 / sample rate` long (960 is the shortest AAC
+frame; 480 for the low-delay object types 23 and 39), so the claim can understate the decoded length
+by at most 1024/960. The rate and the codec come from the `esds` AudioSpecificConfig, which is what
+the decoder reads, never from the sample entry: the bug hunt showed a sample entry claiming 65,535 Hz
+on 16 kHz audio (probe 0.48 s, decoded 2.11 s) and a sample entry relabelled `alac` over AAC data
+(probe 0.002 s, decoded 2.11 s, because ffmpeg picks the codec from `esds`). An `mp4a` entry without a
+readable `esds` is now `415`, as is a reserved or out-of-range (7.35–96 kHz) frequency. `esds` is
+found after the sample entry's fixed fields for sound description versions 0, 1 and 2, directly or in
+QuickTime's `wave` atom (iPhone MOV files keep it there).
+
+**The probe is still a gate, not the guarantee.** Codecs other than AAC in a plain (unfragmented) MP4
+or MOV, MP3-in-MP4 for one, have no floor, so DEC-84's open case remains for them; ffmpeg's CLI
+follows their timestamps, but a decoder that concatenates every packet (PyAV, which faster-whisper
+uses) would not. **DEC-86 must still bound transcription by decoded samples, not timestamps**: stop
+after cap x sample rate samples, or cap the extracted PCM's size (`-fs`), not only `-t`.
 
 ### Duration cap
 
@@ -1400,7 +1445,7 @@ phone video is an audio-only export on the device (`AVAssetExportPresetAppleM4A`
 `MediaExtractor`/`MediaMuxer` remux on Android, neither needs ffmpeg), a frontend follow-up.
 
 The upload is held in memory like a document's (`read_upload`), so the limit is also a memory
-figure. The recording gate (`DECKLY_LIMIT_RECORDING_UPLOAD_MAX_CONCURRENCY`, default 2, 1 to 8,
+figure. The recording gate (`DECKLY_LIMIT_RECORDING_UPLOAD_MAX_CONCURRENCY`, default 1 since DEC-85, 2 before, 1 to 8,
 metric label `recording_upload`) shares the DEC-78 budget through the summed check described under
 "Concurrency cap", which is why document slots went from 8 to 4. A full recording gate refuses
 recordings at once with `503` and `Retry-After: 5` and does not touch document uploads. The read
@@ -1473,6 +1518,11 @@ ffmpeg "${q[@]}" -f lavfi -i testsrc=size=32x32:rate=5:duration=2 -c:v libx264 -
 afconvert -f m4af -d aac source.wav apple.m4a        # source.wav: the 44.1 kHz sine above
 avconvert --source clip.mp4 --preset PresetLowQuality --output apple.mov
 sips -s format heic red.png --out red.heic           # red.png: one 16x16 frame of lavfi color=c=red
+ffmpeg "${q[@]}" -f lavfi -i sine=frequency=440:sample_rate=16000:duration=2 -ac 1 -c:a aac -b:a 24k \
+  -movflags +dash+global_sidx -frag_duration 500000 -f mp4 tone-fragmented.m4a   # DEC-85, DASH like YouTube
+ffmpeg "${q[@]}" -f lavfi -i testsrc=size=32x32:rate=5:duration=2 -f lavfi -i sine=frequency=440:sample_rate=16000:duration=2 \
+  -c:v libx264 -preset ultrafast -crf 51 -pix_fmt yuv420p -c:a aac -b:a 24k -ac 1 -shortest \
+  -movflags +frag_keyframe+empty_moov+default_base_moof -f mp4 clip-fragmented.mp4
 ```
 
 ### Not done here
@@ -1482,8 +1532,196 @@ sips -s format heic red.png --out red.heic           # red.png: one 16x16 frame 
 - **Frontend:** the mobile app does not call `POST /v1/recordings`. Its generated contract types
   are regenerated, but the Zod schemas and the mock transport do not know the endpoint. Audio-only
   export of phone video belongs there too.
-- **Formats:** Ogg/Opus first, then fragmented MP4 if real files show up.
+- **Formats:** Ogg/Opus first. Fragmented MP4 is done (DEC-85).
 - **Larger video:** streaming uploads to disk (see "Size limit and memory").
+
+## Recordings from a URL
+
+`POST /v1/recordings/from-url` (DEC-85) takes `{"url": "<YouTube link>"}`, fetches the video's
+audio-only M4A stream and stores it as a recording. It is `UploadDocument` wired a third time, with a
+fetch in place of the request body, so the result goes through the same size check, the same duration
+probe, the same `documents` row, object key, retention and sweep as an upload. Nothing downstream can
+tell which path produced a `documentId`; DEC-86 needs no branch for it. The contract is in
+`api-contract.md`; the code is `domain/recording_url.py` (the link) and
+`infrastructure/recording_url/` (the egress proxy, the yt-dlp runner and the fetcher).
+
+### Production caveat: YouTube blocks datacenter addresses
+
+**This feature may not work from a cloud server at all.** YouTube answers many datacenter and VPN
+addresses with "Sign in to confirm you're not a bot", and as of this writing the PO-token workarounds
+no longer get past it in most cases (bgutil-ytdlp-pot-provider's own notice). The fixes that work are a
+residential or otherwise trusted egress address, or a logged-in account's cookies; this service uses
+neither (cookies would tie every user's fetch to one Google account, against its terms and at the risk
+of that account). It fails cleanly instead: the request is `503 UPSTREAM_UNAVAILABLE` with
+`Retry-After: 60`, logged as `recording_url_fetch_failed` with `outcome="blocked"`, and counted in
+`deckly_recording_url_fetches_total{outcome="blocked"}`. **Alert on that series** after deploying.
+`make test-live` proves the feature from a developer's machine (two tests, about 5 seconds); it says
+nothing about the production address.
+
+### Terms of service
+
+Downloading from YouTube is restricted by YouTube's Terms of Service, which allow downloads only where
+YouTube offers a download button or link, and other platforms have their own terms. This is not a
+legal opinion, only a statement that the constraint exists. It has to be reviewed before this endpoint
+is exposed to real users, like the other pre-production notes in this README.
+
+### Downloader: yt-dlp
+
+Researched to the same depth as DEC-8 (Tavily), DEC-9 (Commons) and DEC-84 (the probe):
+
+- **License.** yt-dlp is under the Unlicense (public domain). Its README states that the PyPI wheel
+  contains only Unlicense code; the GPLv3+ applies only to its PyInstaller executables, and the
+  `[default]` extra would pull in `mutagen` (GPL-2.0-or-later), which is why it is not installed.
+- **Maintenance.** Very active: 14 stable releases between October 2025 and August 2026, nightly
+  builds most days. It has to be: YouTube changes often enough to break extractors every few weeks,
+  so **the pin needs regular bumps** (`yt-dlp==2026.8.19` today). `make test-live` is the check to run
+  after a bump.
+- **Sites.** About 940 extractor modules, including a generic extractor that follows any URL, which
+  is exactly the SSRF surface this endpoint must not have. Only YouTube is enabled
+  (`--use-extractors youtube`, matched as a full regex against extractor names, so it loads exactly
+  one extractor). Adding a site means a link parser, a host list and its own review, never the generic
+  extractor.
+- **Subprocess, not the Python API.** yt-dlp documents itself as a CLI first. Its Python API is
+  untyped (no `py.typed`, which `disallow_any_unimported` refuses), synchronous (a timed-out call keeps
+  its thread, the reason DEC-74 rejected boto3), and would run untrusted network I/O and YouTube's
+  JavaScript inside the API process. A subprocess can be killed, and its network can be confined.
+- **JavaScript.** Full YouTube support needs `yt-dlp-ejs` and a JavaScript runtime to solve YouTube's
+  player challenges; deno is the default and the one used. yt-dlp runs it with `--no-remote --no-prompt
+--no-config` and without `--allow-net`, so the solver has no network or file access.
+- **Rejected:** youtube-dl (effectively unmaintained), pytubefix (single maintainer, in-process,
+  breaks often), and third-party download APIs (they would receive users' links, with worse terms).
+  An aside for DEC-86: yt-dlp can also fetch YouTube's own captions, which might replace transcription
+  for YouTube sources altogether.
+
+**New dependencies:** `yt-dlp` 2026.8.19 (Unlicense, no dependencies of its own), `yt-dlp-ejs` 0.8.0
+(Unlicense, bundles MIT and ISC code, no dependencies) and `deno` 2.9.7 (MIT, PyPI's redistribution of
+the Deno binary, about 37 MB per platform). All three are exact pins in `uv.lock`, so `make audit`
+covers what PyPI advisories cover; that does not include CVEs in the Deno runtime itself. The API
+refuses to start without them (`require_runtime`). yt-dlp's optional packages (`requests`,
+`urllib3`, `curl_cffi`, `websockets`, `certifi`, `brotli`, `pycryptodomex`, `mutagen`) are not
+installed, so it uses its standard-library networking and the system CA store.
+
+### SSRF: three independent layers
+
+1. **The link is reduced to an id.** `parse_youtube_video` accepts visible ASCII only, `http` or
+   `https`, a host from `youtube.com`, `www.`, `m.` or `music.youtube.com` or `youtu.be`, no
+   credentials, no port, and a path that names one video. It keeps only the 11-character id
+   (`[A-Za-z0-9_-]`), and the server builds `https://www.youtube.com/watch?v=<id>` itself. That is the
+   only value derived from the client on yt-dlp's command line, after `--`. An allowlist rather than
+   general SSRF hardening because the feature needs one platform, and a link the server rebuilds
+   cannot point anywhere else. yt-dlp's own YouTube pattern is looser (Invidious instances, hooktube,
+   naked ids), which is why the client's link is never passed through.
+2. **yt-dlp reaches the network only through an egress proxy.** yt-dlp has no hook to vet
+   destinations, and a check before invoking it would miss DNS rebinding, redirects and the media URLs
+   on other hosts (`*.googlevideo.com`). But `--proxy` routes every request of every handler through
+   one proxy (it replaces the environment's), so each fetch starts its own CONNECT proxy on
+   `127.0.0.1`, with a random credential, for its lifetime (`egress.py`). It accepts only `CONNECT`
+   to port 443 of `www.youtube.com`, `youtube.com`, `m.youtube.com`, `music.youtube.com` and
+   `*.googlevideo.com` (checked before any DNS lookup), resolves the host once, refuses unless **every**
+   answer is a public address (no loopback, private, link-local, metadata, CGNAT, documentation,
+   multicast or site-local addresses; IPv6 must be global unicast, and IPv4-mapped, -compatible,
+   -translated, NAT64, 6to4 and Teredo forms are judged by the IPv4 address inside them), and
+   **connects to the address it checked**, so the answer cannot change between check and use. TLS
+   stays end to end. Each redirect opens a new tunnel and passes the same checks, and a plain-HTTP
+   redirect target (`http://169.254.169.254/`) is not even a `CONNECT`. The proxy also caps the
+   fetch's tunnels (32) and bytes in both directions (the recording size limit plus 16 MiB for the
+   pages and player script), which is the real size limit: yt-dlp's `--max-filesize` only checks a
+   `Content-Length` (`downloader/http.py`), so a response without one would stream unbounded. The live
+   run used `www.youtube.com`, `manifest.googlevideo.com` and one `rr…googlevideo.com` media host.
+3. **The deployment should still deny internal ranges** to the API container's egress (RFC 1918,
+   link-local and the metadata address), as a third line (see "Production deployment").
+
+The tests demonstrate this rather than assert that an allowlist exists: the real proxy, with a
+resolver that answers `127.0.0.1`, `169.254.169.254`, `10.1.2.3`, `::1` or `::ffff:127.0.0.1` for
+`www.youtube.com`, refuses the tunnel while a listener on that loopback port records **zero
+connections**; a positive control with a public answer reaches the same listener, so the zero means
+something. A rebinding resolver (public, then loopback) gets one tunnel to the public address and the
+second refused. A redirect chain through a host off the list, an IP literal, an allowlisted host
+resolving to the metadata address and a plain-HTTP request to it are each refused, and only the first,
+legitimate hop was ever dialled. The integration suite runs **the real yt-dlp** through the real proxy
+with YouTube's names poisoned to internal addresses: the fetch fails with `EgressRefusedError` and the
+internal listener sees nothing.
+
+### Running yt-dlp
+
+The DEC-84 ffmpeg recipe, applied to a downloader: an argument list to
+`asyncio.create_subprocess_exec`, never a shell, `python -I -m yt_dlp` (isolated mode: no user site,
+no environment variables, no current directory on the path); `--ignore-config --no-plugin-dirs
+--no-cache-dir --no-cookies --no-remote-components`; `--no-js-runtimes --js-runtimes deno:<path>`;
+`--use-extractors youtube --no-playlist`; `--format bestaudio[ext=m4a][protocol=https]` (one plain
+HTTPS file, no HLS or DASH segments); for the download `--downloader native --fixup never` (no ffmpeg
+anywhere); `--retries 1 --extractor-retries 1 --socket-timeout 15`. The environment is only `HOME`,
+`TMPDIR` and `DENO_DIR` (a fresh temporary directory that is also the working directory and is
+deleted afterwards), `LC_ALL`, `DENO_NO_UPDATE_CHECK` and an **empty `PATH`**, so yt-dlp cannot find
+an ffmpeg, aria2c or any other helper even if the host has one. The process starts its own session,
+and the deadline (`DECKLY_LIMIT_RECORDING_URL_TIMEOUT_SECONDS`, 120 by default, 1 to 600) or a
+cancelled request kills **the whole process group**, deno included; stderr is read through a 16 KiB
+tail.
+
+### Metadata first, the file second
+
+The fetch runs yt-dlp twice. The probe (`--skip-download --write-info-json`) costs one watch page and
+one player request and downloads no audio. Its JSON (at most 16 MiB, validated with pydantic) must
+describe the same video id, be `not_live` or `was_live`, have a positive finite duration within the
+cap, offer an `m4a` over `https`, and not state a size over the limit; each refusal costs no media
+bytes. The download then reuses that file (`--load-info-json`), so it fetches exactly the format that
+was checked without a second extraction, with `--match-filters "duration <= cap & !is_live"` and
+`--max-filesize` as belt and braces.
+
+Then **the downloaded bytes are probed like any upload** and the probe's duration is what is stored,
+never YouTube's. YouTube's figure is YouTube's own encode and rounded to whole seconds, so it is less
+likely to lie than an uploaded container, but nothing in yt-dlp promises it. YouTube's audio is
+fragmented MP4 (`ftyp dash`, about 10-second fragments), which is why the probe learned fragments, and
+why the bug hunt above matters here: a downloaded file with `tfhd` durations of 1 or a mislabelled
+sample entry is refused or floored exactly as an uploaded one is. The use-case tests serve a download
+that claims 10 seconds in its metadata and plays 120 (`422`, nothing stored) and DEC-84's own lying
+files as downloads (`415` or `422`). Because YouTube rounds, a video listed at exactly the cap can
+still be refused after downloading, by under a second.
+
+Failures are classified from yt-dlp's last `ERROR:` line, pinned to the yt-dlp version: the bot check
+and HTTP 429 are `blocked`; private, removed, age-restricted, region-blocked, members-only, live,
+upcoming and format-less videos are `422 RECORDING_UNAVAILABLE`; anything else is `503`. Any tunnel
+the proxy refused fails the fetch as `egress_refused` (`503`) whatever yt-dlp printed, and a refused
+byte budget is `413 DOCUMENT_TOO_LARGE`. The filename is the video title with path separators made
+hyphens, cleaned like an upload's and cut to 200 characters, plus `.m4a`; a title with nothing
+printable left becomes the video id.
+
+### Budget, capacity and memory
+
+**Its own, tighter budget**, separate from uploads: 5 fetches per client and 20 per address per hour,
+and **200 per hour for the whole server** (`DECKLY_LIMIT_RECORDING_URL_*`, keys
+`deckly:recording-url:*`, all three counted in one `MULTI`). Uploads are the client spending its own
+bandwidth; a fetch is the server spending its bandwidth, CPU and a subprocess for anyone who asks,
+including for a request that is refused after the probe, and every fetch spends the server address's
+standing with YouTube, which is shared by every user. The server-wide ceiling is what protects that
+standing; the cost is that a client with many addresses can use it up for an hour, which is the same
+outcome as a YouTube block, only shorter. A link the parser refuses is not counted; a fetch refused
+because the slot is busy is not counted either.
+
+**One fetch at a time per API process** (`DECKLY_LIMIT_RECORDING_URL_MAX_CONCURRENCY`, default 1, at
+most 4, metric gate `recording_url`), refused at once with `503` and `Retry-After: 5` like an upload.
+The recording gate went from 2 slots to 1 to make room. **yt-dlp and deno together peaked at 394–422
+MiB of resident memory during the probe and about 55 MiB during the download**, outside the API's
+Python heap but inside its container, so each URL slot adds 448 MiB (the peak rounded up) x 2 to the
+startup memory check, which is why the default budget is now 1,288 MiB and the container assumption
+about 2 GiB (see "Concurrency cap"). A second URL slot needs 1,288 + (48 + 448) x 2 = 2,280 MiB of
+budget; the startup check refuses it until the budget says the container has it. An earlier
+measurement in this ticket reported 340 MB: that was `/usr/bin/time -l`, which on macOS reports the
+largest single child, not deno and yt-dlp together.
+
+The request is answered when the audio is stored: about 2.5 seconds for a 19-second video and 5 for a
+3.5-minute one from a developer's connection, up to the deadline. The reverse proxy's response timeout
+must allow that. A client that disconnects does not stop the fetch, which finishes (or hits its
+deadline) and stores a document nobody reads, swept like any other.
+
+### Not done here
+
+- **Frontend:** the app does not call the endpoint yet; its generated types are regenerated.
+- **Other sites:** one parser and one host list each, reviewed like YouTube's.
+- **Cookies, PO tokens or a residential egress** for the datacenter block: a product and legal
+  decision, not code.
+- **Request body size:** like every JSON endpoint here, the body is read before it is validated;
+  the reverse proxy's body limit is what bounds it.
 
 ## Production deployment
 
@@ -1561,6 +1799,11 @@ under test, while memory and eviction separation is a property of the Redis depl
   `documents/` cannot be a second line: a document a client keeps generating from has no fixed
   lifetime (see "Generating from a document"), and a rule that deletes its object fails the next
   job with `DOCUMENT_NOT_FOUND`.
+- **Deny internal ranges to the API's egress.** The recording fetch's proxy already refuses them
+  (see "Recordings from a URL"); a security group or firewall rule that blocks RFC 1918, link-local
+  (including `169.254.169.254`) and the cloud's metadata endpoints is the layer under it.
+- **The reverse proxy must allow the fetch's response time** on `/v1/recordings/from-url`, at least
+  `DECKLY_LIMIT_RECORDING_URL_TIMEOUT_SECONDS` plus the upload to the object store.
 - **The reverse proxy must allow the body.** At least `DECKLY_LIMIT_DOCUMENT_MAX_BYTES` plus 16 KiB
   on `/v1/documents` (nginx's default `client_max_body_size` is 1 MiB), and a request-body read
   timeout: uvicorn does not bound how long a client may take to send its body, so a slow sender
