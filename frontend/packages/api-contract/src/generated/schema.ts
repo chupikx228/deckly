@@ -69,7 +69,7 @@ export interface paths {
         put?: never;
         /**
          * Regenerate a single rejected note
-         * @description Synchronous and cheap. Must respond within 10 seconds. Runs its own small source search, so the replacement note is sourced like any generated note. Rate limited per X-Client-Id separately from the generation job quota (429 RATE_LIMITED). The topic and the rejected note are screened together against the content policy, and a request that violates it is 422 TOPIC_REJECTED. A 503 is UPSTREAM_UNAVAILABLE when a provider or the content check is down, slow, rejects the request or answers with malformed data, or NO_VALID_CONTENT when no note that passes validation and the content check could be produced.
+         * @description Synchronous and cheap. Must respond within 10 seconds. Runs its own small source search, so the replacement note is sourced like any generated note. Rate limited per X-Client-Id separately from the generation job quota (429 RATE_LIMITED). The topic and the rejected note are screened together against the content policy, and a request that violates it is 422 TOPIC_REJECTED. A 503 is UPSTREAM_UNAVAILABLE when a provider or the content check is down, slow, rejects the request or answers with malformed data, or NO_VALID_CONTENT when no note that passes validation and the content check could be produced. A note of a deck generated from an uploaded document cannot be regenerated in v1: a request that names a documentId is 422 DOCUMENT_REGENERATION_UNSUPPORTED, refused before the regeneration budget is touched and before any search or document read (DEC-83).
          */
         post: operations["regenerateNote"];
         delete?: never;
@@ -148,7 +148,7 @@ export interface components {
         /** @enum {string} */
         JobStage: "planning" | "retrieving_sources" | "parsing_sources" | "generating_cards" | "fetching_media" | "finalizing";
         /** @enum {string} */
-        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "DOCUMENT_UNREADABLE" | "DOCUMENT_ENCRYPTED" | "DOCUMENT_HAS_NO_TEXT" | "DOCUMENT_REJECTED" | "UPSTREAM_UNAVAILABLE" | "DOCUMENT_NOT_FOUND" | "DOCUMENT_TOO_LARGE" | "UNSUPPORTED_DOCUMENT_TYPE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
+        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "DOCUMENT_UNREADABLE" | "DOCUMENT_ENCRYPTED" | "DOCUMENT_HAS_NO_TEXT" | "DOCUMENT_REJECTED" | "DOCUMENT_REGENERATION_UNSUPPORTED" | "UPSTREAM_UNAVAILABLE" | "DOCUMENT_NOT_FOUND" | "DOCUMENT_TOO_LARGE" | "UNSUPPORTED_DOCUMENT_TYPE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
         /**
          * @description The type detected from the file's content.
          * @enum {string}
@@ -203,7 +203,11 @@ export interface components {
             includeImages: boolean;
             /** @description Must not contain NUL (U+0000). */
             instructions?: string;
-        } & (unknown | unknown);
+        } & ({
+            topic: string;
+        } | {
+            documentId: string;
+        });
         GenerationJobCreated: {
             /** Format: uuid */
             jobId: string;
@@ -326,9 +330,14 @@ export interface components {
             /** @description The 1-based page or slide the material comes from, as the document's own viewer numbers it. */
             number: number;
         };
-        /** @description noteType image_occlusion is rejected with VALIDATION_FAILED, because the note is built on an image the request does not carry. */
+        /** @description noteType image_occlusion is rejected with VALIDATION_FAILED, because the note is built on an image the request does not carry. Exactly one of topic and documentId: a request with both, or with neither, is VALIDATION_FAILED, and so is either one sent as null. A request that names a documentId is well formed but always refused with 422 DOCUMENT_REGENERATION_UNSUPPORTED. */
         RegenerateNoteRequest: {
-            topic: string;
+            topic?: string;
+            /**
+             * Format: uuid
+             * @description The documentId the deck's generation job was created with. It tells the server the deck was generated from an uploaded document, whose note cannot be regenerated in v1. The server does not look the document up, so an unknown, foreign or expired id gets the same 422. Canonical form only: a lowercase, hyphenated version 4 UUID.
+             */
+            documentId?: string;
             language: string;
             noteType: components["schemas"]["NoteType"];
             rejectedNote: {
@@ -337,7 +346,11 @@ export interface components {
                 };
             };
             reason: components["schemas"]["RejectionReason"];
-        };
+        } & ({
+            topic: string;
+        } | {
+            documentId: string;
+        });
         Problem: {
             /** Format: uri */
             type: string;

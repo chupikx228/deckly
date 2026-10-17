@@ -428,7 +428,13 @@ components:
         already rejects it without images, and leaving includeImages out counts as false.
       oneOf:
         - required: [topic]
+          properties:
+            topic:
+              type: string
         - required: [documentId]
+          properties:
+            documentId:
+              type: string
       if:
         required: [noteTypes]
         properties:
@@ -741,7 +747,13 @@ components:
         DOCUMENT_REGENERATION_UNSUPPORTED.
       oneOf:
         - required: [topic]
+          properties:
+            topic:
+              type: string
         - required: [documentId]
+          properties:
+            documentId:
+              type: string
       properties:
         topic:
           type: string
