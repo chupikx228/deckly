@@ -125,6 +125,7 @@ export const generationRequestSchema = z.object({
 
 export const regenerateNoteRequestSchema = z.object({
   topic: z.string().min(3).max(200),
+  documentId: z.string().uuid().optional(),
   language: z.string().min(2),
   noteType: noteTypeSchema,
   rejectedNote: z.object({

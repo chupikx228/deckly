@@ -18,6 +18,7 @@ from deckly.application.exceptions import (
 )
 from deckly.domain.exceptions import (
     DocumentNotFoundError,
+    DocumentRegenerationUnsupportedError,
     DocumentTooLargeError,
     DomainError,
     InvalidDocumentError,
@@ -65,6 +66,11 @@ PROBLEM_KINDS: Mapping[type[Exception], ProblemKind] = {
     ),
     TopicRejectedError: ProblemKind(
         HTTPStatus.UNPROCESSABLE_ENTITY, ErrorCode.TOPIC_REJECTED, "Topic rejected"
+    ),
+    DocumentRegenerationUnsupportedError: ProblemKind(
+        HTTPStatus.UNPROCESSABLE_ENTITY,
+        ErrorCode.DOCUMENT_REGENERATION_UNSUPPORTED,
+        "Document regeneration unsupported",
     ),
     RateLimitedError: ProblemKind(HTTPStatus.TOO_MANY_REQUESTS, ErrorCode.RATE_LIMITED, "Rate limited"),
     UpstreamUnavailableError: ProblemKind(

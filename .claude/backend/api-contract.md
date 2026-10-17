@@ -317,6 +317,15 @@ counts as a block.
 
 - `noteType: image_occlusion` is rejected with `400 VALIDATION_FAILED`, because the note is built
   on an image the request does not carry.
+- **A deck generated from a document cannot be regenerated in v1.** The request names exactly one
+  of `topic` and `documentId`, like `POST /v1/generations`: a request with both, with neither, or
+  with either one sent as `null` is `400 VALIDATION_FAILED`. A client sends `documentId`, the one its
+  generation job was created with, instead of a `topic` for a note of a deck generated from an
+  uploaded document, and gets `422 DOCUMENT_REGENERATION_UNSUPPORTED`. The refusal is decided from
+  the request alone, before the regeneration budget is touched and before any search, document read
+  or content check, so it costs nothing and does not say whether the document still exists. The
+  client should not offer regenerate on such a deck; it can still edit or delete the note. See
+  "Resolved decisions", item 6.
 - `rejectedNote.fields` is treated as untrusted data. It is not validated against `noteType`, and
   only its first 2000 characters are shown to the model.
 - `422 TOPIC_REJECTED` when the topic or the rejected note violates the content policy. The call
@@ -592,30 +601,31 @@ localised and is for logs.
 }
 ```
 
-| Code                        | Status              | Meaning                                           |
-| --------------------------- | ------------------- | ------------------------------------------------- |
-| `VALIDATION_FAILED`         | 400                 | Request body failed validation                    |
-| `TOPIC_REJECTED`            | 422                 | Topic, file name or rejected note violates policy |
-| `RATE_LIMITED`              | 429                 | A job, regeneration or upload budget; "Quota"     |
-| `JOB_NOT_FOUND`             | 404                 | Unknown job id                                    |
-| `JOB_ALREADY_TERMINAL`      | 409                 | Cancel on a finished job                          |
-| `IDEMPOTENCY_KEY_CONFLICT`  | 409                 | `Idempotency-Key` reused with a different request |
-| `PROVIDER_UNAVAILABLE`      | 200 in the job body | The model or search provider failed the job       |
-| `NO_VALID_CONTENT`          | 200 in the job body | Every note was dropped; nothing safe to return    |
-| `NO_VALID_CONTENT`          | 503 on regenerate   | No valid replacement note could be produced       |
-| `DOCUMENT_UNREADABLE`       | 200 in the job body | Uploaded document is damaged or over a limit      |
-| `DOCUMENT_ENCRYPTED`        | 200 in the job body | Uploaded PDF needs a password to open             |
-| `DOCUMENT_HAS_NO_TEXT`      | 200 in the job body | Uploaded document has no extractable text         |
-| `DOCUMENT_NOT_FOUND`        | 200 in the job body | Uploaded document was gone when the job read it   |
-| `DOCUMENT_REJECTED`         | 200 in the job body | Uploaded document's text violates content policy  |
-| `GENERATION_FAILED`         | 200 in the job body | The job failed for any other reason               |
-| `UPSTREAM_UNAVAILABLE`      | 503                 | A provider, quota store or object store is down   |
-| `DOCUMENT_NOT_FOUND`        | 404                 | Unknown, foreign or expired document id           |
-| `DOCUMENT_TOO_LARGE`        | 413                 | Uploaded document is over the size limit          |
-| `UNSUPPORTED_DOCUMENT_TYPE` | 415                 | Uploaded file is not a PDF or a `.pptx`           |
-| `ROUTE_NOT_FOUND`           | 404                 | No endpoint exists at this path                   |
-| `METHOD_NOT_ALLOWED`        | 405                 | Endpoint exists but not for this HTTP method      |
-| `INTERNAL_ERROR`            | 500                 | Anything else                                     |
+| Code                                | Status              | Meaning                                                 |
+| ----------------------------------- | ------------------- | ------------------------------------------------------- |
+| `VALIDATION_FAILED`                 | 400                 | Request body failed validation                          |
+| `TOPIC_REJECTED`                    | 422                 | Topic, file name or rejected note violates policy       |
+| `RATE_LIMITED`                      | 429                 | A job, regeneration or upload budget; "Quota"           |
+| `JOB_NOT_FOUND`                     | 404                 | Unknown job id                                          |
+| `JOB_ALREADY_TERMINAL`              | 409                 | Cancel on a finished job                                |
+| `IDEMPOTENCY_KEY_CONFLICT`          | 409                 | `Idempotency-Key` reused with a different request       |
+| `PROVIDER_UNAVAILABLE`              | 200 in the job body | The model or search provider failed the job             |
+| `NO_VALID_CONTENT`                  | 200 in the job body | Every note was dropped; nothing safe to return          |
+| `NO_VALID_CONTENT`                  | 503 on regenerate   | No valid replacement note could be produced             |
+| `DOCUMENT_UNREADABLE`               | 200 in the job body | Uploaded document is damaged or over a limit            |
+| `DOCUMENT_ENCRYPTED`                | 200 in the job body | Uploaded PDF needs a password to open                   |
+| `DOCUMENT_HAS_NO_TEXT`              | 200 in the job body | Uploaded document has no extractable text               |
+| `DOCUMENT_NOT_FOUND`                | 200 in the job body | Uploaded document was gone when the job read it         |
+| `DOCUMENT_REJECTED`                 | 200 in the job body | Uploaded document's text violates content policy        |
+| `DOCUMENT_REGENERATION_UNSUPPORTED` | 422 on regenerate   | A note of a document-sourced deck cannot be regenerated |
+| `GENERATION_FAILED`                 | 200 in the job body | The job failed for any other reason                     |
+| `UPSTREAM_UNAVAILABLE`              | 503                 | A provider, quota store or object store is down         |
+| `DOCUMENT_NOT_FOUND`                | 404                 | Unknown, foreign or expired document id                 |
+| `DOCUMENT_TOO_LARGE`                | 413                 | Uploaded document is over the size limit                |
+| `UNSUPPORTED_DOCUMENT_TYPE`         | 415                 | Uploaded file is not a PDF or a `.pptx`                 |
+| `ROUTE_NOT_FOUND`                   | 404                 | No endpoint exists at this path                         |
+| `METHOD_NOT_ALLOWED`                | 405                 | Endpoint exists but not for this HTTP method            |
+| `INTERNAL_ERROR`                    | 500                 | Anything else                                           |
 
 Note the "200 in the job body" rows: a **failed job is not an HTTP error**. `GET
 /generations/{jobId}` returns `200` with `status: "failed"` and a populated `error` object.
@@ -774,3 +784,19 @@ instructions)` requests may share a cached result like topic requests. Only the 
    - **OCR plus a text model.** This also needs a new provider, and it cannot tell a usable
      diagram from a photo or a numbered legend. It remains the fallback if Gemini's boxes prove
      too loose.
+
+6. **Regenerating a note of a document-sourced deck — rejected in v1 (DEC-83).** The backend keeps
+   no deck: `POST /v1/notes/regenerate` carries a topic, not a job id, and answers within 10
+   seconds. A document's own download and parse deadlines, part of the document-path job timeout,
+   can exceed that budget alone, so re-reading the document inside this call would mean
+   re-architecting the endpoint. A web search for a title would instead ground the replacement in
+   material that differs from, and may contradict, the rest of the deck. The request therefore
+   names the deck's `documentId` in place of a `topic` and is refused with
+   `422 DOCUMENT_REGENERATION_UNSUPPORTED` (see `POST /v1/notes/regenerate`). The refusal can only
+   rely on the client sending it: a client that sends a topic of its own for a document deck gets
+   a web-searched note like any topic deck.
+
+   Deferred, not missing; DEC-83 is where the real design goes if this is revisited. The
+   regeneration call would need the document's pages to be readable without a fresh parse, for
+   example from the parsed text a job already stored, with the deck's `documentId` as the key.
+   Until then the client is expected not to offer regenerate for such decks.
