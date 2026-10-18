@@ -3,6 +3,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from secrets import SystemRandom
@@ -74,6 +75,7 @@ from deckly.infrastructure.search.tavily_client import TavilySearchClient
 from deckly.infrastructure.storage.client import StorageClient, StorageEndpoint
 from deckly.infrastructure.storage.s3_client import S3StorageClient
 from deckly.infrastructure.storage.storage import ResilientDocumentStorage
+from deckly.infrastructure.transcription.cache import RedisTranscriptCache, TranscriptCacheLimits
 from deckly.infrastructure.transcription.decoding import FfmpegAudioDecoder
 from deckly.infrastructure.transcription.model import pinned_checksums, require_ffmpeg, require_model
 from deckly.infrastructure.transcription.self_hosted import EngineInvocation, SelfHostedTranscriptionClient
@@ -367,6 +369,17 @@ def build_result_cache(redis: Redis, settings: Settings, metrics: Metrics) -> Re
     )
 
 
+def build_transcript_cache(redis: Redis, settings: Settings, metrics: Metrics) -> RedisTranscriptCache:
+    return RedisTranscriptCache(
+        redis,
+        TranscriptCacheLimits(
+            ttl_seconds=settings.cache.transcript_ttl_seconds,
+            command_timeout_seconds=settings.redis.connect_timeout_seconds,
+        ),
+        metrics,
+    )
+
+
 def build_sweep(
     store: BoundedJobStore, housekeeping: PostgresJobHousekeeping, settings: Settings
 ) -> SweepStaleJobs:
@@ -460,16 +473,24 @@ def build_transcription_client(settings: Settings) -> SelfHostedTranscriptionCli
     )
 
 
+@dataclass(frozen=True, slots=True)
+class TranscriptionBackend:
+    client: SelfHostedTranscriptionClient
+    ffmpeg: Path
+    cache_redis: Redis
+
+
 def build_recording_transcriber(
-    settings: Settings, client: SelfHostedTranscriptionClient, ffmpeg: Path, metrics: Metrics
+    settings: Settings, backend: TranscriptionBackend, metrics: Metrics
 ) -> RecordingTranscriber:
     return RecordingTranscriber(
         decoder=FfmpegAudioDecoder(
-            binary=ffmpeg,
+            binary=backend.ffmpeg,
             max_seconds=settings.limits.recording_max_duration_seconds,
             deadline_seconds=settings.transcription.decode_deadline_seconds,
         ),
-        client=client,
+        client=backend.client,
+        cache=build_transcript_cache(backend.cache_redis, settings, metrics),
         max_characters=settings.limits.document_max_source_characters,
         metrics=metrics,
     )
@@ -477,7 +498,8 @@ def build_recording_transcriber(
 
 async def startup(ctx: WorkerContext) -> None:
     settings = from_context(ctx, SETTINGS_KEY, Settings)
-    await wire_generation(ctx, build_document_parser(settings))
+    cache_redis = open_cache_redis(ctx, settings)
+    await wire_generation(ctx, build_document_parser(settings), cache_redis)
 
 
 async def transcription_startup(ctx: WorkerContext) -> None:
@@ -490,10 +512,19 @@ async def transcription_startup(ctx: WorkerContext) -> None:
     require_model(settings.transcription.model_directory, pinned_checksums())
     client = build_transcription_client(settings)
     ctx[TRANSCRIPTION_CLIENT_KEY] = client
-    await wire_generation(ctx, build_recording_transcriber(settings, client, ffmpeg, observability.metrics))
+    cache_redis = open_cache_redis(ctx, settings)
+    backend = TranscriptionBackend(client=client, ffmpeg=ffmpeg, cache_redis=cache_redis)
+    transcriber = build_recording_transcriber(settings, backend, observability.metrics)
+    await wire_generation(ctx, transcriber, cache_redis)
 
 
-async def wire_generation(ctx: WorkerContext, parser: DocumentParser) -> None:
+def open_cache_redis(ctx: WorkerContext, settings: Settings) -> Redis:
+    cache_redis = build_cache_redis(settings)
+    ctx[CACHE_REDIS_KEY] = cache_redis
+    return cache_redis
+
+
+async def wire_generation(ctx: WorkerContext, parser: DocumentParser, cache_redis: Redis) -> None:
     settings = from_context(ctx, SETTINGS_KEY, Settings)
     observability = from_context(ctx, OBSERVABILITY_KEY, Observability)
     engine = create_engine(
@@ -560,8 +591,6 @@ async def wire_generation(ctx: WorkerContext, parser: DocumentParser) -> None:
         parser=parser,
         moderator=LlmMaterialModerator(llm=bounded(document_moderation_llm)),
     )
-    cache_redis = build_cache_redis(settings)
-    ctx[CACHE_REDIS_KEY] = cache_redis
     ctx[RUN_GENERATION_KEY] = RunGeneration(
         store=store,
         cache=build_result_cache(cache_redis, settings, observability.metrics),

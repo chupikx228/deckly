@@ -11,6 +11,7 @@ from deckly.application.exceptions import (
     UnreadableDocumentError,
     UpstreamUnavailableError,
 )
+from deckly.application.pipeline import failure_level
 from deckly.application.ports import SourceMaterial
 from deckly.domain.document import Document, is_recording
 from deckly.domain.source import TranscriptSource
@@ -20,6 +21,7 @@ from deckly.infrastructure.documents.parser import usable_text
 from deckly.infrastructure.observability.metrics import Metrics
 from deckly.infrastructure.search.cleaning import clean_title
 from deckly.infrastructure.search.parser import MIN_VISIBLE_CHARACTERS, RAW_WINDOW_MULTIPLIER
+from deckly.infrastructure.transcription.cache import TranscriptCache
 from deckly.infrastructure.transcription.client import (
     DecodedAudio,
     Transcript,
@@ -74,6 +76,7 @@ def passages(segments: Iterable[TranscriptSegment], passage_ms: int) -> list[Pas
 class RecordingTranscriber:
     decoder: FfmpegAudioDecoder
     client: TranscriptionClient
+    cache: TranscriptCache
     max_characters: int
     metrics: Metrics
     passage_ms: int = PASSAGE_MILLISECONDS
@@ -83,6 +86,9 @@ class RecordingTranscriber:
         if not is_recording(document.document_format):
             message = f"documents of type {document.document_format} are not recordings to transcribe"
             raise UnreadableDocumentError(message)
+        cached = await self._recall(document)
+        if cached is not None:
+            return self._material(document, cached)
         with TemporaryDirectory(prefix=WORKDIR_PREFIX) as directory:
             workdir = Path(directory)
             source = workdir / RECORDING_FILE
@@ -90,7 +96,32 @@ class RecordingTranscriber:
             audio = await self.decoder.decode(source, document.document_format, workdir / AUDIO_FILE)
             self._decoded(document, audio)
             transcript = await self._transcribe(document, audio)
+        if not audio.truncated:
+            await self._remember(document, transcript)
         return self._material(document, transcript)
+
+    async def _recall(self, document: Document) -> Transcript | None:
+        try:
+            return await self.cache.get(document.document_id)
+        except Exception as error:
+            logger.log(
+                failure_level(error),
+                "transcript_cache_read_failed",
+                exc_info=error,
+                extra={"document_id": str(document.document_id)},
+            )
+            return None
+
+    async def _remember(self, document: Document, transcript: Transcript) -> None:
+        try:
+            await self.cache.put(document.document_id, transcript)
+        except Exception as error:
+            logger.log(
+                failure_level(error),
+                "transcript_cache_write_failed",
+                exc_info=error,
+                extra={"document_id": str(document.document_id)},
+            )
 
     def _decoded(self, document: Document, audio: DecodedAudio) -> None:
         context = {

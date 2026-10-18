@@ -37,6 +37,7 @@ from deckly.infrastructure.transcription.self_hosted import ENGINE_MODULE, SelfH
 from deckly.infrastructure.transcription.transcriber import RecordingTranscriber
 from deckly.worker.settings import (
     RUN_GENERATION_KEY,
+    TranscriptionBackend,
     TranscriptionWorkerSettings,
     build_recording_transcriber,
     build_transcription_client,
@@ -59,7 +60,7 @@ from tests.ffmpeg import production_decoder
 from tests.integration.conftest import Cleanup, job_queue
 from tests.logs import captured_json_logs
 from tests.recording_files import FIXTURES, understated_timing
-from tests.transcription import recording
+from tests.transcription import InMemoryTranscriptCache, recording
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -78,8 +79,10 @@ GENERATION_JOBS = 5
 GENERATION_JOB_STEPS = 100
 MAX_ISOLATED_LAG_P99_SECONDS = 0.05
 MAX_ISOLATED_SLOWDOWN = 1.5
-STARVED_LAG_MAX_SECONDS = 0.2
-GIL_HOLDING_LOOP = 20_000_000
+GIL_HOLD_SECONDS = 0.2
+STARVED_LAG_MIN_SHARE_OF_HOLD = 0.75
+GIL_CALIBRATION_LOOP = 2_000_000
+GIL_CALIBRATION_ROUNDS = 5
 CONTROL_JOBS = 1
 CONTROL_JOB_STEPS = 10
 ENGINE_START_SECONDS = 1.5
@@ -93,8 +96,11 @@ def model_ready(settings: Settings) -> Settings:
 
 
 def transcriber(settings: Settings, *, max_seconds: int | None = None) -> RecordingTranscriber:
-    built = build_recording_transcriber(
-        settings, build_transcription_client(settings), require_ffmpeg(), fresh_metrics()
+    backend = TranscriptionBackend(
+        client=build_transcription_client(settings), ffmpeg=require_ffmpeg(), cache_redis=ArqRedis()
+    )
+    built = replace(
+        build_recording_transcriber(settings, backend, fresh_metrics()), cache=InMemoryTranscriptCache()
     )
     if max_seconds is None:
         return built
@@ -384,13 +390,23 @@ async def responsiveness_while(
     )
 
 
+def loop_holding_the_gil_for(seconds: float) -> int:
+    def timed() -> float:
+        started = time.perf_counter()
+        sum(range(GIL_CALIBRATION_LOOP))
+        return time.perf_counter() - started
+
+    fastest = min(timed() for _ in range(GIL_CALIBRATION_ROUNDS))
+    return int(GIL_CALIBRATION_LOOP * seconds / fastest)
+
+
 @contextmanager
-def gil_held_in_process() -> Iterator[None]:
+def gil_held_in_process(loop: int) -> Iterator[None]:
     stop = threading.Event()
 
     def hold() -> None:
         while not stop.is_set():
-            sum(range(GIL_HOLDING_LOOP))
+            sum(range(loop))
 
     holder = threading.Thread(target=hold, daemon=True)
     holder.start()
@@ -420,10 +436,10 @@ async def test_generation_jobs_keep_their_pace_while_a_transcription_runs_beside
 
 async def test_the_same_measurement_catches_work_that_holds_the_interpreter_lock_in_process() -> None:
     alone = await responsiveness_while(None, jobs=CONTROL_JOBS, steps=CONTROL_JOB_STEPS)
-    with gil_held_in_process():
+    with gil_held_in_process(loop_holding_the_gil_for(GIL_HOLD_SECONDS)):
         starved = await responsiveness_while(None, jobs=CONTROL_JOBS, steps=CONTROL_JOB_STEPS)
 
-    assert starved.lag_max_seconds > STARVED_LAG_MAX_SECONDS
+    assert starved.lag_max_seconds > GIL_HOLD_SECONDS * STARVED_LAG_MIN_SHARE_OF_HOLD
     assert starved.job_seconds > alone.job_seconds * MAX_ISOLATED_SLOWDOWN
 
 
