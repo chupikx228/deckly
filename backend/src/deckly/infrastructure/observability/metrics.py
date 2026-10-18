@@ -5,11 +5,11 @@ from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
 STAGE_BUCKETS = (0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0)
 JOB_BUCKETS = (0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 180.0, 240.0, 300.0, 600.0)
-GENERATION_QUEUE = "generation"
 MODERATION_GATE = "moderation"
 DOCUMENT_UPLOAD_GATE = "document_upload"
 RECORDING_UPLOAD_GATE = "recording_upload"
 RECORDING_URL_GATE = "recording_url"
+REAL_TIME_FACTOR_BUCKETS = (0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.5)
 PROVIDER_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0, 90.0, 180.0)
 
 
@@ -57,6 +57,8 @@ class Metrics:
     rate_limit_rejections: Counter
     recording_url_fetches: Counter
     recording_url_egress_refusals: Counter
+    transcription_real_time_factor: Histogram
+    recording_decode_truncations: Counter
 
 
 def create_metrics() -> Metrics:
@@ -172,6 +174,17 @@ def create_metrics() -> Metrics:
             "deckly_recording_url_egress_refusals",
             "Connections the recording fetch egress proxy refused, by reason.",
             ["reason"],
+            registry=registry,
+        ),
+        transcription_real_time_factor=Histogram(
+            "deckly_transcription_real_time_factor",
+            "Seconds spent transcribing one recording per second of its decoded audio.",
+            buckets=REAL_TIME_FACTOR_BUCKETS,
+            registry=registry,
+        ),
+        recording_decode_truncations=Counter(
+            "deckly_recording_decode_truncations",
+            "Recordings whose decoded audio ran past the duration cap and was cut there.",
             registry=registry,
         ),
     )

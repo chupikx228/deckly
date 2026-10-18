@@ -10,6 +10,14 @@ export const NOTE_TYPE = {
 
 export type NoteType = (typeof NOTE_TYPE)[keyof typeof NOTE_TYPE];
 
+export const SOURCE_KIND = {
+  WEB: 'web',
+  DOCUMENT: 'document',
+  TRANSCRIPT: 'transcript',
+} as const;
+
+export type SourceKind = (typeof SOURCE_KIND)[keyof typeof SOURCE_KIND];
+
 export const DIFFICULTY = {
   BEGINNER: 'beginner',
   INTERMEDIATE: 'intermediate',

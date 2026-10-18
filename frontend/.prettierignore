@@ -13,3 +13,4 @@ apps/mobile/drizzle
 ../backend/.venv
 ../backend/.pytest_cache
 ../backend/.import_linter_cache
+../backend/models

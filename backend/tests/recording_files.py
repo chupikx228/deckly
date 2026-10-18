@@ -1,5 +1,5 @@
 import struct
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -429,3 +429,63 @@ def wave(*chunks: bytes) -> bytes:
 def pcm_wave(seconds: float = 1, *, sample_rate: int = 8000, declared: int | None = None) -> bytes:
     audio = b"\x00\x01" * round(seconds * sample_rate)
     return wave(chunk(b"fmt ", WaveFormat(sample_rate=sample_rate).encode()), chunk(b"data", audio, declared))
+
+
+SAMPLE_TABLE_CONTAINERS = frozenset({b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts"})
+HEADER_VERSION_0 = 0
+
+
+@dataclass(frozen=True, slots=True)
+class FoundBox:
+    kind: bytes
+    offset: int
+    body: int
+    end: int
+
+
+def walk_boxes(data: bytes, start: int, end: int) -> Iterator[FoundBox]:
+    offset = start
+    while offset + 8 <= end:
+        size, kind = struct.unpack_from(">I4s", data, offset)
+        header = 8
+        if size == 1:
+            (size,) = struct.unpack_from(">Q", data, offset + 8)
+            header = 16
+        found = FoundBox(kind=kind, offset=offset, body=offset + header, end=offset + size)
+        yield found
+        if kind in SAMPLE_TABLE_CONTAINERS:
+            yield from walk_boxes(data, found.body, found.end)
+        offset += size
+
+
+def header_version_0(data: bytearray, found: FoundBox) -> int:
+    if data[found.body] != HEADER_VERSION_0:
+        message = f"{found.kind!r} is not a version 0 box, which this helper does not rewrite"
+        raise AssertionError(message)
+    return found.body
+
+
+def understated_timing(mp4: bytes, delta: int) -> bytes:
+    data = bytearray(mp4)
+    boxes = list(walk_boxes(mp4, 0, len(mp4)))
+    samples = 0
+    for found in (box for box in boxes if box.kind == b"stts"):
+        (entries,) = struct.unpack_from(">I", data, found.body + 4)
+        for index in range(entries):
+            entry = found.body + 8 + index * 8
+            (count,) = struct.unpack_from(">I", data, entry)
+            samples += count * delta
+            struct.pack_into(">I", data, entry + 4, delta)
+    [media] = (box for box in boxes if box.kind == b"mdhd")
+    (media_timescale,) = struct.unpack_from(">I", data, header_version_0(data, media) + 12)
+    struct.pack_into(">I", data, media.body + 16, samples)
+    [movie] = (box for box in boxes if box.kind == b"mvhd")
+    (movie_timescale,) = struct.unpack_from(">I", data, header_version_0(data, movie) + 12)
+    movie_duration = samples * movie_timescale // media_timescale + 1
+    struct.pack_into(">I", data, movie.body + 16, movie_duration)
+    for found in boxes:
+        if found.kind == b"tkhd":
+            struct.pack_into(">I", data, header_version_0(data, found) + 20, movie_duration)
+        if found.kind == b"edts":
+            data[found.offset + 4 : found.offset + 8] = b"free"
+    return bytes(data)

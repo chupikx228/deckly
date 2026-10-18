@@ -1,4 +1,4 @@
-.PHONY: install check guard fix test test-integration coverage-gate test-live audit run worker migrate revision up down observability
+.PHONY: install check guard fix test test-integration coverage-gate test-live audit run worker transcription-worker model migrate revision up down observability
 
 install:
 	uv sync --locked
@@ -44,6 +44,24 @@ run:
 
 worker:
 	uv run deckly-worker
+
+transcription-worker:
+	uv run deckly-transcription-worker
+
+MODEL_DIRECTORY ?= models/faster-whisper-small
+MODEL_REVISION = 536b0662742c02347bc0e980a01041f333bce120
+MODEL_URL = https://huggingface.co/Systran/faster-whisper-small/resolve/$(MODEL_REVISION)
+MODEL_CHECKSUMS = $(CURDIR)/src/deckly/infrastructure/transcription/model.sha256
+
+model:
+	@mkdir -p $(MODEL_DIRECTORY)
+	@while read -r digest file; do \
+		if ! (cd $(MODEL_DIRECTORY) && echo "$$digest  $$file" | shasum -a 256 --check --status 2>/dev/null); then \
+			echo "downloading $$file"; \
+			curl --fail --silent --show-error --location --output $(MODEL_DIRECTORY)/$$file $(MODEL_URL)/$$file || exit 1; \
+		fi; \
+	done < $(MODEL_CHECKSUMS)
+	@cd $(MODEL_DIRECTORY) && shasum -a 256 --check --quiet $(MODEL_CHECKSUMS)
 
 migrate:
 	uv run alembic upgrade head

@@ -141,11 +141,20 @@ jobs:
       - name: Test (unit, contract; starts the coverage data)
         run: make test
 
-      - name: Install ffmpeg (integration tests extract audio from stored recordings)
+      - name: Install ffmpeg (transcription decodes recordings with it; integration tests run it for real)
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends ffmpeg
           ffmpeg -version | head -n 1
+
+      - name: Cache the transcription model (pinned by checksum, about 490 MB)
+        uses: actions/cache@v4
+        with:
+          path: backend/models
+          key: transcription-model-${{ hashFiles('backend/src/deckly/infrastructure/transcription/model.sha256') }}
+
+      - name: Fetch the transcription model (verified against the pinned checksums)
+        run: make model
 
       - name: Configure environment
         run: cp .env.example .env

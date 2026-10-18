@@ -8,7 +8,15 @@ from deckly.domain.deck import GenerationResult
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.source import WebSource
 from deckly.infrastructure.stored_result import dump_result, load_result
-from tests.domain.builders import DOCUMENT_SOURCE, FULL_RESULT, at, basic_note, note_of, result_with
+from tests.domain.builders import (
+    DOCUMENT_SOURCE,
+    FULL_RESULT,
+    TRANSCRIPT_SOURCE,
+    at,
+    basic_note,
+    note_of,
+    result_with,
+)
 
 GOLDEN_RESULT = GenerationResult(
     deck=FULL_RESULT.deck,
@@ -233,5 +241,54 @@ CORRUPT_DOCUMENT_SOURCES = {
     "source", list(CORRUPT_DOCUMENT_SOURCES.values()), ids=list(CORRUPT_DOCUMENT_SOURCES)
 )
 def test_corrupt_stored_document_source_is_rejected_as_a_value_error(source: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match=r".+"):
+        load_result(with_notes({**BASIC_NOTE, "sources": [source]}))
+
+
+STORED_TRANSCRIPT_SOURCE: dict[str, object] = {
+    "title": "road-signs.m4a",
+    "document_id": "00000000-0000-4000-8000-0000000000d2",
+    "start_ms": 62_480,
+    "end_ms": 121_900,
+}
+EVERY_SOURCE_NOTE = replace(
+    basic_note(1), sources=(TRANSCRIPT_SOURCE, DOCUMENT_SOURCE, *basic_note(1).sources)
+)
+
+
+def test_transcript_source_is_stored_as_its_own_shape_beside_document_and_web_sources() -> None:
+    stored = dump_result(result_with(EVERY_SOURCE_NOTE))
+
+    assert stored["notes"] == [
+        {
+            **BASIC_NOTE,
+            "fields": {"front": "front 1", "back": "back"},
+            "sources": [STORED_TRANSCRIPT_SOURCE, STORED_DOCUMENT_SOURCE, SOURCE],
+        }
+    ]
+
+
+def test_transcript_source_loads_back_as_a_transcript_not_as_the_document_it_shares_an_id_key_with() -> None:
+    result = result_with(EVERY_SOURCE_NOTE)
+
+    loaded = load_result(json.loads(json.dumps(dump_result(result))))
+
+    assert loaded == result
+    assert loaded.notes[0].sources[0] == TRANSCRIPT_SOURCE
+
+
+CORRUPT_TRANSCRIPT_SOURCES = {
+    "negative start": {**STORED_TRANSCRIPT_SOURCE, "start_ms": -1},
+    "ends where it starts": {**STORED_TRANSCRIPT_SOURCE, "end_ms": 62_480},
+    "no end": {key: value for key, value in STORED_TRANSCRIPT_SOURCE.items() if key != "end_ms"},
+    "page number on a transcript": {**STORED_TRANSCRIPT_SOURCE, "unit": "page", "number": 1},
+    "blank title": {**STORED_TRANSCRIPT_SOURCE, "title": " "},
+}
+
+
+@pytest.mark.parametrize(
+    "source", list(CORRUPT_TRANSCRIPT_SOURCES.values()), ids=list(CORRUPT_TRANSCRIPT_SOURCES)
+)
+def test_corrupt_stored_transcript_source_is_rejected_as_a_value_error(source: dict[str, object]) -> None:
     with pytest.raises(ValueError, match=r".+"):
         load_result(with_notes({**BASIC_NOTE, "sources": [source]}))

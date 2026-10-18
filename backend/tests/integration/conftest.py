@@ -18,7 +18,12 @@ from deckly.application.ports import IdempotencyScope, TopicModerator
 from deckly.config import Settings, load_settings
 from deckly.infrastructure.clock import utc_now
 from deckly.infrastructure.database import create_engine, create_session_factory
-from deckly.infrastructure.queue import ArqJobQueue, create_queue_pool, create_redis_settings
+from deckly.infrastructure.queue import (
+    TRANSCRIPTION_QUEUE_NAME,
+    ArqJobQueue,
+    create_queue_pool,
+    create_redis_settings,
+)
 from deckly.infrastructure.quota import ADDRESS_KEY_PREFIX, CLIENT_KEY_PREFIX, address_bucket
 from deckly.infrastructure.tables import GenerationJobRow
 from tests.fakes import FakeTopicModerator
@@ -109,6 +114,7 @@ class Cleanup:
             for job_id in self.job_ids:
                 await pool.delete(f"{job_key_prefix}{job_id}")
                 await pool.zrem(default_queue_name, str(job_id))
+                await pool.zrem(TRANSCRIPTION_QUEUE_NAME, str(job_id))
                 await pool.zrem(abort_jobs_ss, str(job_id))
             await purge_quota(pool, self.client_ids, self.addresses)
         finally:

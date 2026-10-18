@@ -7,6 +7,7 @@ from deckly.domain.exceptions import InvalidGenerationRequestError, InvalidSourc
 from deckly.domain.text import is_blank, is_timezone_aware, is_uuid_v4, is_web_url
 
 FIRST_CITATION_NUMBER = 1
+FIRST_MILLISECOND = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,4 +65,28 @@ class DocumentSource:
             raise InvalidSourceError(message)
 
 
-type Source = WebSource | DocumentSource
+def is_millisecond(value: int) -> bool:
+    return not isinstance(value, bool) and value >= FIRST_MILLISECOND
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptSource:
+    title: str
+    document_id: UUID
+    start_ms: int
+    end_ms: int
+
+    def __post_init__(self) -> None:
+        require_title(self.title)
+        if not is_uuid_v4(self.document_id):
+            message = f"source documentId {self.document_id} is not a UUID v4"
+            raise InvalidSourceError(message)
+        if not is_millisecond(self.start_ms):
+            message = f"source startMs must be at least {FIRST_MILLISECOND}, got {self.start_ms}"
+            raise InvalidSourceError(message)
+        if not is_millisecond(self.end_ms) or self.end_ms <= self.start_ms:
+            message = f"source endMs must be after startMs {self.start_ms}, got {self.end_ms}"
+            raise InvalidSourceError(message)
+
+
+type Source = WebSource | DocumentSource | TranscriptSource

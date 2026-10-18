@@ -13,21 +13,27 @@ from deckly.domain.notes.fields import NoteFields
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import fields_type_for
-from deckly.domain.source import DocumentSource, Source, WebSource
+from deckly.domain.source import DocumentSource, Source, TranscriptSource, WebSource
 
 WEB_SOURCE_TAG = "web"
 DOCUMENT_SOURCE_TAG = "document"
+TRANSCRIPT_SOURCE_TAG = "transcript"
 DOCUMENT_SOURCE_KEY = "document_id"
+TRANSCRIPT_SOURCE_KEY = "start_ms"
 
 
 def stored_source_tag(value: object) -> str:
+    if isinstance(value, TranscriptSource) or (isinstance(value, dict) and TRANSCRIPT_SOURCE_KEY in value):
+        return TRANSCRIPT_SOURCE_TAG
     if isinstance(value, DocumentSource) or (isinstance(value, dict) and DOCUMENT_SOURCE_KEY in value):
         return DOCUMENT_SOURCE_TAG
     return WEB_SOURCE_TAG
 
 
 type StoredSource = Annotated[
-    Annotated[WebSource, Tag(WEB_SOURCE_TAG)] | Annotated[DocumentSource, Tag(DOCUMENT_SOURCE_TAG)],
+    Annotated[WebSource, Tag(WEB_SOURCE_TAG)]
+    | Annotated[DocumentSource, Tag(DOCUMENT_SOURCE_TAG)]
+    | Annotated[TranscriptSource, Tag(TRANSCRIPT_SOURCE_TAG)],
     Discriminator(stored_source_tag),
 ]
 

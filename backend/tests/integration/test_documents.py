@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+from arq.constants import default_queue_name
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyHttpUrl, SecretStr
@@ -42,7 +43,7 @@ from deckly.infrastructure.observability.metrics import (
     RECORDING_UPLOAD_GATE,
     RECORDING_URL_GATE,
 )
-from deckly.infrastructure.recordings.sniffing import detect_recording
+from deckly.infrastructure.queue import TRANSCRIPTION_QUEUE_NAME
 from deckly.infrastructure.tables import DocumentRow, GenerationJobRow
 from deckly.infrastructure.upload_gate import UPLOAD_CAPACITY_RETRY_AFTER_SECONDS, RejectingUploadGate
 from deckly.infrastructure.upload_limit import ADDRESS_KEY_PREFIX, CLIENT_KEY_PREFIX
@@ -69,7 +70,7 @@ from tests.fakes import (
     generation_request,
     model_reply,
 )
-from tests.ffmpeg import extract_audio
+from tests.ffmpeg import production_decoder
 from tests.integration.conftest import TEST_PEER_ADDRESSES, Cleanup, open_queue_pool
 from tests.integration.storage import ObjectBucket
 from tests.recording_files import fixture, pcm_wave
@@ -1051,11 +1052,37 @@ async def test_sweep_deletes_old_unused_recordings_exactly_like_documents(
     assert await store.get(recent.document_id, client_id) == recent
 
 
-async def test_generation_from_a_recording_is_a_422_that_spends_no_quota_and_leaves_no_job(
+async def test_generation_from_a_recording_waits_for_the_transcription_worker_on_its_own_queue(
     settings: Settings, documents: DocumentCleanup, cleanup: Cleanup
 ) -> None:
     client_id = documents.client_id()
     with generation_api(settings, cleanup, client_id) as client:
+        recording = upload_recording(client, client_id, "tone.m4a")
+        accepted = start_generation(
+            client, client_id, {"documentId": str(recording["documentId"]), "language": "en", "cardCount": 5}
+        )
+    job_id = UUID(str(accepted["jobId"]))
+    cleanup.job_ids.add(job_id)
+
+    assert accepted["status_code"] == HTTPStatus.ACCEPTED
+    pool = await open_queue_pool(settings)
+    try:
+        assert await pool.zscore(TRANSCRIPTION_QUEUE_NAME, str(job_id)) is not None
+        assert await pool.zscore(default_queue_name, str(job_id)) is None
+    finally:
+        await pool.aclose()
+    referencing = await jobs_referencing(documents.session_factory, UUID(str(recording["documentId"])))
+    assert [row.job_id for row in referencing] == [job_id]
+
+
+async def test_generation_from_a_recording_where_transcription_is_disabled_is_a_422_that_spends_no_quota(
+    settings: Settings, documents: DocumentCleanup, cleanup: Cleanup
+) -> None:
+    client_id = documents.client_id()
+    without_transcription = replace(
+        settings, transcription=settings.transcription.model_copy(update={"enabled": False})
+    )
+    with generation_api(without_transcription, cleanup, client_id) as client:
         recording = upload_recording(client, client_id, "tone.m4a")
         refused = start_generation(
             client, client_id, {"documentId": str(recording["documentId"]), "language": "en", "cardCount": 5}
@@ -1085,22 +1112,22 @@ async def test_stored_video_yields_its_audio_through_the_hardened_ffmpeg_extract
         body = upload_recording(client, client_id, name)
     row = await stored_row(documents.session_factory, UUID(str(body["documentId"])))
     assert row is not None
-    source, output = tmp_path / "stored", tmp_path / "audio.wav"
+    source, output = tmp_path / "stored", tmp_path / "audio.pcm"
     source.write_bytes(await documents.bucket.read(row.storage_key))
 
-    await extract_audio(source, DocumentFormat(row.content_type), EXTRACTION_CAP_SECONDS, output)
+    audio = await production_decoder(EXTRACTION_CAP_SECONDS).decode(
+        source, DocumentFormat(row.content_type), output
+    )
 
-    extracted = detect_recording(output.read_bytes(), EXTRACTION_CAP_SECONDS)
-    assert extracted.document_format is DocumentFormat.WAV
-    assert extracted.duration_seconds == pytest.approx(2.0, abs=0.1)
+    assert audio.seconds == pytest.approx(2.0, abs=0.1)
+    assert audio.truncated is False
 
 
 async def test_extraction_stops_at_the_cap_whatever_the_recording_holds(tmp_path: Path) -> None:
-    source, output = tmp_path / "long.wav", tmp_path / "audio.wav"
+    source, output = tmp_path / "long.wav", tmp_path / "audio.pcm"
     source.write_bytes(pcm_wave(seconds=5))
 
-    await extract_audio(source, DocumentFormat.WAV, EXTRACTION_CAP_SECONDS, output)
+    audio = await production_decoder(EXTRACTION_CAP_SECONDS).decode(source, DocumentFormat.WAV, output)
 
-    assert detect_recording(output.read_bytes(), EXTRACTION_CAP_SECONDS).duration_seconds == pytest.approx(
-        EXTRACTION_CAP_SECONDS, abs=0.01
-    )
+    assert audio.seconds == EXTRACTION_CAP_SECONDS
+    assert audio.truncated is True

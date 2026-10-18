@@ -27,6 +27,7 @@ from tests.domain.builders import (
     JOB_ID,
     MOSCOW,
     T0,
+    TRANSCRIPT_SOURCE,
     at,
     basic_note,
     result_with,
@@ -294,6 +295,51 @@ def test_note_citing_a_document_carries_its_slide_and_validates_against_the_spec
         },
         {"kind": "web", "title": "Traffic regulations", "url": "https://example.com/rules"},
     ]
+
+
+def test_note_citing_a_recording_carries_its_time_range_and_validates_against_the_spec() -> None:
+    note = replace(basic_note(1), sources=(TRANSCRIPT_SOURCE, *basic_note(1).sources))
+
+    result = assert_polled(poll_stored(succeeded(result_with(note))))["result"]
+
+    assert isinstance(result, dict)
+    [body] = result["notes"]
+    assert spec_errors("GeneratedNote", body) == []
+    assert body["sources"][0] == {
+        "kind": "transcript",
+        "title": "road-signs.m4a",
+        "documentId": "00000000-0000-4000-8000-0000000000d2",
+        "startMs": 62_480,
+        "endMs": 121_900,
+    }
+
+
+TRANSCRIPT_BODY = {
+    "kind": "transcript",
+    "title": "lecture.m4a",
+    "documentId": "00000000-0000-4000-8000-0000000000d2",
+    "startMs": 0,
+    "endMs": 1000,
+}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {key: value for key, value in TRANSCRIPT_BODY.items() if key != "endMs"},
+        {**TRANSCRIPT_BODY, "startMs": -1},
+        {**TRANSCRIPT_BODY, "startMs": 1.5},
+        {key: value for key, value in TRANSCRIPT_BODY.items() if key not in {"startMs", "endMs"}}
+        | {"unit": "page", "number": 1},
+    ],
+    ids=["no end", "negative start", "fractional start", "page instead of a time range"],
+)
+def test_spec_rejects_transcript_sources_without_a_whole_millisecond_range(source: dict[str, object]) -> None:
+    assert spec_errors("Source", source) != []
+
+
+def test_spec_accepts_a_transcript_source() -> None:
+    assert spec_errors("Source", TRANSCRIPT_BODY) == []
 
 
 @pytest.mark.parametrize(

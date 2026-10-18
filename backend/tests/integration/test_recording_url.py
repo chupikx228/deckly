@@ -36,7 +36,7 @@ from deckly.infrastructure.upload_limit import (
 from deckly.main import API_PREFIX, create_app
 from tests.fake_ytdlp import VIDEO, FakeYtDlp, fake_fetcher, video_info
 from tests.fakes import fresh_metrics
-from tests.ffmpeg import extract_audio
+from tests.ffmpeg import production_decoder
 from tests.integration.conftest import TEST_PEER_ADDRESSES, open_queue_pool
 from tests.integration.storage import ObjectBucket
 from tests.recording_files import FIXTURES
@@ -158,12 +158,12 @@ async def test_fetched_recording_is_stored_with_a_row_and_an_object_exactly_like
 async def test_stored_fragmented_recording_yields_its_audio_through_the_hardened_ffmpeg_extraction(
     tmp_path: Path,
 ) -> None:
-    output = tmp_path / "audio.wav"
+    output = tmp_path / "audio.pcm"
 
-    await extract_audio(RECORDING, DocumentFormat.M4A, EXTRACTION_CAP_SECONDS, output)
+    audio = await production_decoder(EXTRACTION_CAP_SECONDS).decode(RECORDING, DocumentFormat.M4A, output)
 
-    extracted = detect_recording(output.read_bytes(), EXTRACTION_CAP_SECONDS)
-    assert extracted.duration_seconds == pytest.approx(
+    assert audio.truncated is False
+    assert audio.seconds == pytest.approx(
         detect_recording(RECORDING.read_bytes(), 900).duration_seconds, abs=0.1
     )
 

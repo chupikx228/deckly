@@ -41,9 +41,10 @@ paths:
         name, together with the instructions) and one that violates it is 422 TOPIC_REJECTED. A
         document's text is screened again by the worker before any card is written from it; a
         document that violates the policy fails the job with DOCUMENT_REJECTED. A documentId that
-        names an audio or video recording uploaded with POST /recordings is 422
-        DOCUMENT_NOT_SUPPORTED_FOR_GENERATION until transcription exists (DEC-86), refused before
-        the quota is used.
+        names an audio or video recording uploaded with POST /recordings is transcribed by the
+        worker, and its notes cite transcript sources (a time range of the recording). A deployment
+        that runs without transcription answers such a request 422
+        DOCUMENT_NOT_SUPPORTED_FOR_GENERATION, refused before the quota is used.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/ClientId'
@@ -224,8 +225,8 @@ paths:
         RECORDING_TOO_LONG. A file over the size limit (48 MiB by default) is 413
         DOCUMENT_TOO_LARGE and is refused before it is stored. Uploads share the document upload
         budget (429 RATE_LIMITED) and have their own concurrency limit (503 UPSTREAM_UNAVAILABLE
-        with Retry-After when every slot is taken). Generating from a recording is not supported
-        yet: POST /generations answers 422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION.
+        with Retry-After when every slot is taken). POST /generations with the returned documentId
+        transcribes the recording and generates from the transcript.
       parameters:
         - $ref: '#/components/parameters/ClientId'
       requestBody:
@@ -810,16 +811,19 @@ components:
 
     Source:
       description: >
-        Where a note's content comes from: a web page, or a page or slide of a document the client
-        uploaded. Branch on kind; a client must ignore a source whose kind it does not know.
+        Where a note's content comes from: a web page, a page or slide of a document the client
+        uploaded, or a time range of a recording the client uploaded. Branch on kind; a client must
+        ignore a source whose kind it does not know.
       oneOf:
         - $ref: '#/components/schemas/WebSource'
         - $ref: '#/components/schemas/DocumentSource'
+        - $ref: '#/components/schemas/TranscriptSource'
       discriminator:
         propertyName: kind
         mapping:
           web: '#/components/schemas/WebSource'
           document: '#/components/schemas/DocumentSource'
+          transcript: '#/components/schemas/TranscriptSource'
 
     WebSource:
       type: object
@@ -861,6 +865,31 @@ components:
           description: >
             The 1-based page or slide the material comes from, as the document's own viewer
             numbers it.
+
+    TranscriptSource:
+      type: object
+      required: [kind, title, documentId, startMs, endMs]
+      properties:
+        kind:
+          type: string
+          const: transcript
+        title:
+          type: string
+          description: The recording's file name.
+        documentId:
+          type: string
+          format: uuid
+          description: The documentId returned by POST /recordings or POST /recordings/from-url.
+        startMs:
+          type: integer
+          minimum: 0
+          description: Where the cited passage starts, in milliseconds from the start of the recording.
+        endMs:
+          type: integer
+          minimum: 1
+          description: >
+            Where the cited passage ends, in milliseconds from the start of the recording. Always
+            after startMs.
 
     RegenerateNoteRequest:
       type: object

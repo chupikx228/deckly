@@ -8,6 +8,7 @@ import {
   MEDIA_KIND,
   NOTE_TYPE,
   REJECTION_REASON,
+  SOURCE_KIND,
 } from './enums';
 
 export const noteTypeSchema = z.enum(NOTE_TYPE);
@@ -28,21 +29,49 @@ export const problemSchema = z.object({
 });
 
 export const webSourceSchema = z.object({
-  kind: z.literal('web'),
+  kind: z.literal(SOURCE_KIND.WEB),
   title: z.string(),
   url: z.url(),
   retrievedAt: z.iso.datetime().optional(),
 });
 
 export const documentSourceSchema = z.object({
-  kind: z.literal('document'),
+  kind: z.literal(SOURCE_KIND.DOCUMENT),
   title: z.string(),
   documentId: z.uuid(),
   unit: z.enum(['page', 'slide']),
   number: z.number().int().min(1),
 });
 
-export const sourceSchema = z.discriminatedUnion('kind', [webSourceSchema, documentSourceSchema]);
+export const transcriptSourceSchema = z
+  .object({
+    kind: z.literal(SOURCE_KIND.TRANSCRIPT),
+    title: z.string(),
+    documentId: z.uuid(),
+    startMs: z.number().int().min(0),
+    endMs: z.number().int().min(1),
+  })
+  .refine((source) => source.endMs > source.startMs, { path: ['endMs'] });
+
+export const sourceSchema = z.discriminatedUnion('kind', [
+  webSourceSchema,
+  documentSourceSchema,
+  transcriptSourceSchema,
+]);
+
+const kindedSchema = z.object({ kind: z.string() });
+const sourceKindSchema = z.enum(SOURCE_KIND);
+
+const isUnknownSourceKind = (source: unknown): boolean => {
+  const kinded = kindedSchema.safeParse(source);
+  return kinded.success && !sourceKindSchema.safeParse(kinded.data.kind).success;
+};
+
+export const sourceListSchema = z.preprocess(
+  (sources) =>
+    Array.isArray(sources) ? sources.filter((source) => !isUnknownSourceKind(source)) : sources,
+  z.array(sourceSchema),
+);
 
 export const attributionSchema = z.object({
   author: z.string(),
@@ -67,7 +96,7 @@ export const generatedNoteSchema = z.object({
   noteType: noteTypeSchema,
   fields: z.record(z.string(), z.unknown()),
   media: z.array(mediaSchema).default([]),
-  sources: z.array(sourceSchema).default([]),
+  sources: sourceListSchema.default([]),
   tags: z.array(z.string()).default([]),
 });
 

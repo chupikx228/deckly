@@ -17,6 +17,7 @@ from deckly.application.ports import (
     IdempotencyScope,
     JobQueue,
     JobStore,
+    QueueLane,
     Quota,
     Requester,
     StoredJob,
@@ -40,6 +41,12 @@ type Clock = Callable[[], datetime]
 type JobIdFactory = Callable[[], UUID]
 
 
+def lane_for(document: Document | None) -> QueueLane:
+    if document is not None and is_recording(document.document_format):
+        return QueueLane.TRANSCRIPTION
+    return QueueLane.GENERATION
+
+
 def elapsed_ms(started: datetime, finished: datetime) -> int:
     return max(0, round((finished - started).total_seconds() * MILLISECONDS_PER_SECOND))
 
@@ -60,6 +67,7 @@ class CreateGeneration:
     clock: Clock
     new_job_id: JobIdFactory
     telemetry: GenerationTelemetry
+    transcription_enabled: bool
 
     async def __call__(self, request: GenerationRequest, scope: IdempotencyScope, address: str) -> JobCreated:
         now = self.clock()
@@ -97,7 +105,7 @@ class CreateGeneration:
         if stored.job.job_id != job.job_id:
             await self.quota.release(requester, now)
             return await self._replay(stored, request, scope, now)
-        await self.queue.enqueue(job.job_id)
+        await self.queue.enqueue(job.job_id, lane_for(document))
         self._admit(job, request, AdmissionOutcome.QUEUED)
         return JobCreated(job=job, quota=quota)
 
@@ -116,15 +124,21 @@ class CreateGeneration:
             self._document_missing(request)
             message = f"document {request.document_id} does not exist for this client"
             raise DocumentNotFoundError(message)
-        if is_recording(document.document_format):
+        if is_recording(document.document_format) and not self.transcription_enabled:
             logger.info(
                 "generation_document_not_supported",
                 extra={"document_id": str(document.document_id), "content_type": document.document_format},
             )
             self.telemetry.admitted(AdmissionOutcome.DOCUMENT_NOT_SUPPORTED, request.source_kind)
-            message = f"document {document.document_id} is a recording, which cannot be generated from yet"
+            message = f"document {document.document_id} is a recording, and this deployment cannot transcribe"
             raise DocumentNotSupportedForGenerationError(message)
         return document
+
+    async def _lane(self, stored: StoredJob) -> QueueLane:
+        document_id = stored.request.document_id
+        if document_id is None:
+            return QueueLane.GENERATION
+        return lane_for(await self.documents.get(document_id, stored.client_id))
 
     def _document_missing(self, request: GenerationRequest) -> None:
         logger.info("generation_document_not_found", extra={"document_id": str(request.document_id)})
@@ -146,7 +160,7 @@ class CreateGeneration:
             message = f"{scope} was first used for a different request"
             raise IdempotencyKeyConflictError(message)
         if stored.job.status is JobStatus.QUEUED:
-            await self.queue.enqueue(stored.job.job_id)
+            await self.queue.enqueue(stored.job.job_id, await self._lane(stored))
         quota = await self.quota.current(scope.client_id, now)
         self._admit(stored.job, request, AdmissionOutcome.REPLAYED)
         return JobCreated(job=stored.job, quota=quota)

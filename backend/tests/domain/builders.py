@@ -21,7 +21,7 @@ from deckly.domain.notes.image_occlusion import ImageOcclusionFields, OcclusionR
 from deckly.domain.notes.multiple_choice import MultipleChoiceFields
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
-from deckly.domain.source import CitationUnit, DocumentSource, WebSource
+from deckly.domain.source import CitationUnit, DocumentSource, TranscriptSource, WebSource
 
 T0 = datetime(2026, 8, 14, 10, 30, tzinfo=UTC)
 JOB_ID = UUID("5f0c2f4e-2b8a-4c1e-9d7a-1f2e3d4c5b6a")
@@ -31,6 +31,12 @@ DOCUMENT_SOURCE = DocumentSource(
     document_id=UUID("00000000-0000-4000-8000-0000000000d1"),
     unit=CitationUnit.SLIDE,
     number=3,
+)
+TRANSCRIPT_SOURCE = TranscriptSource(
+    title="road-signs.m4a",
+    document_id=UUID("00000000-0000-4000-8000-0000000000d2"),
+    start_ms=62_480,
+    end_ms=121_900,
 )
 IMAGE_ID = UUID("3d2c1b0a-9f8e-4d7c-8b6a-5f4e3d2c1b0a")
 MOSCOW = timezone(timedelta(hours=3))

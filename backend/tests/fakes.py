@@ -21,6 +21,7 @@ from deckly.application.ports import (
     JobTransition,
     MissingImage,
     NoteMedia,
+    QueueLane,
     Quota,
     Requester,
     RetrievedPage,
@@ -550,15 +551,17 @@ class InMemoryResultCache:
 class RecordingJobQueue:
     def __init__(self) -> None:
         self.enqueued: list[UUID] = []
+        self.lanes: list[QueueLane] = []
         self.aborted: list[UUID] = []
         self.running: dict[UUID, asyncio.Task[None]] = {}
         self.unavailable = False
 
-    async def enqueue(self, job_id: UUID) -> None:
+    async def enqueue(self, job_id: UUID, lane: QueueLane) -> None:
         if self.unavailable:
             message = "queue unavailable"
             raise ConnectionError(message)
         self.enqueued.append(job_id)
+        self.lanes.append(lane)
 
     async def abort(self, job_id: UUID) -> None:
         self.aborted.append(job_id)
@@ -773,7 +776,13 @@ class FakeDocuments:
 
 
 class Harness:
-    def __init__(self, store: InMemoryJobStore | None = None, queue: RecordingJobQueue | None = None) -> None:
+    def __init__(
+        self,
+        store: InMemoryJobStore | None = None,
+        queue: RecordingJobQueue | None = None,
+        *,
+        transcription_enabled: bool = True,
+    ) -> None:
         self.store = InMemoryJobStore() if store is None else store
         self.queue = RecordingJobQueue() if queue is None else queue
         self.providers = FakeProviders()
@@ -794,6 +803,7 @@ class Harness:
             clock=lambda: self.now,
             new_job_id=lambda: next(ids),
             telemetry=telemetry,
+            transcription_enabled=transcription_enabled,
         )
         self.get = GetGeneration(store=self.store)
         self.cancel = CancelGeneration(

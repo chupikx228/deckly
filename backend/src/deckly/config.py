@@ -1,6 +1,8 @@
 import math
 import re
 from dataclasses import dataclass
+from decimal import Decimal
+from pathlib import Path
 from typing import Annotated, Literal, Self
 
 from pydantic import (
@@ -23,6 +25,7 @@ from deckly.infrastructure.media.licensing import MIN_IMAGE_SIDE
 from deckly.infrastructure.moderation.moderator import NOTES_PER_CONTENT_CHECK
 from deckly.infrastructure.observability.tracing import TraceExporter
 from deckly.infrastructure.search.parser import MIN_VISIBLE_CHARACTERS
+from deckly.infrastructure.transcription.client import BYTES_PER_SECOND
 
 ASYNC_POSTGRES_SCHEME = "postgresql+asyncpg"
 ENV_FILE = ".env"
@@ -77,6 +80,20 @@ MAX_DOCUMENT_PARSE_DEADLINE_SECONDS = 120
 MIN_DOCUMENT_RETENTION_SECONDS = 60 * 60
 MAX_DOCUMENT_RETENTION_SECONDS = 7 * 24 * 60 * 60
 MAX_STORAGE_CONCURRENCY = 16
+TRANSCRIPTION_WORKER_MAX_JOBS = 1
+MEASURED_TRANSCRIPTION_REAL_TIME_FACTOR = 0.14
+TRANSCRIPTION_DEADLINE_MARGIN = 2
+TRANSCRIPTION_ENGINE_WORKING_SET_BYTES = 1024 * MEBIBYTE
+TRANSCRIPTION_MEMORY_SAFETY_MARGIN = DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN
+DEFAULT_TRANSCRIPTION_MODEL_DIRECTORY = Path("models/faster-whisper-small")
+DEFAULT_TRANSCRIPTION_CPU_THREADS = 2
+MAX_TRANSCRIPTION_CPU_THREADS = 32
+DEFAULT_TRANSCRIPTION_DEADLINE_SECONDS = 540
+DEFAULT_TRANSCRIPTION_DECODE_DEADLINE_SECONDS = 30
+MAX_TRANSCRIPTION_DECODE_DEADLINE_SECONDS = 300
+DEFAULT_TRANSCRIPTION_JOB_TIMEOUT_SECONDS = 960
+DEFAULT_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES = 2560 * MEBIBYTE
+DEFAULT_TRANSCRIPTION_WORKER_METRICS_PORT = 9465
 BUCKET_NAME = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
 ROOT_PATH = "/"
 
@@ -212,12 +229,15 @@ class ProviderSettings(BaseSettings):
     storage_circuit_reset_seconds: PositiveInt
     storage_max_concurrency: Annotated[int, Field(ge=1, le=MAX_STORAGE_CONCURRENCY)]
 
-    @property
-    def moderation_gate_worst_case_wait_per_stage_seconds(self) -> int:
-        calls_ahead = WORKER_MAX_JOBS * MAX_MODERATION_CHUNKS_PER_JOB - 1
+    def moderation_gate_wait_per_stage_seconds(self, concurrent_jobs: int) -> int:
+        calls_ahead = concurrent_jobs * MAX_MODERATION_CHUNKS_PER_JOB - 1
         waves_ahead = calls_ahead // self.moderation_max_concurrency
         longest_slot_hold = max(self.moderation_filter_deadline_seconds, self.media_judge_deadline_seconds)
         return waves_ahead * longest_slot_hold
+
+    @property
+    def moderation_gate_worst_case_wait_per_stage_seconds(self) -> int:
+        return self.moderation_gate_wait_per_stage_seconds(WORKER_MAX_JOBS)
 
     @property
     def moderation_gate_worst_case_wait_seconds(self) -> int:
@@ -226,6 +246,12 @@ class ProviderSettings(BaseSettings):
     @property
     def document_moderation_gate_worst_case_wait_seconds(self) -> int:
         return DOCUMENT_GATED_STAGES_PER_JOB * self.moderation_gate_worst_case_wait_per_stage_seconds
+
+    @property
+    def recording_moderation_gate_worst_case_wait_seconds(self) -> int:
+        return DOCUMENT_GATED_STAGES_PER_JOB * self.moderation_gate_wait_per_stage_seconds(
+            TRANSCRIPTION_WORKER_MAX_JOBS
+        )
 
     @field_validator("model_api_key", "search_api_key", "storage_secret_access_key")
     @classmethod
@@ -365,7 +391,6 @@ class LimitSettings(BaseSettings):
         return max(
             DOCUMENT_DOWNLOAD_PEAK_COPIES * self.document_max_bytes,
             self.document_max_bytes + DOCUMENT_PARSE_WORKING_SET_BYTES,
-            DOCUMENT_DOWNLOAD_PEAK_COPIES * self.recording_max_bytes,
         )
 
     @property
@@ -431,20 +456,36 @@ class LimitSettings(BaseSettings):
         if worst_case_bytes > self.document_worker_memory_budget_bytes:
             message = (
                 f"the worker job concurrency ({WORKER_MAX_JOBS}) times the peak memory of one "
-                f"document-sourced job ({self.document_worker_job_peak_bytes} bytes, the largest of "
+                f"document-sourced job ({self.document_worker_job_peak_bytes} bytes, the larger of "
                 f"{DOCUMENT_DOWNLOAD_PEAK_COPIES} copies of the document size limit "
-                f"({self.document_max_bytes} bytes) while it downloads, the size limit plus "
-                f"{DOCUMENT_PARSE_WORKING_SET_BYTES} bytes of parser working set while it parses, and "
-                f"{DOCUMENT_DOWNLOAD_PEAK_COPIES} copies of the recording size limit "
-                f"({self.recording_max_bytes} bytes) while a recording downloads) is "
+                f"({self.document_max_bytes} bytes) while it downloads and the size limit plus "
+                f"{DOCUMENT_PARSE_WORKING_SET_BYTES} bytes of parser working set while it parses) is "
                 f"{worst_case_bytes} bytes, which exceeds the worker memory budget "
                 f"({self.document_worker_memory_budget_bytes} bytes); lower "
-                "DECKLY_LIMIT_DOCUMENT_MAX_BYTES or DECKLY_LIMIT_RECORDING_MAX_BYTES, or raise "
+                "DECKLY_LIMIT_DOCUMENT_MAX_BYTES, or raise "
                 "DECKLY_LIMIT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES; the check assumes a single worker "
                 "process, so divide the budget by the number of workers sharing one container"
             )
             raise ValueError(message)
         return self
+
+
+class TranscriptionSettings(BaseSettings):
+    model_config = _settings_config("DECKLY_TRANSCRIPTION_")
+
+    enabled: bool = True
+    model_directory: Path = DEFAULT_TRANSCRIPTION_MODEL_DIRECTORY
+    cpu_threads: Annotated[int, Field(ge=1, le=MAX_TRANSCRIPTION_CPU_THREADS)] = (
+        DEFAULT_TRANSCRIPTION_CPU_THREADS
+    )
+    deadline_seconds: Annotated[int, Field(ge=1, le=MAX_RECORDING_DURATION_SECONDS)] = (
+        DEFAULT_TRANSCRIPTION_DEADLINE_SECONDS
+    )
+    decode_deadline_seconds: Annotated[int, Field(ge=1, le=MAX_TRANSCRIPTION_DECODE_DEADLINE_SECONDS)] = (
+        DEFAULT_TRANSCRIPTION_DECODE_DEADLINE_SECONDS
+    )
+    job_timeout_seconds: PositiveInt = DEFAULT_TRANSCRIPTION_JOB_TIMEOUT_SECONDS
+    worker_memory_budget_bytes: PositiveInt = DEFAULT_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES
 
 
 class RegenerateSettings(BaseSettings):
@@ -522,6 +563,18 @@ class ObservabilitySettings(BaseSettings):
     trace_exporter: TraceExporter
     worker_metrics_host: str
     worker_metrics_port: Annotated[int, Field(ge=1, le=MAX_PORT)]
+    transcription_worker_metrics_port: Annotated[int, Field(ge=1, le=MAX_PORT)] = (
+        DEFAULT_TRANSCRIPTION_WORKER_METRICS_PORT
+    )
+
+    @model_validator(mode="after")
+    def require_each_worker_its_own_metrics_port(self) -> Self:
+        if self.transcription_worker_metrics_port == self.worker_metrics_port:
+            message = (
+                "the transcription worker and the generation worker must serve metrics on different ports"
+            )
+            raise ValueError(message)
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -535,6 +588,7 @@ class Settings:
     regenerate: RegenerateSettings
     sweep: SweepSettings
     observability: ObservabilitySettings
+    transcription: TranscriptionSettings
 
     @property
     def cache_redis_url(self) -> RedisDsn:
@@ -564,7 +618,91 @@ class Settings:
             + self.card_deadlines_seconds
         )
 
+    @property
+    def recording_deadlines_seconds(self) -> int:
+        return (
+            self.providers.storage_download_deadline_seconds
+            + self.transcription.decode_deadline_seconds
+            + self.transcription.deadline_seconds
+            + self.providers.moderation_filter_deadline_seconds
+            + self.card_deadlines_seconds
+        )
+
+    @property
+    def transcription_deadline_floor_seconds(self) -> int:
+        return math.ceil(
+            self.limits.recording_max_duration_seconds
+            * Decimal(str(MEASURED_TRANSCRIPTION_REAL_TIME_FACTOR))
+            * TRANSCRIPTION_DEADLINE_MARGIN
+        )
+
+    @property
+    def transcription_engine_peak_bytes(self) -> int:
+        return (
+            TRANSCRIPTION_ENGINE_WORKING_SET_BYTES
+            + self.limits.recording_max_duration_seconds * BYTES_PER_SECOND
+        )
+
+    @property
+    def transcription_worker_worst_case_bytes(self) -> int:
+        job_peak = self.limits.recording_max_bytes + self.transcription_engine_peak_bytes
+        return TRANSCRIPTION_WORKER_MAX_JOBS * job_peak * TRANSCRIPTION_MEMORY_SAFETY_MARGIN
+
+    @property
+    def longest_job_timeout_seconds(self) -> int:
+        if not self.transcription.enabled:
+            return self.limits.generation_job_timeout_seconds
+        return max(self.limits.generation_job_timeout_seconds, self.transcription.job_timeout_seconds)
+
     def __post_init__(self) -> None:
+        self._require_generation_budgets()
+        if self.transcription.enabled:
+            self._require_transcription_budgets()
+        self._require_housekeeping_budgets()
+
+    def _require_transcription_budgets(self) -> None:
+        recording_deadlines = self.recording_deadlines_seconds
+        recording_gate_wait = self.providers.recording_moderation_gate_worst_case_wait_seconds
+        if recording_deadlines + recording_gate_wait >= self.transcription.job_timeout_seconds:
+            message = (
+                f"the deadlines of a recording-sourced job ({recording_deadlines}s: the document download, "
+                "the audio decode, the transcription, the transcript screening and the model, media, media "
+                f"judge and moderation deadlines) plus the worst-case wait for a moderation concurrency slot "
+                f"at each of its {DOCUMENT_GATED_STAGES_PER_JOB} gated stages ({recording_gate_wait}s) must "
+                "leave room within DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS "
+                f"({self.transcription.job_timeout_seconds}s)"
+            )
+            raise ValueError(message)
+        floor = self.transcription_deadline_floor_seconds
+        if self.transcription.deadline_seconds < floor:
+            message = (
+                f"DECKLY_TRANSCRIPTION_DEADLINE_SECONDS ({self.transcription.deadline_seconds}s) is shorter "
+                f"than the recording duration cap ({self.limits.recording_max_duration_seconds}s) times the "
+                f"measured real-time factor ({MEASURED_TRANSCRIPTION_REAL_TIME_FACTOR}) times "
+                f"{TRANSCRIPTION_DEADLINE_MARGIN} ({floor}s), so a recording at the cap would time out even "
+                "on the hardware it was measured on; raise the deadline or lower "
+                "DECKLY_LIMIT_RECORDING_MAX_DURATION_SECONDS"
+            )
+            raise ValueError(message)
+        worst_case_bytes = self.transcription_worker_worst_case_bytes
+        if worst_case_bytes > self.transcription.worker_memory_budget_bytes:
+            message = (
+                f"the transcription worker's job concurrency ({TRANSCRIPTION_WORKER_MAX_JOBS}) times the "
+                "peak of one recording-sourced job (the recording size limit, "
+                f"{self.limits.recording_max_bytes} bytes, held while it is transcribed, plus the "
+                "transcription engine's measured "
+                f"{TRANSCRIPTION_ENGINE_WORKING_SET_BYTES} bytes of working set and the duration cap's "
+                f"decoded audio, {self.limits.recording_max_duration_seconds}s at {BYTES_PER_SECOND} bytes a "
+                f"second) times the safety margin ({TRANSCRIPTION_MEMORY_SAFETY_MARGIN}) is "
+                f"{worst_case_bytes} bytes, which exceeds the transcription worker memory budget "
+                f"({self.transcription.worker_memory_budget_bytes} bytes); lower "
+                "DECKLY_LIMIT_RECORDING_MAX_BYTES or DECKLY_LIMIT_RECORDING_MAX_DURATION_SECONDS, or raise "
+                "DECKLY_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES; the check assumes a single transcription "
+                "worker process, so divide the budget by the number of them sharing one container"
+            )
+            raise ValueError(message)
+
+    def _require_generation_budgets(self) -> None:
         job_timeout = self.limits.generation_job_timeout_seconds
         topic_deadlines = self.topic_deadlines_seconds
         document_deadlines = self.document_deadlines_seconds
@@ -596,6 +734,8 @@ class Settings:
                 f"stages ({document_gate_wait}s) must leave room within the generation job timeout"
             )
             raise ValueError(message)
+
+    def _require_housekeeping_budgets(self) -> None:
         if self.regenerate.budgeted_seconds > self.limits.regenerate_note_timeout_seconds:
             message = (
                 "the regenerate rate limit, the longer of the search and request moderation, the model and "
@@ -613,13 +753,11 @@ class Settings:
                 "within the sweep interval"
             )
             raise ValueError(message)
-        interrupted_job_settled = (
-            self.limits.generation_job_timeout_seconds + self.database.job_store_timeout_seconds
-        )
+        interrupted_job_settled = self.longest_job_timeout_seconds + self.database.job_store_timeout_seconds
         if self.sweep.running_stale_after_seconds <= interrupted_job_settled:
             message = (
-                "a running job must not go stale before the generation job timeout and the job store "
-                "timeout have both passed"
+                "a running job must not go stale before the generation job timeout (or, with transcription "
+                "enabled, the longer transcription job timeout) and the job store timeout have both passed"
             )
             raise ValueError(message)
 
@@ -635,4 +773,5 @@ def load_settings() -> Settings:
         regenerate=RegenerateSettings(),
         sweep=SweepSettings(),
         observability=ObservabilitySettings(),
+        transcription=TranscriptionSettings(),
     )
