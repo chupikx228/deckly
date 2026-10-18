@@ -443,6 +443,7 @@ def build_lifespan(settings: Settings, observability: Observability) -> Lifespan
                             clock=utc_now,
                             new_job_id=uuid4,
                             telemetry=telemetry,
+                            transcription_enabled=settings.transcription.enabled,
                         ),
                     )
                     window = RegenerationWindow(

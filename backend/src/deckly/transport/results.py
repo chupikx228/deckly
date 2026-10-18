@@ -12,7 +12,7 @@ from deckly.domain.notes.image_occlusion import ImageOcclusionFields, OcclusionR
 from deckly.domain.notes.multiple_choice import MultipleChoiceFields
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
-from deckly.domain.source import CitationUnit, DocumentSource, Source, WebSource
+from deckly.domain.source import CitationUnit, DocumentSource, Source, TranscriptSource, WebSource
 from deckly.transport.body import ResponseBody, UtcDateTime, is_none
 
 
@@ -154,7 +154,21 @@ class DocumentSourceBody(ResponseBody):
         return cls(title=source.title, document_id=source.document_id, unit=source.unit, number=source.number)
 
 
-type SourceBody = WebSourceBody | DocumentSourceBody
+class TranscriptSourceBody(ResponseBody):
+    kind: Literal["transcript"] = "transcript"
+    title: str
+    document_id: UUID = Field(alias="documentId")
+    start_ms: int = Field(alias="startMs")
+    end_ms: int = Field(alias="endMs")
+
+    @classmethod
+    def from_source(cls, source: TranscriptSource) -> Self:
+        return cls(
+            title=source.title, document_id=source.document_id, start_ms=source.start_ms, end_ms=source.end_ms
+        )
+
+
+type SourceBody = WebSourceBody | DocumentSourceBody | TranscriptSourceBody
 
 
 def source_body(source: Source) -> SourceBody:
@@ -163,6 +177,8 @@ def source_body(source: Source) -> SourceBody:
             return WebSourceBody.from_source(source)
         case DocumentSource():
             return DocumentSourceBody.from_source(source)
+        case TranscriptSource():
+            return TranscriptSourceBody.from_source(source)
 
 
 class NoteBody(ResponseBody):

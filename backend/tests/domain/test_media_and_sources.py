@@ -5,7 +5,7 @@ import pytest
 
 from deckly.domain.exceptions import InvalidGenerationRequestError, InvalidMediaError, InvalidSourceError
 from deckly.domain.media import Attribution, Media, MediaKind
-from deckly.domain.source import CitationUnit, DocumentSource, SourceQuery, WebSource
+from deckly.domain.source import CitationUnit, DocumentSource, SourceQuery, TranscriptSource, WebSource
 from tests.domain.builders import T0, client_id
 
 IMAGE_URL = "https://cdn.example.com/sign.png"
@@ -193,3 +193,53 @@ def test_document_source_whose_id_is_not_a_uuid_v4_is_rejected() -> None:
 
 def test_document_sources_of_different_pages_are_distinct_citations() -> None:
     assert len({DOCUMENT_SOURCE, replace(DOCUMENT_SOURCE, number=2), DOCUMENT_SOURCE}) == 2
+
+
+TRANSCRIPT_SOURCE = TranscriptSource(
+    title="lecture-1.m4a", document_id=DOCUMENT_ID, start_ms=0, end_ms=61_000
+)
+
+
+def test_transcript_source_cites_a_time_range_from_the_start_of_the_recording() -> None:
+    source = replace(TRANSCRIPT_SOURCE, start_ms=62_480, end_ms=121_900)
+
+    assert (source.start_ms, source.end_ms) == (62_480, 121_900)
+
+
+@pytest.mark.parametrize("start_ms", [-1, -61_000], ids=repr)
+def test_transcript_source_starting_before_the_recording_is_rejected(start_ms: int) -> None:
+    with pytest.raises(InvalidSourceError, match="startMs must be at least 0"):
+        replace(TRANSCRIPT_SOURCE, start_ms=start_ms)
+
+
+@pytest.mark.parametrize(("start_ms", "end_ms"), [(5000, 5000), (5000, 4999), (0, 0)], ids=repr)
+def test_transcript_source_that_does_not_end_after_it_starts_is_rejected(start_ms: int, end_ms: int) -> None:
+    with pytest.raises(InvalidSourceError, match="endMs must be after startMs"):
+        replace(TRANSCRIPT_SOURCE, start_ms=start_ms, end_ms=end_ms)
+
+
+def test_transcript_source_starting_at_a_boolean_is_rejected() -> None:
+    with pytest.raises(InvalidSourceError):
+        replace(TRANSCRIPT_SOURCE, start_ms=False, end_ms=1000)
+
+
+def test_transcript_source_ending_at_a_boolean_is_rejected() -> None:
+    with pytest.raises(InvalidSourceError):
+        replace(TRANSCRIPT_SOURCE, start_ms=0, end_ms=True)
+
+
+@pytest.mark.parametrize("title", ["", " \n", "\u200b"], ids=repr)
+def test_transcript_source_with_a_blank_title_is_rejected(title: str) -> None:
+    with pytest.raises(InvalidSourceError, match="title"):
+        replace(TRANSCRIPT_SOURCE, title=title)
+
+
+def test_transcript_source_whose_id_is_not_a_uuid_v4_is_rejected() -> None:
+    with pytest.raises(InvalidSourceError, match="UUID v4"):
+        replace(TRANSCRIPT_SOURCE, document_id=UUID("00000000-0000-1000-8000-000000000001"))
+
+
+def test_transcript_sources_of_different_passages_are_distinct_citations() -> None:
+    later = replace(TRANSCRIPT_SOURCE, start_ms=61_000, end_ms=120_000)
+
+    assert len({TRANSCRIPT_SOURCE, later, TRANSCRIPT_SOURCE}) == 2

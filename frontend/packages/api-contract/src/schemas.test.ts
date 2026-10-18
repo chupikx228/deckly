@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { JOB_STAGE, JOB_STATUS, NOTE_TYPE, isTerminalJobStatus } from './enums';
+import { JOB_STAGE, JOB_STATUS, NOTE_TYPE, SOURCE_KIND, isTerminalJobStatus } from './enums';
 import {
   generationJobSchema,
   generationRequestSchema,
@@ -139,6 +139,58 @@ describe('problemSchema', () => {
     });
 
     expect(parsed.code).toBe('RATE_LIMITED');
+  });
+});
+
+const recordingId = '9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a';
+
+const transcriptSource = {
+  kind: SOURCE_KIND.TRANSCRIPT,
+  title: 'lecture-3.m4a',
+  documentId: recordingId,
+  startMs: 62480,
+  endMs: 121900,
+};
+
+const noteWithSources = (sources: unknown[]): unknown => {
+  const [note] = succeededJob.result.notes;
+  return { ...succeededJob, result: { ...succeededJob.result, notes: [{ ...note, sources }] } };
+};
+
+describe('note sources', () => {
+  it('parses a transcript source with its time range', () => {
+    const parsed = generationJobSchema.parse(noteWithSources([transcriptSource]));
+
+    expect(parsed.result?.notes[0]?.sources).toEqual([transcriptSource]);
+  });
+
+  it('rejects a transcript source that ends before it starts', () => {
+    const backwards = { ...transcriptSource, startMs: 5000, endMs: 5000 };
+
+    expect(() => generationJobSchema.parse(noteWithSources([backwards]))).toThrow();
+  });
+
+  it('ignores a source whose kind it does not know and keeps the rest', () => {
+    const future = { kind: 'video_frame', title: 'clip.mp4', frame: 12 };
+
+    const parsed = generationJobSchema.parse(noteWithSources([future, transcriptSource]));
+
+    expect(parsed.result?.notes[0]?.sources).toEqual([transcriptSource]);
+  });
+
+  it.each([
+    ['null', null],
+    ['a string', 'transcript'],
+    ['an object without a kind', { title: 'lecture-3.m4a' }],
+    ['a kind that is not a string', { kind: 3, title: 'lecture-3.m4a' }],
+  ])('rejects %s instead of ignoring it as a future kind', (_label, source) => {
+    expect(() => generationJobSchema.parse(noteWithSources([source]))).toThrow();
+  });
+
+  it('still rejects a malformed source of a known kind', () => {
+    const { documentId: _documentId, ...incomplete } = transcriptSource;
+
+    expect(() => generationJobSchema.parse(noteWithSources([incomplete]))).toThrow();
   });
 });
 

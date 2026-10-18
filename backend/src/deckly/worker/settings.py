@@ -4,6 +4,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from datetime import timedelta
+from pathlib import Path
 from secrets import SystemRandom
 from uuid import UUID, uuid4
 
@@ -22,6 +23,7 @@ from deckly.application.housekeeping import (
     SweepStaleJobs,
 )
 from deckly.application.pipeline import DocumentSourcing, RunGeneration
+from deckly.application.ports import DocumentParser
 from deckly.config import (
     MINUTES_PER_HOUR,
     SECONDS_PER_MINUTE,
@@ -72,6 +74,10 @@ from deckly.infrastructure.search.tavily_client import TavilySearchClient
 from deckly.infrastructure.storage.client import StorageClient, StorageEndpoint
 from deckly.infrastructure.storage.s3_client import S3StorageClient
 from deckly.infrastructure.storage.storage import ResilientDocumentStorage
+from deckly.infrastructure.transcription.decoding import FfmpegAudioDecoder
+from deckly.infrastructure.transcription.model import pinned_checksums, require_ffmpeg, require_model
+from deckly.infrastructure.transcription.self_hosted import EngineInvocation, SelfHostedTranscriptionClient
+from deckly.infrastructure.transcription.transcriber import RecordingTranscriber
 
 SETTINGS_KEY = "settings"
 OBSERVABILITY_KEY = "observability"
@@ -88,6 +94,7 @@ SWEEP_STALE_JOBS_KEY = "sweep_stale_jobs_use_case"
 ENFORCE_JOB_RETENTION_KEY = "enforce_job_retention_use_case"
 ENFORCE_DOCUMENT_RETENTION_KEY = "enforce_document_retention_use_case"
 STORAGE_CLIENT_KEY = "storage_client"
+TRANSCRIPTION_CLIENT_KEY = "transcription_client"
 HOUSEKEEPING_TASK = "run_housekeeping"
 
 logger = logging.getLogger(__name__)
@@ -435,7 +442,57 @@ async def run_housekeeping(ctx: WorkerContext) -> None:
             logger.exception("housekeeping_step_failed", extra={"step": name})
 
 
+def build_document_parser(settings: Settings) -> DocumentTextParser:
+    return DocumentTextParser(
+        max_characters=settings.limits.document_max_source_characters,
+        deadline_seconds=settings.limits.document_parse_deadline_seconds,
+    )
+
+
+def build_transcription_client(settings: Settings) -> SelfHostedTranscriptionClient:
+    return SelfHostedTranscriptionClient(
+        invocation=EngineInvocation(
+            model_directory=settings.transcription.model_directory.resolve(),
+            cpu_threads=settings.transcription.cpu_threads,
+        ),
+        deadline_seconds=settings.transcription.deadline_seconds,
+    )
+
+
+def build_recording_transcriber(
+    settings: Settings, client: SelfHostedTranscriptionClient, ffmpeg: Path, metrics: Metrics
+) -> RecordingTranscriber:
+    return RecordingTranscriber(
+        decoder=FfmpegAudioDecoder(
+            binary=ffmpeg,
+            max_seconds=settings.limits.recording_max_duration_seconds,
+            deadline_seconds=settings.transcription.decode_deadline_seconds,
+        ),
+        client=client,
+        max_characters=settings.limits.document_max_source_characters,
+        metrics=metrics,
+    )
+
+
 async def startup(ctx: WorkerContext) -> None:
+    settings = from_context(ctx, SETTINGS_KEY, Settings)
+    await wire_generation(ctx, build_document_parser(settings))
+
+
+async def transcription_startup(ctx: WorkerContext) -> None:
+    settings = from_context(ctx, SETTINGS_KEY, Settings)
+    observability = from_context(ctx, OBSERVABILITY_KEY, Observability)
+    if not settings.transcription.enabled:
+        message = "the transcription worker cannot start while DECKLY_TRANSCRIPTION_ENABLED is false"
+        raise RuntimeError(message)
+    ffmpeg = require_ffmpeg()
+    require_model(settings.transcription.model_directory, pinned_checksums())
+    client = build_transcription_client(settings)
+    ctx[TRANSCRIPTION_CLIENT_KEY] = client
+    await wire_generation(ctx, build_recording_transcriber(settings, client, ffmpeg, observability.metrics))
+
+
+async def wire_generation(ctx: WorkerContext, parser: DocumentParser) -> None:
     settings = from_context(ctx, SETTINGS_KEY, Settings)
     observability = from_context(ctx, OBSERVABILITY_KEY, Observability)
     engine = create_engine(
@@ -499,10 +556,7 @@ async def startup(ctx: WorkerContext) -> None:
             timeout_seconds=settings.database.document_store_timeout_seconds,
         ),
         storage=document_storage,
-        parser=DocumentTextParser(
-            max_characters=settings.limits.document_max_source_characters,
-            deadline_seconds=settings.limits.document_parse_deadline_seconds,
-        ),
+        parser=parser,
         moderator=LlmMaterialModerator(llm=bounded(document_moderation_llm)),
     )
     cache_redis = build_cache_redis(settings)
@@ -525,6 +579,7 @@ async def shutdown(ctx: WorkerContext) -> None:
     engine = ctx.get(ENGINE_KEY)
     cache_redis = ctx.get(CACHE_REDIS_KEY)
     storage_client = ctx.get(STORAGE_CLIENT_KEY)
+    transcription_client = ctx.get(TRANSCRIPTION_CLIENT_KEY)
     media = ctx.get(MEDIA_FETCHER_KEY)
     retriever = ctx.get(SOURCE_RETRIEVER_KEY)
     llm_clients = (
@@ -540,6 +595,8 @@ async def shutdown(ctx: WorkerContext) -> None:
             closing.push_async_callback(cache_redis.aclose)
         if isinstance(storage_client, S3StorageClient):
             closing.push_async_callback(storage_client.aclose)
+        if isinstance(transcription_client, SelfHostedTranscriptionClient):
+            closing.push_async_callback(transcription_client.aclose)
         if isinstance(media, CommonsMediaFetcher):
             closing.push_async_callback(media.aclose)
         if isinstance(retriever, WebSourceRetriever):
@@ -555,5 +612,15 @@ class WorkerSettings:
     )
     cron_jobs: Sequence[CronJob] | None = None
     on_startup: StartupShutdown | None = startup
+    on_shutdown: StartupShutdown | None = shutdown
+    allow_abort_jobs = True
+
+
+class TranscriptionWorkerSettings:
+    functions: Sequence[WorkerCoroutine | Function] = (
+        func(run_generation, name=GENERATION_TASK, keep_result=0),
+    )
+    cron_jobs: Sequence[CronJob] | None = None
+    on_startup: StartupShutdown | None = transcription_startup
     on_shutdown: StartupShutdown | None = shutdown
     allow_abort_jobs = True

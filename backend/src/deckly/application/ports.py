@@ -27,6 +27,11 @@ class AdmissionOutcome(StrEnum):
     DOCUMENT_NOT_SUPPORTED = "document_not_supported"
 
 
+class QueueLane(StrEnum):
+    GENERATION = "generation"
+    TRANSCRIPTION = "transcription"
+
+
 class JobOutcome(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -157,7 +162,7 @@ class ResultCache(Protocol):
 
 
 class JobQueue(Protocol):
-    async def enqueue(self, job_id: UUID) -> None: ...
+    async def enqueue(self, job_id: UUID, lane: QueueLane) -> None: ...
 
     async def abort(self, job_id: UUID) -> None: ...
 

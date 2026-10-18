@@ -7,9 +7,16 @@ from collections.abc import AsyncIterator, Coroutine
 
 import pytest
 from arq.connections import ArqRedis, RedisSettings
+from arq.constants import default_queue_name
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from deckly.infrastructure.queue import ArqJobQueue, create_queue_pool, create_redis_settings
+from deckly.application.ports import QueueLane
+from deckly.infrastructure.queue import (
+    TRANSCRIPTION_QUEUE_NAME,
+    ArqJobQueue,
+    create_queue_pool,
+    create_redis_settings,
+)
 from tests.domain.builders import JOB_ID
 
 pytestmark = pytest.mark.anyio
@@ -136,7 +143,7 @@ async def test_abort_that_redis_never_answers_gives_up_after_its_timeout(
 
 async def test_enqueue_that_redis_never_answers_fails_after_its_timeout() -> None:
     async with silent_redis() as queue:
-        failure = await failure_within_safety_net(queue.enqueue(JOB_ID))
+        failure = await failure_within_safety_net(queue.enqueue(JOB_ID, QueueLane.GENERATION))
 
     assert isinstance(failure, TimeoutError)
 
@@ -148,7 +155,7 @@ async def test_enqueue_that_redis_freezes_during_is_bounded_through_its_cleanup(
         pool = await create_queue_pool(settings, read_timeout_seconds=COMMAND_TIMEOUT_SECONDS)
         try:
             queue = ArqJobQueue(pool, command_timeout_seconds=COMMAND_TIMEOUT_SECONDS)
-            failure = type(await failure_within_safety_net(queue.enqueue(JOB_ID)))
+            failure = type(await failure_within_safety_net(queue.enqueue(JOB_ID, QueueLane.GENERATION)))
         finally:
             await pool.aclose()
     gc.collect()
@@ -173,3 +180,7 @@ async def test_startup_check_against_a_frozen_redis_fails_once_its_retries_run_o
     assert redis.connections == STARTUP_RETRIES + 1
     retries = [record for record in caplog.records if record.getMessage() == "queue_connection_retrying"]
     assert len(retries) == STARTUP_RETRIES
+
+
+def test_transcription_queue_is_its_own_arq_queue() -> None:
+    assert f"{default_queue_name}:transcription" == TRANSCRIPTION_QUEUE_NAME

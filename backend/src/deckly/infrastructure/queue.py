@@ -7,12 +7,14 @@ from arq.constants import abort_jobs_ss, default_queue_name
 from arq.utils import timestamp_ms
 from redis.exceptions import RedisError
 
+from deckly.application.ports import QueueLane
 from deckly.infrastructure.observability.tracing import current_trace_carrier
 from deckly.infrastructure.rate_limit import bounded_redis, require_count
 
 logger = logging.getLogger(__name__)
 
 GENERATION_TASK = "run_generation"
+TRANSCRIPTION_QUEUE_NAME = f"{default_queue_name}:transcription"
 
 
 def create_redis_settings(url: str, *, connect_timeout_seconds: int, connect_retries: int) -> RedisSettings:
@@ -61,16 +63,25 @@ class ArqJobQueue:
         self._pool = pool
         self._command_timeout_seconds = command_timeout_seconds
 
-    async def enqueue(self, job_id: UUID) -> None:
+    async def enqueue(self, job_id: UUID, lane: QueueLane) -> None:
         async with asyncio.timeout(self._command_timeout_seconds):
             await self._pool.enqueue_job(
-                GENERATION_TASK, str(job_id), current_trace_carrier(), _job_id=str(job_id)
+                GENERATION_TASK,
+                str(job_id),
+                current_trace_carrier(),
+                _job_id=str(job_id),
+                _queue_name=self._queue_name(lane),
             )
 
-    async def depth(self) -> int:
+    async def depth(self, lane: QueueLane) -> int:
         async with bounded_redis("queue_depth_unavailable", self._command_timeout_seconds):
-            answer = await self._pool.zcard(default_queue_name)
+            answer = await self._pool.zcard(self._queue_name(lane))
         return require_count(answer, "ZCARD")
+
+    def _queue_name(self, lane: QueueLane) -> str:
+        if lane is QueueLane.TRANSCRIPTION:
+            return TRANSCRIPTION_QUEUE_NAME
+        return self._pool.default_queue_name
 
     async def abort(self, job_id: UUID) -> None:
         try:

@@ -11,7 +11,7 @@ from deckly.application.exceptions import (
     UnreadableDocumentError,
     UpstreamUnavailableError,
 )
-from deckly.application.ports import IdempotencyScope, StoredJob
+from deckly.application.ports import IdempotencyScope, QueueLane, StoredJob
 from deckly.domain.document import DocumentFormat
 from deckly.domain.exceptions import (
     DocumentNotFoundError,
@@ -126,15 +126,76 @@ async def test_document_the_client_cannot_use_is_refused_before_the_quota_or_the
     assert sample(harness, "deckly_generation_jobs_admitted_total", outcome="document_not_found") == 1
 
 
-@pytest.mark.parametrize(
-    "document_format",
-    [DocumentFormat.MP3, DocumentFormat.M4A, DocumentFormat.WAV, DocumentFormat.MP4, DocumentFormat.MOV],
-)
-async def test_recording_is_refused_before_the_quota_or_the_screen_until_it_can_be_transcribed(
+RECORDING_FORMATS = [
+    DocumentFormat.MP3,
+    DocumentFormat.M4A,
+    DocumentFormat.WAV,
+    DocumentFormat.MP4,
+    DocumentFormat.MOV,
+]
+
+
+def harness_with_recording(
+    document_format: DocumentFormat = DocumentFormat.M4A, *, transcription_enabled: bool = True
+) -> Harness:
+    harness = Harness(transcription_enabled=transcription_enabled)
+    harness.documents.keep(replace(UPLOADED_DOCUMENT, document_format=document_format, duration_seconds=60.0))
+    return harness
+
+
+@pytest.mark.parametrize("document_format", RECORDING_FORMATS)
+async def test_recording_is_queued_for_the_transcription_worker_and_nothing_else_is(
     document_format: DocumentFormat,
 ) -> None:
-    harness = Harness()
-    harness.documents.keep(replace(UPLOADED_DOCUMENT, document_format=document_format, duration_seconds=60.0))
+    harness = harness_with_recording(document_format)
+
+    created = await harness.create(document_request(), owner_scope(), ADDRESS)
+
+    assert harness.queue.enqueued == [created.job.job_id]
+    assert harness.queue.lanes == [QueueLane.TRANSCRIPTION]
+    assert harness.quota.used_by_client[DOCUMENT_CLIENT_ID] == 1
+    [screened] = harness.moderator.documents
+    assert screened is not None
+    assert screened.document_format is document_format
+
+
+@pytest.mark.parametrize("request_kind", ["topic", "document"])
+async def test_topic_and_document_requests_stay_on_the_generation_queue(request_kind: str) -> None:
+    harness = harness_with_document()
+    request = generation_request() if request_kind == "topic" else document_request()
+
+    await harness.create(request, owner_scope(), ADDRESS)
+
+    assert harness.queue.lanes == [QueueLane.GENERATION]
+
+
+async def test_replayed_request_for_a_queued_recording_job_is_requeued_on_the_transcription_queue() -> None:
+    harness = harness_with_recording()
+    created = await harness.create(document_request(), owner_scope(), ADDRESS)
+
+    replayed = await harness.create(document_request(), owner_scope(), ADDRESS)
+
+    assert replayed.job.job_id == created.job.job_id
+    assert harness.queue.enqueued == [created.job.job_id, created.job.job_id]
+    assert harness.queue.lanes == [QueueLane.TRANSCRIPTION, QueueLane.TRANSCRIPTION]
+
+
+async def test_replayed_queued_job_whose_document_is_gone_falls_back_to_the_generation_queue() -> None:
+    harness = harness_with_recording()
+    created = await harness.create(document_request(), owner_scope(), ADDRESS)
+    harness.documents.documents.clear()
+
+    await harness.create(document_request(), owner_scope(), ADDRESS)
+
+    assert harness.queue.enqueued == [created.job.job_id, created.job.job_id]
+    assert harness.queue.lanes == [QueueLane.TRANSCRIPTION, QueueLane.GENERATION]
+
+
+@pytest.mark.parametrize("document_format", RECORDING_FORMATS)
+async def test_recording_is_refused_before_the_quota_or_the_screen_where_transcription_is_disabled(
+    document_format: DocumentFormat,
+) -> None:
+    harness = harness_with_recording(document_format, transcription_enabled=False)
 
     with captured_json_logs() as logs, pytest.raises(DocumentNotSupportedForGenerationError):
         await harness.create(document_request(), owner_scope(), ADDRESS)

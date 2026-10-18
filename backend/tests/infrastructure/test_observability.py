@@ -14,7 +14,7 @@ from opentelemetry.trace import format_span_id, format_trace_id
 
 from deckly.application.correlation import CLIENT_ID, JOB_ID, REQUEST_ID, correlated, current_correlation
 from deckly.application.exceptions import UpstreamUnavailableError
-from deckly.application.ports import JobOutcome
+from deckly.application.ports import JobOutcome, QueueLane
 from deckly.domain.generation import SourceKind
 from deckly.domain.job import JobStage
 from deckly.infrastructure.llm.client import LlmPrompt, LlmReply, LlmStop, LlmUnavailableError
@@ -369,18 +369,24 @@ def test_a_canonical_client_id_is_read_whatever_the_header_case() -> None:
 
 async def test_queue_depth_is_read_on_every_scrape() -> None:
     observability = fresh_observability()
-    exposition = MetricsExposition(observability.metrics, lambda: asyncio.sleep(0, result=7))
+    depths = {QueueLane.GENERATION: 7, QueueLane.TRANSCRIPTION: 2}
 
-    text = (await exposition.render()).decode()
+    async def depth(lane: QueueLane) -> int:
+        await asyncio.sleep(0)
+        return depths[lane]
+
+    text = (await MetricsExposition(observability.metrics, depth).render()).decode()
 
     assert 'deckly_generation_queue_depth{queue="generation"} 7.0' in text
+    assert 'deckly_generation_queue_depth{queue="transcription"} 2.0' in text
 
 
 async def test_an_unreadable_queue_is_exposed_as_not_a_number_rather_than_a_stale_depth() -> None:
     observability = fresh_observability()
     observability.metrics.queue_depth.labels(queue="generation").set(3)
 
-    async def unavailable() -> int:
+    async def unavailable(lane: QueueLane) -> int:
+        del lane
         raise UpstreamUnavailableError(1)
 
     await MetricsExposition(observability.metrics, unavailable).render()

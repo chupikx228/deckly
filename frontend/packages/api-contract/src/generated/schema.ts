@@ -15,7 +15,7 @@ export interface paths {
         put?: never;
         /**
          * Start a deck generation job
-         * @description A job generates either from a topic, researched on the web, or from a document the same X-Client-Id uploaded with POST /documents, named by its documentId; a request carries exactly one of the two. A documentId that is unknown, belongs to another client, is still being uploaded or has expired is 404 DOCUMENT_NOT_FOUND, checked before the quota is used. The request is screened against the content policy (the topic, or the document's file name, together with the instructions) and one that violates it is 422 TOPIC_REJECTED. A document's text is screened again by the worker before any card is written from it; a document that violates the policy fails the job with DOCUMENT_REJECTED. A documentId that names an audio or video recording uploaded with POST /recordings is 422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION until transcription exists (DEC-86), refused before the quota is used.
+         * @description A job generates either from a topic, researched on the web, or from a document the same X-Client-Id uploaded with POST /documents, named by its documentId; a request carries exactly one of the two. A documentId that is unknown, belongs to another client, is still being uploaded or has expired is 404 DOCUMENT_NOT_FOUND, checked before the quota is used. The request is screened against the content policy (the topic, or the document's file name, together with the instructions) and one that violates it is 422 TOPIC_REJECTED. A document's text is screened again by the worker before any card is written from it; a document that violates the policy fails the job with DOCUMENT_REJECTED. A documentId that names an audio or video recording uploaded with POST /recordings is transcribed by the worker, and its notes cite transcript sources (a time range of the recording). A deployment that runs without transcription answers such a request 422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION, refused before the quota is used.
          */
         post: operations["createGeneration"];
         delete?: never;
@@ -109,7 +109,7 @@ export interface paths {
         put?: never;
         /**
          * Upload an audio or video recording
-         * @description Stores one MP3, M4A, WAV, MP4 or MOV file so a later request can refer to it by its documentId, like an uploaded document (it is read with GET /documents/{documentId} and expires the same way). The type is decided from the file's content, never from its name or the declared Content-Type, so a renamed file of another type is 415 UNSUPPORTED_DOCUMENT_TYPE, as are video files without an audio track, encrypted (DRM) audio, images in an MP4-family container (HEIC, AVIF), and damaged or truncated files. Fragmented MP4 (DASH) is accepted. The duration is read from the container's own metadata, never by decoding the audio, and a recording longer than the limit (15 minutes by default) is 422 RECORDING_TOO_LONG. A file over the size limit (48 MiB by default) is 413 DOCUMENT_TOO_LARGE and is refused before it is stored. Uploads share the document upload budget (429 RATE_LIMITED) and have their own concurrency limit (503 UPSTREAM_UNAVAILABLE with Retry-After when every slot is taken). Generating from a recording is not supported yet: POST /generations answers 422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION.
+         * @description Stores one MP3, M4A, WAV, MP4 or MOV file so a later request can refer to it by its documentId, like an uploaded document (it is read with GET /documents/{documentId} and expires the same way). The type is decided from the file's content, never from its name or the declared Content-Type, so a renamed file of another type is 415 UNSUPPORTED_DOCUMENT_TYPE, as are video files without an audio track, encrypted (DRM) audio, images in an MP4-family container (HEIC, AVIF), and damaged or truncated files. Fragmented MP4 (DASH) is accepted. The duration is read from the container's own metadata, never by decoding the audio, and a recording longer than the limit (15 minutes by default) is 422 RECORDING_TOO_LONG. A file over the size limit (48 MiB by default) is 413 DOCUMENT_TOO_LARGE and is refused before it is stored. Uploads share the document upload budget (429 RATE_LIMITED) and have their own concurrency limit (503 UPSTREAM_UNAVAILABLE with Retry-After when every slot is taken). POST /generations with the returned documentId transcribes the recording and generates from the transcript.
          */
         post: operations["uploadRecording"];
         delete?: never;
@@ -341,8 +341,8 @@ export interface components {
              */
             licenseUrl: string;
         };
-        /** @description Where a note's content comes from: a web page, or a page or slide of a document the client uploaded. Branch on kind; a client must ignore a source whose kind it does not know. */
-        Source: components["schemas"]["WebSource"] | components["schemas"]["DocumentSource"];
+        /** @description Where a note's content comes from: a web page, a page or slide of a document the client uploaded, or a time range of a recording the client uploaded. Branch on kind; a client must ignore a source whose kind it does not know. */
+        Source: components["schemas"]["WebSource"] | components["schemas"]["DocumentSource"] | components["schemas"]["TranscriptSource"];
         WebSource: {
             /**
              * @description discriminator enum property added by openapi-typescript
@@ -375,6 +375,24 @@ export interface components {
             unit: "page" | "slide";
             /** @description The 1-based page or slide the material comes from, as the document's own viewer numbers it. */
             number: number;
+        };
+        TranscriptSource: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "transcript";
+            /** @description The recording's file name. */
+            title: string;
+            /**
+             * Format: uuid
+             * @description The documentId returned by POST /recordings or POST /recordings/from-url.
+             */
+            documentId: string;
+            /** @description Where the cited passage starts, in milliseconds from the start of the recording. */
+            startMs: number;
+            /** @description Where the cited passage ends, in milliseconds from the start of the recording. Always after startMs. */
+            endMs: number;
         };
         /** @description noteType image_occlusion is rejected with VALIDATION_FAILED, because the note is built on an image the request does not carry. Exactly one of topic and documentId: a request with both, or with neither, is VALIDATION_FAILED, and so is either one sent as null. A request that names a documentId is well formed but always refused with 422 DOCUMENT_REGENERATION_UNSUPPORTED. */
         RegenerateNoteRequest: {

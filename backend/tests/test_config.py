@@ -21,6 +21,13 @@ from deckly.config import (
     DEFAULT_RECORDING_URL_SERVER_FETCHES_PER_WINDOW,
     DEFAULT_RECORDING_URL_TIMEOUT_SECONDS,
     DEFAULT_RECORDING_URL_WINDOW_SECONDS,
+    DEFAULT_TRANSCRIPTION_CPU_THREADS,
+    DEFAULT_TRANSCRIPTION_DEADLINE_SECONDS,
+    DEFAULT_TRANSCRIPTION_DECODE_DEADLINE_SECONDS,
+    DEFAULT_TRANSCRIPTION_JOB_TIMEOUT_SECONDS,
+    DEFAULT_TRANSCRIPTION_MODEL_DIRECTORY,
+    DEFAULT_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES,
+    DEFAULT_TRANSCRIPTION_WORKER_METRICS_PORT,
     DOCUMENT_DOWNLOAD_PEAK_COPIES,
     DOCUMENT_PARSE_WORKING_SET_BYTES,
     DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN,
@@ -42,11 +49,17 @@ from deckly.config import (
     MAX_RECORDING_URL_CONCURRENCY,
     MAX_RECORDING_URL_TIMEOUT_SECONDS,
     MAX_STORAGE_CONCURRENCY,
+    MAX_TRANSCRIPTION_CPU_THREADS,
+    MAX_TRANSCRIPTION_DECODE_DEADLINE_SECONDS,
+    MEASURED_TRANSCRIPTION_REAL_TIME_FACTOR,
     MEBIBYTE,
     MEDIA_URL_MIN_VALIDITY_SECONDS,
     MIN_DOCUMENT_RETENTION_SECONDS,
     MIN_JOB_RETENTION_SECONDS,
     RECORDING_URL_SUBPROCESS_PEAK_BYTES,
+    TRANSCRIPTION_ENGINE_WORKING_SET_BYTES,
+    TRANSCRIPTION_MEMORY_SAFETY_MARGIN,
+    TRANSCRIPTION_WORKER_MAX_JOBS,
     WORKER_MAX_JOBS,
     AppSettings,
     CacheSettings,
@@ -58,6 +71,7 @@ from deckly.config import (
     RegenerateSettings,
     Settings,
     SweepSettings,
+    TranscriptionSettings,
     load_settings,
 )
 from deckly.infrastructure.media.licensing import MIN_IMAGE_SIDE
@@ -233,7 +247,7 @@ REGENERATE_ENVIRONMENT = {
 }
 SWEEP_ENVIRONMENT = {
     "DECKLY_SWEEP_INTERVAL_MINUTES": "5",
-    "DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS": "900",
+    "DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS": "1200",
     "DECKLY_SWEEP_QUEUED_STALE_AFTER_SECONDS": "3600",
     "DECKLY_SWEEP_BATCH_SIZE": "500",
     "DECKLY_SWEEP_DOCUMENT_BATCH_SIZE": "100",
@@ -445,6 +459,7 @@ def settings_from_environment(monkeypatch: pytest.MonkeyPatch, **overrides: str)
         regenerate=RegenerateSettings(),
         sweep=SweepSettings(),
         observability=ObservabilitySettings.model_construct(),
+        transcription=TranscriptionSettings(),
     )
 
 
@@ -1277,10 +1292,39 @@ def test_running_job_going_stale_just_after_an_interrupted_job_settles_is_accept
     stale_after = int(ROOMY_JOB_TIMEOUT_SECONDS) + JOB_STORE_TIMEOUT_SECONDS + 1
 
     settings = settings_from_environment(
-        clean_environment, DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS=str(stale_after)
+        clean_environment,
+        DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS=str(stale_after),
+        DECKLY_TRANSCRIPTION_ENABLED="false",
     )
 
     assert settings.sweep.running_stale_after_seconds == stale_after
+
+
+def test_running_job_going_stale_before_a_transcription_job_could_record_its_failure_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    stale_after = DEFAULT_TRANSCRIPTION_JOB_TIMEOUT_SECONDS + JOB_STORE_TIMEOUT_SECONDS
+
+    with pytest.raises(ValueError, match="the longer transcription job timeout"):
+        settings_from_environment(
+            clean_environment, DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS=str(stale_after)
+        )
+
+
+def test_running_job_going_stale_just_after_a_transcription_job_settles_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    stale_after = DEFAULT_TRANSCRIPTION_JOB_TIMEOUT_SECONDS + JOB_STORE_TIMEOUT_SECONDS + 1
+
+    settings = settings_from_environment(
+        clean_environment, DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS=str(stale_after)
+    )
+
+    assert settings.longest_job_timeout_seconds == DEFAULT_TRANSCRIPTION_JOB_TIMEOUT_SECONDS
+
+
+def test_shipped_staleness_outlasts_the_shipped_transcription_job_timeout() -> None:
+    assert DEFAULT_TRANSCRIPTION_JOB_TIMEOUT_SECONDS + JOB_STORE_TIMEOUT_SECONDS < 1200
 
 
 OBSERVABILITY_ENVIRONMENT = {
@@ -1823,7 +1867,7 @@ def test_document_worker_memory_model_uses_the_measured_figures() -> None:
 @pytest.mark.parametrize(
     ("max_bytes", "peak_bytes"),
     [
-        (1, 2 * SHIPPED_RECORDING_MAX_BYTES),
+        (1, 1 + PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES),
         (SHIPPED_DOCUMENT_MAX_BYTES, SHIPPED_DOCUMENT_MAX_BYTES + PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES),
         (
             PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES - 1,
@@ -1834,7 +1878,7 @@ def test_document_worker_memory_model_uses_the_measured_figures() -> None:
         (MAX_DOCUMENT_BYTES, 2 * MAX_DOCUMENT_BYTES),
     ],
 )
-def test_document_job_peak_is_the_largest_of_the_download_parse_and_recording_download_phases(
+def test_document_job_peak_is_the_larger_of_the_download_and_parse_phases(
     clean_environment: pytest.MonkeyPatch, max_bytes: int, peak_bytes: int
 ) -> None:
     settings = limit_settings_with(
@@ -1933,7 +1977,7 @@ def test_worker_memory_budget_error_reports_every_term_and_the_single_process_as
     assert "assumes a single worker process" in message
 
 
-def test_recording_download_peak_is_two_copies_of_the_recording_size_limit(
+def test_recording_size_limit_no_longer_moves_the_generation_worker_check(
     clean_environment: pytest.MonkeyPatch,
 ) -> None:
     settings = limit_settings_with(
@@ -1944,34 +1988,9 @@ def test_recording_download_peak_is_two_copies_of_the_recording_size_limit(
         DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES=str(
             (4 + 2 * MAX_RECORDING_BYTES + RECORDING_URL_SUBPROCESS_PEAK_BYTES) * 2
         ),
-        DECKLY_LIMIT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES=str(LARGEST_DOCUMENT_WORKER_BUDGET_BYTES),
     )
 
-    assert settings.document_worker_job_peak_bytes == DOCUMENT_DOWNLOAD_PEAK_COPIES * MAX_RECORDING_BYTES
-
-
-def test_recording_size_limit_the_default_worker_budget_cannot_download_ten_of_is_rejected(
-    clean_environment: pytest.MonkeyPatch,
-) -> None:
-    with pytest.raises(ValidationError) as raised:
-        limit_settings_with(
-            clean_environment,
-            DECKLY_LIMIT_RECORDING_MAX_BYTES=str(MAX_RECORDING_BYTES),
-            DECKLY_LIMIT_RECORDING_UPLOAD_MAX_CONCURRENCY="1",
-            DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES=str(
-                (
-                    4 * SHIPPED_DOCUMENT_MAX_BYTES
-                    + 2 * MAX_RECORDING_BYTES
-                    + RECORDING_URL_SUBPROCESS_PEAK_BYTES
-                )
-                * 2
-            ),
-        )
-
-    message = str(raised.value)
-    assert "exceeds the worker memory budget" in message
-    assert f"recording size limit ({MAX_RECORDING_BYTES} bytes) while a recording downloads" in message
-    assert "DECKLY_LIMIT_RECORDING_MAX_BYTES" in message
+    assert settings.document_worker_job_peak_bytes == 1 + PARSE_AND_DOWNLOAD_PEAKS_MEET_BYTES
 
 
 def test_worker_budget_does_not_relax_the_upload_check(clean_environment: pytest.MonkeyPatch) -> None:
@@ -2272,3 +2291,254 @@ def test_the_previous_four_hundred_mebibyte_budget_no_longer_holds_one_url_fetch
         limit_settings_with(
             clean_environment, DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES=str(400 * MEBIBYTE)
         )
+
+
+RECORDING_DEADLINES_SECONDS = (
+    15 + DEFAULT_TRANSCRIPTION_DECODE_DEADLINE_SECONDS + 540 + 20 + 240 + 20 + 15 + 20
+)
+SHIPPED_DECODED_AUDIO_BYTES = 900 * 16_000 * 2
+SHIPPED_TRANSCRIPTION_WORST_CASE_BYTES = (
+    SHIPPED_RECORDING_MAX_BYTES + TRANSCRIPTION_ENGINE_WORKING_SET_BYTES + SHIPPED_DECODED_AUDIO_BYTES
+) * 2
+
+
+def test_transcription_settings_default_to_the_documented_values(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = TranscriptionSettings()
+
+    assert settings.enabled is True
+    assert (
+        settings.model_directory
+        == DEFAULT_TRANSCRIPTION_MODEL_DIRECTORY
+        == Path("models/faster-whisper-small")
+    )
+    assert settings.cpu_threads == DEFAULT_TRANSCRIPTION_CPU_THREADS == 2
+    assert settings.deadline_seconds == DEFAULT_TRANSCRIPTION_DEADLINE_SECONDS == 540
+    assert settings.decode_deadline_seconds == DEFAULT_TRANSCRIPTION_DECODE_DEADLINE_SECONDS == 30
+    assert settings.job_timeout_seconds == DEFAULT_TRANSCRIPTION_JOB_TIMEOUT_SECONDS == 960
+    assert settings.worker_memory_budget_bytes == DEFAULT_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES
+    assert DEFAULT_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES == 2560 * MEBIBYTE
+    assert clean_environment is not None
+
+
+def test_transcription_budget_model_uses_the_measured_figures_and_the_shared_margin() -> None:
+    assert MEASURED_TRANSCRIPTION_REAL_TIME_FACTOR == 0.14
+    assert TRANSCRIPTION_ENGINE_WORKING_SET_BYTES == 1024 * MEBIBYTE
+    assert TRANSCRIPTION_MEMORY_SAFETY_MARGIN == DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN == 2
+    assert TRANSCRIPTION_WORKER_MAX_JOBS == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("DECKLY_TRANSCRIPTION_CPU_THREADS", "0"),
+        ("DECKLY_TRANSCRIPTION_CPU_THREADS", str(MAX_TRANSCRIPTION_CPU_THREADS + 1)),
+        ("DECKLY_TRANSCRIPTION_DEADLINE_SECONDS", "0"),
+        ("DECKLY_TRANSCRIPTION_DEADLINE_SECONDS", str(MAX_RECORDING_DURATION_SECONDS + 1)),
+        ("DECKLY_TRANSCRIPTION_DECODE_DEADLINE_SECONDS", "0"),
+        ("DECKLY_TRANSCRIPTION_DECODE_DEADLINE_SECONDS", str(MAX_TRANSCRIPTION_DECODE_DEADLINE_SECONDS + 1)),
+        ("DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS", "0"),
+        ("DECKLY_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES", "-1"),
+        ("DECKLY_TRANSCRIPTION_ENABLED", "sometimes"),
+        ("DECKLY_TRANSCRIPTION_MODEL_DIRECTORY", ""),
+    ],
+)
+def test_transcription_settings_outside_their_bounds_are_rejected(
+    clean_environment: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    clean_environment.setenv(name, value)
+
+    with pytest.raises(ValidationError, match=name.removeprefix("DECKLY_TRANSCRIPTION_").lower()):
+        TranscriptionSettings()
+
+
+def test_recording_path_adds_decode_and_transcription_to_the_document_deadlines(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_from_environment(clean_environment)
+
+    assert settings.recording_deadlines_seconds == RECORDING_DEADLINES_SECONDS
+    assert settings.providers.recording_moderation_gate_worst_case_wait_seconds == 0
+
+
+def test_transcription_job_timeout_one_second_past_the_recording_deadlines_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_from_environment(
+        clean_environment, DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS=str(RECORDING_DEADLINES_SECONDS + 1)
+    )
+
+    assert settings.transcription.job_timeout_seconds == RECORDING_DEADLINES_SECONDS + 1
+
+
+def test_transcription_job_timeout_the_recording_deadlines_fill_is_rejected_with_every_term_named(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match="recording-sourced job") as raised:
+        settings_from_environment(
+            clean_environment, DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS=str(RECORDING_DEADLINES_SECONDS)
+        )
+
+    message = str(raised.value)
+    assert (
+        f"({RECORDING_DEADLINES_SECONDS}s: the document download, the audio decode, the transcription"
+        in message
+    )
+    assert "DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS" in message
+
+
+SINGLE_MODERATION_SLOT = {
+    "DECKLY_PROVIDER_MODERATION_MAX_CONCURRENCY": "1",
+    "DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS": "3000",
+    "DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS": "3100",
+}
+
+
+def test_moderation_gate_wait_of_the_one_job_transcription_worker_counts_against_its_timeout(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    gate_wait = 3 * 3 * 20
+    budget = RECORDING_DEADLINES_SECONDS + gate_wait
+
+    with pytest.raises(ValueError, match=f"gated stages \\({gate_wait}s\\)"):
+        settings_from_environment(
+            clean_environment,
+            **SINGLE_MODERATION_SLOT,
+            DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS=str(budget),
+        )
+    settings = settings_from_environment(
+        clean_environment,
+        **SINGLE_MODERATION_SLOT,
+        DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS=str(budget + 1),
+    )
+    assert settings.providers.recording_moderation_gate_worst_case_wait_seconds == gate_wait
+
+
+def test_transcription_deadline_at_the_measured_floor_for_the_duration_cap_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    floor = 252
+
+    settings = settings_from_environment(clean_environment, DECKLY_TRANSCRIPTION_DEADLINE_SECONDS=str(floor))
+
+    assert settings.transcription_deadline_floor_seconds == floor
+
+
+def test_transcription_deadline_under_the_measured_floor_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match="DECKLY_TRANSCRIPTION_DEADLINE_SECONDS \\(251s\\)"):
+        settings_from_environment(clean_environment, DECKLY_TRANSCRIPTION_DEADLINE_SECONDS="251")
+
+
+def test_raising_the_duration_cap_without_the_deadline_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(
+        ValueError, match="raise the deadline or lower DECKLY_LIMIT_RECORDING_MAX_DURATION_SECONDS"
+    ):
+        settings_from_environment(clean_environment, DECKLY_LIMIT_RECORDING_MAX_DURATION_SECONDS="3600")
+
+
+def test_shipped_limits_fit_the_shipped_transcription_worker_budget(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_from_environment(clean_environment)
+
+    assert settings.transcription_worker_worst_case_bytes == SHIPPED_TRANSCRIPTION_WORST_CASE_BYTES
+    assert SHIPPED_TRANSCRIPTION_WORST_CASE_BYTES < DEFAULT_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES
+
+
+def test_transcription_budget_exactly_equal_to_the_worst_case_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_from_environment(
+        clean_environment,
+        DECKLY_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES=str(SHIPPED_TRANSCRIPTION_WORST_CASE_BYTES),
+    )
+
+    assert settings.transcription.worker_memory_budget_bytes == SHIPPED_TRANSCRIPTION_WORST_CASE_BYTES
+
+
+def test_transcription_budget_one_byte_under_the_worst_case_is_rejected_with_every_term_named(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match="exceeds the transcription worker memory budget") as raised:
+        settings_from_environment(
+            clean_environment,
+            DECKLY_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES=str(SHIPPED_TRANSCRIPTION_WORST_CASE_BYTES - 1),
+        )
+
+    message = str(raised.value)
+    assert f"job concurrency ({TRANSCRIPTION_WORKER_MAX_JOBS})" in message
+    assert f"recording size limit, {SHIPPED_RECORDING_MAX_BYTES} bytes" in message
+    assert f"measured {TRANSCRIPTION_ENGINE_WORKING_SET_BYTES} bytes of working set" in message
+    assert "900s at 32000 bytes a second" in message
+    assert f"is {SHIPPED_TRANSCRIPTION_WORST_CASE_BYTES} bytes" in message
+    assert "DECKLY_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES" in message
+    assert "assumes a single transcription worker process" in message
+
+
+def test_longer_duration_cap_grows_the_decoded_audio_term_until_the_budget_refuses_it(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    hour = {
+        "DECKLY_LIMIT_RECORDING_MAX_DURATION_SECONDS": "3600",
+        "DECKLY_TRANSCRIPTION_DEADLINE_SECONDS": "1100",
+        "DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS": "1600",
+        "DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS": "1700",
+    }
+    settings = settings_from_environment(clean_environment, **hour)
+    assert settings.transcription_engine_peak_bytes == TRANSCRIPTION_ENGINE_WORKING_SET_BYTES + 3600 * 32_000
+
+    with pytest.raises(ValueError, match="exceeds the transcription worker memory budget"):
+        settings_from_environment(
+            clean_environment,
+            **{
+                **hour,
+                "DECKLY_LIMIT_RECORDING_MAX_DURATION_SECONDS": str(MAX_RECORDING_DURATION_SECONDS),
+                "DECKLY_TRANSCRIPTION_DEADLINE_SECONDS": str(MAX_RECORDING_DURATION_SECONDS),
+                "DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS": "20000",
+                "DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS": "20100",
+                "DECKLY_SWEEP_QUEUED_STALE_AFTER_SECONDS": "20100",
+            },
+        )
+
+
+def test_disabled_transcription_skips_every_transcription_check(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_from_environment(
+        clean_environment,
+        DECKLY_TRANSCRIPTION_ENABLED="false",
+        DECKLY_TRANSCRIPTION_DEADLINE_SECONDS="1",
+        DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS="1",
+        DECKLY_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES="1",
+        DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS=str(
+            int(ROOMY_JOB_TIMEOUT_SECONDS) + JOB_STORE_TIMEOUT_SECONDS + 1
+        ),
+    )
+
+    assert settings.longest_job_timeout_seconds == int(ROOMY_JOB_TIMEOUT_SECONDS)
+
+
+def test_transcription_worker_serves_metrics_on_its_own_port_by_default(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_observability_environment(clean_environment)
+
+    observability = ObservabilitySettings()
+
+    assert (
+        observability.transcription_worker_metrics_port == DEFAULT_TRANSCRIPTION_WORKER_METRICS_PORT == 9465
+    )
+
+
+def test_both_workers_on_one_metrics_port_are_rejected(clean_environment: pytest.MonkeyPatch) -> None:
+    set_observability_environment(
+        clean_environment, DECKLY_OBSERVABILITY_TRANSCRIPTION_WORKER_METRICS_PORT="9464"
+    )
+
+    with pytest.raises(ValidationError, match="must serve metrics on different ports"):
+        ObservabilitySettings()

@@ -42,6 +42,13 @@ FORMAT_READERS: Mapping[DocumentFormat, FormatReader] = MappingProxyType(
 )
 
 
+def usable_text(window: str, limit: int) -> str:
+    if garbage_share(window) > MAX_GARBAGE_SHARE:
+        return ""
+    text = clean_text(window, limit)
+    return "" if is_blank(text) else text
+
+
 class UnitOutcome(StrEnum):
     KEPT = "kept"
     BLANK = "blank"
@@ -70,7 +77,7 @@ class DocumentTextParser:
         with closing(reader.extract(content, deadline)) as units:
             for extracted in units:
                 window = extracted.text[: remaining * RAW_WINDOW_MULTIPLIER]
-                text = self._text(window, remaining)
+                text = usable_text(window, remaining)
                 outcome = UnitOutcome.KEPT if text else self._rejection(window)
                 outcomes[outcome] += 1
                 if text:
@@ -101,13 +108,6 @@ class DocumentTextParser:
             message = f"the document has {visible} visible characters of extractable text"
             raise DocumentHasNoTextError(message)
         return tuple(material)
-
-    @staticmethod
-    def _text(window: str, limit: int) -> str:
-        if garbage_share(window) > MAX_GARBAGE_SHARE:
-            return ""
-        text = clean_text(window, limit)
-        return "" if is_blank(text) else text
 
     @staticmethod
     def _rejection(raw: str) -> UnitOutcome:

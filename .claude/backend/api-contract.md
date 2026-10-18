@@ -100,8 +100,15 @@ the upload spent its own budget once and is not charged again. The content check
 document's file name together with `instructions` (a block is `422 TOPIC_REJECTED`), and the
 worker checks the document's text before any card is written from it; a document that violates
 the policy fails the job with `DOCUMENT_REJECTED`. A `documentId` that names a recording
-(`POST /recordings`) is `422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION`, checked with the document
-lookup before the quota is touched. A result for the same `documentId` and the same settings may
+(`POST /recordings` or `POST /recordings/from-url`) is transcribed by the worker and generated from
+like a document, and its notes cite `transcript` sources (below). A deployment that runs without
+transcription (`DECKLY_TRANSCRIPTION_ENABLED=false`) answers it `422
+DOCUMENT_NOT_SUPPORTED_FOR_GENERATION`, checked with the document lookup before the quota is
+touched. A job from a recording takes minutes rather than seconds: the worker transcribes at
+roughly a fifth of real time, so a 15-minute recording spends a few minutes in
+`parsing_sources`. The job fails `DOCUMENT_UNREADABLE` when its audio cannot be decoded,
+`DOCUMENT_HAS_NO_TEXT` when it contains no speech, and `PROVIDER_UNAVAILABLE` when transcription
+fails or runs out of time. A result for the same `documentId` and the same settings may
 be served from the cache, like a topic.
 
 The mobile app does not send `documentId` yet; DEC-77 adds it and regenerates
@@ -419,7 +426,8 @@ refers to.
   audio, and is never shorter than what a decoder would play. A recording longer than
   `DECKLY_LIMIT_RECORDING_MAX_DURATION_SECONDS` (15 minutes by default) is
   `422 RECORDING_TOO_LONG`. The cap is expected to rise once transcription is not bound to
-  self-hosted CPU (DEC-86).
+  self-hosted CPU. Transcription stops at the same cap measured in decoded audio, so a file whose
+  metadata understates its length is transcribed only up to the cap.
 - **Size.** At most 48 MiB (`DECKLY_LIMIT_RECORDING_MAX_BYTES`), `413 DOCUMENT_TOO_LARGE` otherwise,
   enforced exactly as for documents.
 - **Budget and capacity.** Recording uploads count against the same upload budget as documents
@@ -429,8 +437,8 @@ refers to.
   is spent, and does not affect document uploads. The body must arrive within
   `DECKLY_LIMIT_RECORDING_UPLOAD_READ_TIMEOUT_SECONDS` (240 by default), else `400`.
 - **Retention** is the same as for documents.
-- **Not yet a generation source.** `POST /generations` with a recording's `documentId` is
-  `422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION` until transcription exists (DEC-86).
+- **A generation source.** `POST /generations` with a recording's `documentId` transcribes it and
+  generates from the transcript; see `POST /v1/generations`.
 
 ### `POST /v1/recordings/from-url`
 
@@ -642,9 +650,15 @@ verify a card before saving it.
   returned by `POST /documents`), `title` (the file name), `unit` (`page` for a PDF, `slide` for a
   presentation) and `number`, 1-based as the document's own viewer numbers it. A note may cite
   several pages, or a page and a web source.
+- `kind: "transcript"` is a passage of a recording the client uploaded or fetched: `documentId`,
+  `title` (the file name), and `startMs` and `endMs`, the passage's time range in milliseconds
+  from the start of the recording (`endMs` is always after `startMs`). A passage is about a minute
+  of speech, cut where one transcribed segment ends and the next begins, so the range points the
+  user at the moment to play back.
 
 ```json
 { "kind": "document", "title": "lecture-3.pdf", "documentId": "…", "unit": "page", "number": 12 }
+{ "kind": "transcript", "title": "lecture-3.m4a", "documentId": "…", "startMs": 62480, "endMs": 121900 }
 ```
 
 ## Media
@@ -726,7 +740,7 @@ localised and is for logs.
 | `DOCUMENT_NOT_FOUND`                    | 200 in the job body | Uploaded document was gone when the job read it         |
 | `DOCUMENT_REJECTED`                     | 200 in the job body | Uploaded document's text violates content policy        |
 | `DOCUMENT_REGENERATION_UNSUPPORTED`     | 422 on regenerate   | A note of a document-sourced deck cannot be regenerated |
-| `DOCUMENT_NOT_SUPPORTED_FOR_GENERATION` | 422                 | The `documentId` names a recording, not generable yet   |
+| `DOCUMENT_NOT_SUPPORTED_FOR_GENERATION` | 422                 | A recording, on a deployment without transcription      |
 | `GENERATION_FAILED`                     | 200 in the job body | The job failed for any other reason                     |
 | `UPSTREAM_UNAVAILABLE`                  | 503                 | A provider, quota store or object store is down         |
 | `DOCUMENT_NOT_FOUND`                    | 404                 | Unknown, foreign or expired document id                 |

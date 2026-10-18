@@ -16,8 +16,11 @@ src/deckly/
   infrastructure/    adapters: async SQLAlchemy + asyncpg, Arq/Redis, JSON logging, web search and
                      source parsing (Tavily), the LLM card generator (Anthropic, DeepSeek or
                      Gemini), S3-compatible document storage, recording fetches from YouTube
-                     (yt-dlp behind an egress proxy) and the retry/circuit-breaker layer
-  worker/            Arq worker entrypoint, WorkerSettings and its composition root
+                     (yt-dlp behind an egress proxy), recording transcription (ffmpeg and
+                     faster-whisper, each in its own process) and the retry/circuit-breaker layer
+  worker/            the two Arq worker entrypoints (generation, transcription), their settings and
+                     composition root
+stubs/               type stubs for the parts of untyped dependencies the code calls
 migrations/          Alembic (async)
 ```
 
@@ -38,8 +41,9 @@ traceback and returned as `500 INTERNAL_ERROR` with no internal detail.
 
 ## Running locally
 
-Requires [uv](https://docs.astral.sh/uv/) and Docker, and ffmpeg for `make test-integration` (see
-"Recordings"). Run everything from `backend/`.
+Requires [uv](https://docs.astral.sh/uv/) and Docker, plus ffmpeg and the transcription model for
+the transcription worker and `make test-integration` (`brew install ffmpeg`, `make model`; see
+"Transcription"). Run everything from `backend/`.
 
 ```bash
 make install        # uv sync --locked (installs Python 3.12 if needed)
@@ -47,6 +51,7 @@ cp .env.example .env
 make up             # Postgres on :5433, Redis on :6380, S3Proxy object storage on :9100
 make migrate        # alembic upgrade head
 make run            # uvicorn on :8000 with reload
+make model          # once: the pinned speech model, for the transcription worker
 ```
 
 Every setting is required; the app refuses to start if one is missing, blank or invalid, and
@@ -58,7 +63,8 @@ The worker (`make worker`) consumes the queue that `POST /v1/generations` fills 
 generating cards → fetching media (only when `includeImages` is set) → finalizing. Every stage
 change goes through `JobStore.update`, which row-locks the job, so a cancel that lands first
 makes the worker stop at its next stage instead of racing it. It runs separately from the API
-and shares nothing with it but Postgres and Redis.
+and shares nothing with it but Postgres and Redis. Jobs from a recording go to a second queue
+instead, which `make transcription-worker` consumes (see "Transcription").
 
 Arq's Redis pool has no read timeout of its own, so the API builds its pool itself
 (`infrastructure/queue.py`, `create_queue_pool`) with the same connection settings Arq would use
@@ -1163,7 +1169,8 @@ and filter deadlines plus two gated stages; a document job needs the download, p
 deadlines instead of search, plus three gated stages (`TOPIC_GATED_STAGES_PER_JOB`,
 `DOCUMENT_GATED_STAGES_PER_JOB`). With `.env.example`: 335 + 120 = 455 s and 375 + 180 = 555 s, so
 `DECKLY_LIMIT_GENERATION_JOB_TIMEOUT_SECONDS` is 570. Every deployment needs the new value, or the
-worker and the API refuse to start.
+worker and the API refuse to start. A job from a recording is a third path with its own timeout on
+its own worker (`DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS`, see "Transcription").
 
 **Observability.** Lifecycle lines (`generation_admitted`, `generation_started`,
 `generation_stage_entered`, `generation_succeeded`, `generation_failed`, `generation_abandoned`)
@@ -1191,9 +1198,8 @@ it moves with them). With the default 25 MiB limit the parse phase is the larger
 105 MiB per job, 1050 MiB for ten. The download phase only dominates above 80 MiB. **A third term
 since DEC-84:** two copies of the recording size limit, for the day a worker downloads a recording
 the way it downloads a document. At the 48 MiB default that is 96 MiB, under the 105 MiB parse
-peak, so it changes nothing today; it binds once the recording limit passes 52.5 MiB. The worker
-does not read recordings yet (generation refuses them at admission), and DEC-86's transcription
-working set is not in this model: see "Recordings".
+peak, so it changed nothing; DEC-86 moved it to the transcription worker's own check, because the
+generation worker never downloads a recording (see "Transcription" → "Memory").
 
 _Why a separate budget._ The API and the worker are different processes, and in a deployment they
 get different container limits, so one shared setting would be wrong for one of them. The default
@@ -1287,10 +1293,12 @@ table, object store, upload rate limit, `GET /v1/documents/{id}` and retention s
 is referred to by its `documentId` like any upload. What differs is wired separately: its own
 concurrency gate, size limit, read deadline and content probe (`infrastructure/recordings/`), which
 also reads the duration (`documents.duration_seconds`, migration `3f8a1c6d9e27`, present in the
-response as `durationSeconds`). Until DEC-86 exists, `POST /v1/generations` with a recording's
-`documentId` is `422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION`, decided with the document lookup before
-the quota is touched (`generation_document_not_supported`, admission outcome `document_not_supported`),
-and the parser refuses a format it has no reader for instead of raising `KeyError`.
+response as `durationSeconds`). `POST /v1/generations` with a recording's `documentId` is
+transcribed by the transcription worker (DEC-86, see "Transcription"). With
+`DECKLY_TRANSCRIPTION_ENABLED=false` it is `422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION` instead, decided
+with the document lookup before the quota is touched (`generation_document_not_supported`, admission
+outcome `document_not_supported`), and the document parser refuses a format it has no reader for
+instead of raising `KeyError`.
 
 A separate endpoint rather than more types on `POST /documents`: the transport enforces the body
 limit and takes a gate slot before it knows what the file is, so one endpoint would force one size
@@ -1395,15 +1403,18 @@ found after the sample entry's fixed fields for sound description versions 0, 1 
 QuickTime's `wave` atom (iPhone MOV files keep it there).
 
 **The probe is still a gate, not the guarantee.** Codecs other than AAC in a plain (unfragmented) MP4
-or MOV, MP3-in-MP4 for one, have no floor, so DEC-84's open case remains for them; ffmpeg's CLI
-follows their timestamps, but a decoder that concatenates every packet (PyAV, which faster-whisper
-uses) would not. **DEC-86 must still bound transcription by decoded samples, not timestamps**: stop
-after cap x sample rate samples, or cap the extracted PCM's size (`-fs`), not only `-t`.
+or MOV, MP3-in-MP4 for one, have no floor, so the probe alone leaves DEC-84's open case for them.
+DEC-86 measured it and closed it downstream: such a file passes the probe, and both `ffmpeg -t` and
+PyAV decode all of it (`-t` follows the same lying timestamps), so transcription is bounded by decoded
+bytes instead, whatever the codec (see "Transcription" → "PyAV").
 
 ### Duration cap
 
-`DECKLY_LIMIT_RECORDING_MAX_DURATION_SECONDS`, default 900 (15 minutes), 1 to 14,400. It is a
-compute assumption made before DEC-86 exists, stated here so DEC-86 can confirm or correct it:
+`DECKLY_LIMIT_RECORDING_MAX_DURATION_SECONDS`, default 900 (15 minutes), 1 to 14,400. It was a
+compute assumption made before DEC-86 existed, stated so DEC-86 could confirm or correct it. **DEC-86
+measured it and kept the cap** ("Transcription" has the figures): RTF 0.11–0.25 on two cores rather
+than 0.5, 1.0–1.9 GiB rather than 1.5 GB depending on language and beam (1.03 GiB as shipped), and
+913–923 characters a minute rather than 870. The original reasoning, for the record:
 
 - **Engine:** faster-whisper `small`, int8, multilingual because `ru` is a target. `base` is too
   weak outside English; `medium` and `large-v3` are roughly 2–3x slower than `small` on CPU.
@@ -1462,9 +1473,10 @@ worst case per address is 50 uploads x 48 MiB an hour, pennies a month on R2.
 
 The original file is stored and DEC-86 extracts, or decodes directly:
 
-- faster-whisper decodes containers itself through PyAV, which bundles the FFmpeg libraries, so it
-  may need no separate extraction step at all, and paid transcription APIs accept MP4 and M4A
-  directly. Extracting at upload would pick an output format before DEC-86 picks an engine.
+- faster-whisper can decode containers itself through PyAV, which bundles the FFmpeg libraries, and
+  paid transcription APIs accept MP4 and M4A directly. Extracting at upload would have picked an output
+  format before DEC-86 picked an engine. (DEC-86 decodes with the ffmpeg program at transcription time
+  and never lets PyAV see the file; see "Transcription".)
 - The API stays pure Python: no ffmpeg on the request path or in the API image, and upload latency
   does not change.
 - The cost is small and lands on DEC-86. Video objects are larger than extracted audio, but for at
@@ -1474,15 +1486,17 @@ The original file is stored and DEC-86 extracts, or decodes directly:
 
 ### ffmpeg: a system dependency, for tests and CI only
 
-DEC-84 adds no Python package. It does add **ffmpeg as a system binary, but only where tests run**:
+DEC-84 added no Python package. It did add **ffmpeg as a system binary, then only where tests run**:
 the integration suite extracts audio from the MP4 and MOV objects it stored in S3Proxy and checks
 the result's length, and checks that extraction stops at the cap however long the input is
-(`tests/ffmpeg.py`, `make test-integration`). Locally that needs `brew install ffmpeg` (8.0 at the
+(`make test-integration`). **Since DEC-86 ffmpeg is also a runtime dependency of the transcription
+worker**, and those tests run the production decoder (`tests/ffmpeg.py` only builds it). Locally that needs `brew install ffmpeg` (8.0 at the
 time of writing). CI's `ubuntu-24.04` image does not include ffmpeg, so the backend job now runs
 `apt-get install --no-install-recommends ffmpeg` (6.1, signed by the Ubuntu archive) before the
 integration tests. The tests do not depend on version-specific output.
 
-`tests/ffmpeg.py` is also the recipe DEC-86 should start from:
+The recipe DEC-86 started from, now `infrastructure/transcription/decoding.py` (which dropped `-t` and
+bounds the output in bytes instead, for the reasons in "Transcription"):
 
 - An argument list to `asyncio.create_subprocess_exec`, never a shell.
 - The demuxer forced from the sniffed type (`-f mov`, `-f mp3`, `-f wav`), so a file cannot switch
@@ -1527,8 +1541,6 @@ ffmpeg "${q[@]}" -f lavfi -i testsrc=size=32x32:rate=5:duration=2 -f lavfi -i si
 
 ### Not done here
 
-- **DEC-86:** transcription, its stage deadline and memory, decoding bounded by samples, and lifting
-  the generation refusal.
 - **Frontend:** the mobile app does not call `POST /v1/recordings`. Its generated contract types
   are regenerated, but the Zod schemas and the mock transport do not know the endpoint. Audio-only
   export of phone video belongs there too.
@@ -1723,6 +1735,367 @@ deadline) and stores a document nobody reads, swept like any other.
 - **Request body size:** like every JSON endpoint here, the body is read before it is validated;
   the reverse proxy's body limit is what bounds it.
 
+## Transcription
+
+`POST /v1/generations` with a recording's `documentId` (DEC-86) transcribes the recording and
+generates from the transcript like any document: the same job, stages, quota, cache, moderation and
+result. What differs is where it runs and what it cites. The job goes to its own queue, which only
+`deckly-transcription-worker` reads; the worker decodes the recording with ffmpeg into at most the
+duration cap of audio, runs faster-whisper in a separate engine process, and turns the transcript
+into `SourceMaterial` whose sources are `TranscriptSource` time ranges. The code is
+`infrastructure/transcription/`; nothing in `application/pipeline.py` changed, because the
+transcriber is a `DocumentParser`: transcription is what `parsing_sources` does for a recording.
+
+### Engine: faster-whisper `small`, int8, greedy
+
+DEC-84 sized the duration cap on estimates. They were measured here, on real speech rather than test
+tones: LibriVox recordings, which are public domain, of a 1916 Cambridge lecture in English
+("Russian Realities and Problems", lecture 1) and of Turgenev in Russian ("Хорь и Калиныч"),
+15-minute clips scored against the books' text (archive.org's OCR for the English, which inflates its
+error rate a little, and ru.wikisource for the Russian). The machine is an Apple M3 Pro, both native
+and in a Linux arm64 container limited with `--cpus` (Docker Desktop's VM, `python:3.12-slim`),
+faster-whisper 1.2.1, CTranslate2 4.8.3, `small` quantised to int8 at load, VAD on. RTF is the real-time
+factor, seconds of work per second of audio; memory is the engine process's peak resident set
+(`/usr/bin/time` in the container).
+
+| Linux container, 2 vCPU, 120 s chunks | RTF   | 15 minutes takes | Peak memory | Word error rate |
+| ------------------------------------- | ----- | ---------------- | ----------- | --------------- |
+| English, beam 5                       | 0.153 | 138 s            | 1,316 MiB   | 7.6 %           |
+| English, beam 1 (shipped)             | 0.111 | 100 s            | 1,026 MiB   | 7.7 %           |
+| Russian, beam 5                       | 0.251 | 226 s            | 1,875 MiB   | 18.3 %          |
+| Russian, beam 1 (shipped)             | 0.140 | 126 s            | 1,030 MiB   | 20.4 %          |
+
+- **Beam 1, not faster-whisper's default of 5.** It is 1.4–1.8x faster and halves the Russian peak,
+  for no measurable loss in English and two points of word error rate in Russian. The transcript feeds
+  a model that writes cards, not a reader, so the trade is cheap. It is a constant
+  (`engine.py`, `BEAM_SIZE`), not a setting, because the memory budget below is measured for it.
+- **Chunks of 120 s, cut at the quietest 100 ms of their last 10 s.** faster-whisper computes the
+  spectrogram and runs VAD over the whole array it is given, so unchunked memory grows with the
+  audio: 1.09, 1.29 and 1.81 GiB for 1, 5 and 15 minutes (native, beam 5). Chunking bounds it, for
+  about 14 % more CPU, and the cut lands in a pause between words: the chunked English transcript has
+  the same word count as the unchunked one and a word error rate of 7.63 % against 7.83 %. The
+  language is detected on the first chunk with speech and kept for the rest.
+- **The language is detected, never taken from the request.** The request's `language` is the
+  language of the cards, which need not be the recording's.
+- **Threads.** 1, 2 and 4 threads gave RTF 0.245, 0.162 and 0.110 natively; in the container, 4 vCPU
+  was no faster than 2 (0.164 against 0.153). `DECKLY_TRANSCRIPTION_CPU_THREADS` defaults to 2; set it
+  to the transcription worker's vCPUs.
+- **Text.** 923 characters a minute in English and 913 in Russian (DEC-84 estimated 870), so
+  `DECKLY_LIMIT_DOCUMENT_MAX_SOURCE_CHARACTERS` (40,000) fills at about 43 minutes. Past that, the rest of
+  the transcript is cut like a long document's (`transcript_parsed` logs `budget_exhausted`), and the
+  CPU spent on it is wasted, so raising the duration cap past ~40 minutes needs the character budget
+  raised with it.
+- **Adversarial audio.** Five minutes of white noise cost RTF 0.002 (VAD keeps none of it; 0.038
+  without VAD), and two voices talking over each other 0.14, so noise does not multiply the work
+  through Whisper's temperature fallback. The deadline below bounds what does.
+- **Model load** takes 0.3–1.3 s, so the engine is started per job (below) rather than kept warm.
+- **Russian quality is the weak spot** (about one word in five wrong). `medium` would be better and
+  2–3x slower. This was accepted for v1; a paid provider (below) is the planned way past it.
+
+**Is it viable at the 15-minute cap? Yes.** The worst shipped case, Russian at 15 minutes, is 126 s on
+two M3 cores. A cloud vCPU is a hyperthread of a slower server core; assuming one is half as fast,
+that is about 4–5 minutes, inside the 540 s deadline with room to spare. That factor is an
+assumption: `deckly_transcription_real_time_factor` measures the deployment's real one (below), and
+the deadline should be revisited against it. Throughput is the real limit: one 2-vCPU transcription
+worker finishes roughly 8–10 recordings at the cap an hour, so scale it by replicas.
+
+### PyAV, and why the engine is never given the file
+
+DEC-84's comment was right, and the risk is broader than it said. faster-whisper decodes a path or a
+file object with `decode_audio`, which runs PyAV's `container.decode(audio=0)` over every packet, with
+no cap and no regard for timestamps, and buffers all of it (int16, then a float32 copy) before
+transcribing. Handing `transcribe()` a NumPy array skips PyAV entirely, which is what the engine does.
+(On PyPI, faster-whisper 1.2.1's `decode_audio` does not even run with PyAV 19, which removed an
+argument it passes; the fix is on faster-whisper's main branch but unreleased.)
+
+The bound has to come from somewhere other than metadata. A 41-minute MP3 remuxed into MP4 with its
+time-to-sample deltas cut from 1152 to 32, the non-AAC case DEC-84 and DEC-85 left open:
+
+| Who reads it                                  | Says or decodes                                                            |
+| --------------------------------------------- | -------------------------------------------------------------------------- |
+| The upload probe (`recordings/isobmff.py`)    | 136.6 s, accepted under the 900 s cap                                      |
+| `ffmpeg -t 900`                               | 2,459 s decoded: `-t` follows the same lying timestamps, so it never fires |
+| PyAV's decode loop (what `decode_audio` does) | 2,459 s decoded, in 1.4 s                                                  |
+| A read of ffmpeg's PCM output capped in bytes | exactly 900 s                                                              |
+
+So the earlier note that "ffmpeg's CLI follows their timestamps" was true and was not a protection:
+it follows them to the wrong answer. **The decoder is bounded by decoded bytes, and only by them**
+(`decoding.py`): ffmpeg writes 16 kHz mono s16le to a pipe, the worker copies at most
+`DECKLY_LIMIT_RECORDING_MAX_DURATION_SECONDS` x 32,000 bytes to a scratch file, reads one byte more to
+tell a recording that ended at the cap from one that ran past it, and kills ffmpeg's process group in
+the second case. A recording cut that way is logged as `recording_decode_truncated` (with what the
+upload claimed and what was decoded) and counted in `deckly_recording_decode_truncations_total`, and is
+transcribed up to the cap; no codec needs its own floor. `-t` was dropped from DEC-84's recipe: it bounds
+nothing a lie can get past, and an honest recording it cut would end exactly at the cap and never be
+counted. The rest of the recipe stands: an argument list, never a shell; the demuxer forced from the
+sniffed type; `-protocol_whitelist file`; `-nostdin -vn -sn -dn -map_metadata -1 -threads 1`; an empty
+`PATH`; its own session; and a wall-clock deadline (`DECKLY_TRANSCRIPTION_DECODE_DEADLINE_SECONDS`,
+30; 15 minutes decodes in 0.42 s at 21 MiB) after which the process group is killed and the job fails
+`DOCUMENT_UNREADABLE`. The engine reads at most the sample count it is told, and segment timestamps
+are clamped to the audio, so nothing downstream can cite past the cap either. The integration suite
+builds this lying file from a real fixture and demonstrates all four rows of the table.
+
+### Isolation: its own queue, its own worker, its own process
+
+The ticket assumed transcription would hold the GIL for the whole job. **It does not**: CTranslate2
+releases the interpreter lock while it computes. Measured with a 5-minute transcription running beside
+an event loop that times 10 ms sleeps and five small fake generation jobs:
+
+| Beside the event loop      | Native, 4 threads: lag p99 / max, job time | Container, 2 vCPU, 2 threads |
+| -------------------------- | ------------------------------------------ | ---------------------------- |
+| Nothing                    | 1.3 ms / 7.6 ms, 1.13 s                    | 3.0 ms / 5.6 ms, 1.23 s      |
+| Transcription in a thread  | 1.5 ms / 41 ms, 1.11 s                     | 3.2 ms / 83 ms, 1.19 s       |
+| Transcription in a process | 2.0 ms / 13 ms, 1.12 s                     | 18 ms / 77 ms, 1.21 s        |
+
+So a semaphore around a thread would not starve the event loop either. What would go wrong is
+everything else, and each is why the design is what it is:
+
+1. **Arq slots.** The generation worker runs ten jobs at once. A recording job holds a slot for
+   minutes, and any gate in front of the engine makes the jobs waiting at it hold slots too, so a
+   burst of recordings fills all ten and topic jobs wait in Redis behind them. Recording jobs therefore
+   go to their own queue (`arq:queue:transcription`, `QueueLane.TRANSCRIPTION`), chosen at admission from
+   the document's format (`lane_for` in `application/generations.py`; a replay of a queued job looks the
+   document up again). Generation workers never see them, and a recording job that reached one anyway
+   would fail `DOCUMENT_UNREADABLE`, because the generation worker's parser has no reader for audio.
+2. **Transcriptions slow each other.** Two at once on 2 vCPU took RTF from 0.16 to 0.44 and 0.51, so
+   each would miss a deadline sized for one. The transcription worker runs **one job at a time**
+   (`TRANSCRIPTION_WORKER_MAX_JOBS`, a constant like `WORKER_MAX_JOBS`); others wait in its queue, not
+   on its CPU. Scale is more replicas, each in its own container.
+3. **A thread cannot be killed.** Arq's timeout and a client's cancel cancel the coroutine, but a
+   transcription in a thread would run on, using the CPU while the worker starts the next job: the two
+   overlapping transcriptions of point 2. The engine is a child process instead
+   (`python -I -m deckly.infrastructure.transcription.engine`, the yt-dlp runner's recipe: isolated mode,
+   its own session, scratch `HOME`/`TMPDIR`, empty `PATH`, `HF_HUB_OFFLINE=1`), and any exception or
+   cancellation kills its process group (`process.py`). Its stdout is the transcript as one JSON
+   document, capped at 16 MiB and validated with pydantic (`engine_output.py`); a crash or the deadline
+   fails the job `PROVIDER_UNAVAILABLE`.
+4. **Memory.** About 1 GiB per transcription does not fit in the generation worker's 1,280 MiB budget
+   at all, so it has its own (below), in its own container.
+
+The worker is the same image and the same composition root (`wire_generation` in `worker/settings.py`)
+with a `RecordingTranscriber` as the document parser, its own queue, timeout and metrics port, and no
+housekeeping cron. It refuses to start without ffmpeg, without the pinned model, or while
+`DECKLY_TRANSCRIPTION_ENABLED` is false. **Deploy it as its own container with its own CPU quota**; that,
+not the process boundary, is what keeps its cores away from the generation worker's. Co-located on one
+host (local development), the generation worker is still fine, per the table: its work is I/O.
+
+The integration suite demonstrates this rather than asserting it, each with a control that shows the
+failure it prevents: generation jobs keep their pace (lag p99 under 50 ms, under 1.5x their solo time)
+beside a real transcription in a loop, while the same probe catches an in-process thread that holds the
+interpreter lock; three recordings and a topic job on real Arq workers, where the topic job starts at
+once and the recordings run strictly one after another, against the same four jobs on one shared queue,
+where the topic waits behind three overlapping transcriptions; and a cancelled transcription leaves no
+engine process running.
+
+### Timing and the job budget
+
+Transcription needs its own job timeout: a recording job at the cap does not fit the 570 s that topic
+and document jobs get, and raising that would let a hung topic job run three times longer. The Arq
+timeout is per worker, so the transcription worker has its own
+(`DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS`, 960), checked at startup like DEC-68/76's per-path
+budgets, as a third path:
+
+| Recording-sourced job                      | Deadline (default) |
+| ------------------------------------------ | ------------------ |
+| Download (`STORAGE_DOWNLOAD_DEADLINE`)     | 30 s               |
+| Decode (`TRANSCRIPTION_DECODE_DEADLINE`)   | 30 s               |
+| Transcription (`TRANSCRIPTION_DEADLINE`)   | 540 s              |
+| Transcript screening (moderation filter)   | 20 s               |
+| Model, media, media judge, content filter  | 295 s              |
+| Moderation gate waits (one job per worker) | 0 s                |
+| **Total, which must stay under 960 s**     | **915 s**          |
+
+`DECKLY_TRANSCRIPTION_DEADLINE_SECONDS` (540) allows an RTF of 0.6 at the 900 s cap, four times the
+worst measured above. A second check refuses a deadline under cap x the measured RTF (0.14) x 2
+(252 s at the default cap), so raising the duration cap without the deadline fails at startup instead
+of as timeouts. **The stale-job sweep had to move with it:** a running job must not go stale before the
+longest job timeout has passed, so `DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS` is now 1,200 (was 900),
+and the startup check uses the transcription timeout while transcription is enabled. The cost is that a
+topic job whose worker crashed shows as running for up to 20 minutes rather than 15 before the sweep
+fails it. A per-source sweep would avoid that and was judged not worth its complexity yet.
+
+**Backlog.** Queued jobs still go stale after `DECKLY_SWEEP_QUEUED_STALE_AFTER_SECONDS` (one hour), so a
+transcription queue deeper than about an hour of work fails the jobs at its tail. There is no admission
+backpressure; `deckly_generation_queue_depth{queue="transcription"}` is reported next to the generation
+queue's on the API's `/metrics`. **Alert on it** (more than about eight waiting per replica) and add
+replicas.
+
+A recording job spends minutes in `parsing_sources` with nothing to show; the stage does not report
+progress within itself.
+
+### Memory
+
+`DECKLY_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES`, default 2,560 MiB (a 3 GiB container less about
+512 MiB for the worker process itself). The check is the same shape as DEC-81's and DEC-85's, with
+DEC-85's x2 margin:
+
+> 1 job x (recording size limit + 1,024 MiB of engine working set + the cap's decoded audio) x 2
+
+The recording stays in the worker's memory while it is transcribed (the pipeline holds the downloaded
+bytes for the length of the parse), the engine's working set is the measured 1,030 MiB peak less the
+27.5 MiB of decoded audio it held, rounded up, and the decoded audio is the cap x 32,000 bytes, because
+the engine reads it whole before chunking. The download's two copies and ffmpeg's 21 MiB come before the
+engine starts, so they never add to it. With the defaults: (48 + 1,024 + 27.5) MiB x 2 = 2,199 MiB. A
+one-hour cap still fits (2,364 MiB); the four-hour ceiling does not (3,023 MiB), so the budget must grow
+with it. The generation worker's own check lost the recording term DEC-84 added for this day, since it
+never downloads a recording now. The scratch directory (the recording, about 28 MiB of PCM at the cap)
+must be on disk, not a tmpfs, or it counts against the container's memory too.
+
+### Transcripts and citations
+
+`TranscriptSource(title, document_id, start_ms, end_ms)` is the third `Source` variant
+(`domain/source.py`), `{"kind": "transcript", "title", "documentId", "startMs", "endMs"}` on the wire.
+Whisper's segments (2–10 s each) are grouped into passages of about a minute, cut where one segment ends
+and the next begins (`transcriber.py`), so a 15-minute lecture is about 15 citable entries, as a PDF is a
+few dozen pages; each passage is cleaned and budgeted exactly as a page is (`usable_text`, shared with
+`DocumentTextParser`). `CardGenerator`, the transcript screening and the content filter are unchanged:
+they only read a source's title and text, which a test pins as for DEC-75. The stored-result
+discriminator had to learn the new shape: it told sources apart by a `document_id` key, which a
+transcript source has too, so a transcript would have been read back as a malformed document source.
+
+**Precision.** A cited range always contains its speech and never runs past the audio. Its end is
+accurate to a few hundred milliseconds. Its start can be early by the length of a pause before it:
+across the fixture's 6-second silence, faster-whisper starts the second sentence's segment at 11.4 s
+although VAD (correctly) finds speech resuming at 17.4 s, a property of how faster-whisper maps segments
+back across the silence it removed. Word timestamps did not change that (11.3 s) and cost 10–16 % more
+CPU, so they are off. For "play from here" that errs the right way.
+
+**The contract change** (DEC-75's precedent): `openapi.yaml` and `api-contract.md` gained the variant and
+the regenerated `@deckly/api-contract` types carry it. The Zod schema needed more than the new shape: it
+was a strict `discriminatedUnion`, so a note with any source kind the app does not know failed the whole
+job's parse, although the contract tells clients to ignore unknown kinds. Sources are now filtered to
+known kinds before validation, which still rejects a malformed source of a known kind.
+
+### Provider interface and the paid-API swap
+
+`TranscriptionClient` (`client.py`) mirrors `LlmClient`: `transcribe(DecodedAudio) -> Transcript` and
+`aclose()`, with `TranscriptionError`, `TranscriptionUnavailableError` (a `TransientError`, so a paid
+adapter can sit behind `ResilientCaller` like the LLM clients) and `TranscriptionResponseError`.
+`Transcript` is provider-neutral: segments of `start_ms`, `end_ms` and text, and the detected language.
+Everything self-hosted (model directory, threads, beam) lives in the adapter's constructor
+(`EngineInvocation`), as `LlmEndpoint` does for text models.
+
+The port takes **decoded, capped audio**, not the stored file, on purpose: the truncation guarantee above
+then holds for every provider, and a paid one is never sent, or billed for, more than the cap. Checked,
+not built, against the three named: OpenAI's transcription endpoint takes WAV up to 25 MB per request (16
+kHz mono WAV reaches that at about 13 minutes, so its adapter splits, or encodes to FLAC), and returns
+segments with timestamps in `verbose_json`; Deepgram and AssemblyAI take a raw upload and return
+utterances or sentences with timestamps. Each is a new adapter that wraps the PCM in a WAV header
+(standard library `wave`), maps its segments, and is wired in `build_transcription_client`; the
+transcriber, the pipeline and the contract do not change. When one exists, transcription can run in the
+generation worker's own process too, since it would be I/O.
+
+### Model weights
+
+`Systran/faster-whisper-small` (MIT, as are OpenAI's Whisper weights it was converted from), revision
+`536b0662742c02347bc0e980a01041f333bce120`, 484 MB. `make model` downloads `config.json`, `model.bin`,
+`tokenizer.json` and `vocabulary.txt` from that revision over HTTPS and checks each against
+`infrastructure/transcription/model.sha256`, re-downloading any that is missing or does not match; the
+transcription worker checks the same file at startup (about a second to hash) and refuses to start on a
+mismatch, and the engine loads with `local_files_only` and `HF_HUB_OFFLINE=1`, so nothing ever talks to
+the Hugging Face Hub at run time. The checksums, not the revision, are the pin: a revision can be
+re-pointed, the bytes cannot. The directory (`DECKLY_TRANSCRIPTION_MODEL_DIRECTORY`,
+`models/faster-whisper-small`, ignored by git) belongs in the worker image, fetched at build time. CI
+caches it keyed on the checksum file.
+
+### New dependencies
+
+Researched to the depth of DEC-8, DEC-9, DEC-84 and DEC-85. They are a dependency group,
+`transcription`, which `make install` installs (`default-groups`), so development, type checking and CI
+have them; **the API image should be built with `uv sync --no-group transcription`**, and the
+import-linter contract "Only the transcription engine, in its own process, loads the speech model" fails
+the build if anything but `engine.py` imports `faster_whisper`, `ctranslate2`, `av` or `onnxruntime`. All
+are exact pins in `uv.lock`, so `make audit` covers them.
+
+| Package         | Version | License                                                                 | Why it is here                                                                                                                                                      |
+| --------------- | ------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| faster-whisper  | 1.2.1   | MIT                                                                     | The engine. Active repository (commits this week) but no release since 2025-10; its PyAV dependency is unbounded (`av>=11`), which is how 19.0 broke `decode_audio` |
+| ctranslate2     | 4.8.3   | MIT                                                                     | The inference runtime (released 2026-10), wheels for manylinux x86-64 and aarch64 and macOS                                                                         |
+| av (PyAV)       | 19.0.1  | BSD-3-Clause, bundling FFmpeg (LGPL-3.0) and libx264/libx265 (GPL-2.0+) | Required by faster-whisper; never called, see below                                                                                                                 |
+| onnxruntime     | 1.31.0  | MIT                                                                     | Silero VAD; 76 MB, pulls `protobuf` (BSD-3) and `flatbuffers` (Apache-2.0)                                                                                          |
+| tokenizers      | 0.23.3  | Apache-2.0                                                              | Whisper's tokenizer                                                                                                                                                 |
+| huggingface-hub | 2.2.0   | Apache-2.0                                                              | Required by faster-whisper; offline at run time. Pulls `hf-xet`, `fsspec`, `filelock`, `tqdm`                                                                       |
+| numpy           | 2.5.4   | BSD-3-Clause                                                            | Already transitive; now imported by the engine                                                                                                                      |
+
+About 170 MB installed. faster-whisper and CTranslate2 ship no type information, which mypy's
+`disallow_any_unimported` refuses, so `stubs/faster_whisper/__init__.pyi` declares the three names the
+engine uses (`WhisperModel`, `Segment`, `TranscriptionInfo`) with the signatures it calls; the
+integration tests exercise the real ones. **ffmpeg moves from a test-only binary to a runtime dependency
+of the transcription worker** (Debian `ffmpeg` in its image, as CI already installs).
+
+**PyAV's bundled GPL libraries.** This is not a legal opinion, only the facts that a review needs, in the
+same spirit as the yt-dlp and mutagen notes in "Recordings". PyAV's own code is BSD-3-Clause, and the
+FFmpeg it bundles reports itself as "LGPL version 3 or later" (`--enable-version3`, without
+`--enable-gpl`). The same wheel nonetheless ships `libx264` and `libx265`, which are GPL-2.0-or-later and
+which that FFmpeg links for its encoders (`--enable-libx264 --enable-libx265`, seen in the bundled
+library's configuration string). It cannot be left out: faster-whisper imports PyAV when it is imported.
+The posture taken, like this project's other license decisions:
+
+- **Never invoked.** The service never opens a file with PyAV and never encodes video; the engine hands
+  faster-whisper NumPy arrays, and the import contract above keeps PyAV out of every other module.
+  Decoding is done by the separate `ffmpeg` program.
+- **Not distributed.** The GPL's obligations attach to distributing the binaries. The transcription
+  worker's image runs on this project's own infrastructure and is not given to anyone; the mobile app
+  contains none of it, and the API image does not install the group at all.
+- **What would change it.** Shipping that image to a third party (an on-premises offering, a published
+  container) would distribute GPL code and needs a real review first, as would statically linking any of
+  it. The Debian `ffmpeg` program is GPL as well, but runs as a separate program rather than being
+  linked, and the same review would cover it. The way out, if one is needed, is a PyAV built without
+  those encoders, which faster-whisper does not mind.
+- mutagen was rejected in DEC-84 because the probe would have **called** GPL code in the API process for
+  every upload; this is the different case of GPL code that is installed but never run.
+
+### Running it
+
+```bash
+make model                  # once: fetch and verify the pinned model into models/
+make transcription-worker   # deckly-transcription-worker, next to make worker
+```
+
+Logs: `recording_decoded` or `recording_decode_truncated`, `recording_transcribed` (audio seconds,
+transcription seconds, real-time factor, language, segments), `recording_transcription_failed`,
+`transcript_parsed`. Metrics, on the transcription worker's own port
+(`DECKLY_OBSERVABILITY_TRANSCRIPTION_WORKER_METRICS_PORT`, 9465; the two workers' ports must differ):
+`deckly_transcription_real_time_factor` (a histogram: compare it with the 0.6 the deadline allows) and
+`deckly_recording_decode_truncations_total`, beside the usual job and stage metrics with `source="document"`.
+`DECKLY_TRANSCRIPTION_ENABLED=false` is the escape hatch for a deployment without the worker: the API
+then answers a recording's generation `422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION` before the quota is
+touched, as before DEC-86, and the transcription checks are skipped.
+
+### Fixtures
+
+`tests/fixtures/recordings/speech-en.mp3` (11.5 s), `speech-ru.mp3` (7.2 s) and `speech-pause.mp3` (the
+English sentence, 6 s of silence, a later sentence of the same lecture; 22.7 s) are cut from the LibriVox
+recordings above, which are public domain, as 24 kbps 16 kHz mono MP3 (126 KB together):
+
+```bash
+q=(-hide_banner -loglevel error -y -bitexact)
+# en.mp3: archive.org/download/russian_realities_problems_1909_librivox/russianrealitiesandproblems_01_various_64kb.mp3
+# ru.mp3: archive.org/download/zapiskiohotnika_2409_librivox/zapiskiohotnika_01_turgenev_64kb.mp3
+ffmpeg -hide_banner -loglevel error -y -ss 30 -t 900 -i en.mp3 -c copy en15.mp3   # likewise ru15.mp3
+ffmpeg "${q[@]}" -ss 0 -t 11.5 -i en15.mp3 -ac 1 -ar 16000 -c:a libmp3lame -b:a 24k speech-en.mp3
+ffmpeg "${q[@]}" -ss 0 -t 7.2 -i ru15.mp3 -ac 1 -ar 16000 -c:a libmp3lame -b:a 24k speech-ru.mp3
+ffmpeg "${q[@]}" -ss 0 -t 11.5 -i en15.mp3 -f lavfi -t 6 -i anullsrc=r=16000:cl=mono -ss 18.12 -t 5.2 -i en15.mp3 \
+  -filter_complex "[0:a]aresample=16000,aformat=channel_layouts=mono[a];[2:a]aresample=16000,aformat=channel_layouts=mono[b];[a][1:a][b]concat=n=3:v=0:a=1[out]" \
+  -map "[out]" -ac 1 -ar 16000 -c:a libmp3lame -b:a 24k speech-pause.mp3
+```
+
+The lying file is built in the test from `speech-pause.mp3` (remuxed into MP4 by ffmpeg, then
+`understated_timing` in `tests/recording_files.py`). The model-backed tests are integration tests, so
+`make test` needs neither the model nor ffmpeg.
+
+### Not done here
+
+- **DEC-89:** caching a transcript per document, so a second generation from the same recording does not
+  transcribe it again.
+- **DEC-90:** YouTube's own captions as an alternative to transcribing a fetched video.
+- **Frontend:** the app does not upload recordings or generate from them yet; its contract types and Zod
+  schema know the transcript source (above), its UI does not.
+- **Progress within `parsing_sources`**, and a sweep that knows a transcription job's timeout from a
+  topic job's.
+- **A benchmark on the deployment's hardware.** The cloud speed above is an assumption; the
+  real-time-factor histogram is how to replace it.
+
 ## Production deployment
 
 Nothing in this repository deploys the service yet; these are the decisions a deployment has to
@@ -1833,6 +2206,15 @@ the API process, and it still needs the same network rule), and authenticating t
 `/metrics` still gets probed). Check a deployment with `curl -i https://<public host>/metrics`
 (expect `404`) and `curl http://<public address>:9464/metrics` (expect a refused connection).
 
+### Transcription worker
+
+Its own container, with its own CPU quota and a memory limit that leaves room for
+`DECKLY_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES`; Debian's `ffmpeg` installed; the model fetched by
+`make model` at image build time (not at start, so a replica never depends on the Hugging Face Hub);
+a scratch directory on disk rather than a tmpfs; `DECKLY_TRANSCRIPTION_CPU_THREADS` set to the
+container's vCPUs. The API image is built without the `transcription` dependency group. Alert on the
+transcription queue's depth and watch the real-time factor histogram (see "Transcription").
+
 ## Checks
 
 ```bash
@@ -1840,7 +2222,8 @@ make check          # suppression guard, ruff format --check, ruff check (incl. 
                     # mypy --strict, import-linter, vulture
 make fix            # ruff format + ruff check --fix
 make test           # pytest with coverage, no infrastructure needed
-make test-integration  # Postgres + Redis tests, appends to the coverage data; needs make up && make migrate
+make test-integration  # Postgres + Redis tests, appends to the coverage data; needs make up && make migrate,
+                       # and ffmpeg and make model for the transcription tests
 make coverage-gate  # coverage floors; run after make test and make test-integration
 make audit          # pip-audit over uv.lock; needs network
 make test-live     # calls the model provider configured in .env; needs a real key, costs money

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deckly.application.generations import CancelGeneration
 from deckly.application.housekeeping import EnforceJobRetention, SweepStaleJobs
 from deckly.application.pipeline import RunGeneration
+from deckly.application.ports import QueueLane
 from deckly.config import Settings
 from deckly.domain.job import Cancelled, Failed, FailureCode, GenerationJob, JobStage, JobStatus, Succeeded
 from deckly.infrastructure.card_generator.generator import LlmCardGenerator
@@ -100,7 +101,7 @@ async def enqueued_job(store: PostgresJobStore, pool: ArqRedis, cleanup: Cleanup
     job = GenerationJob.queue(uuid4(), T0)
     cleanup.job_ids.add(job.job_id)
     await store.add(job, generation_request(), cleanup.scope())
-    await job_queue(pool).enqueue(job.job_id)
+    await job_queue(pool).enqueue(job.job_id, QueueLane.GENERATION)
     return job
 
 
