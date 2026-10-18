@@ -345,6 +345,9 @@ async def test_worker_startup_wires_housekeeping_with_the_configured_thresholds_
     assert sweep.housekeeping is retention.housekeeping
     assert sweep.policy.running_after == timedelta(seconds=settings.sweep.running_stale_after_seconds)
     assert sweep.policy.queued_after == timedelta(seconds=settings.sweep.queued_stale_after_seconds)
+    assert sweep.policy.recording_queued_after == timedelta(
+        seconds=settings.sweep.recording_queued_stale_after_seconds
+    )
     assert retention.policy.idempotency_key_ttl == timedelta(
         seconds=settings.cache.idempotency_key_ttl_seconds
     )

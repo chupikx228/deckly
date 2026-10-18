@@ -8,7 +8,7 @@ import pytest
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.ports import MissingImage, MissingImageReason
 from deckly.domain.deck import GenerationResult
-from deckly.domain.generation import GenerationRequest
+from deckly.domain.generation import Fingerprint, GenerationRequest
 from deckly.domain.job import Cancelled, Failed, JobStage, JobStatus, Succeeded
 from deckly.domain.notes.note_type import NoteType
 from tests.domain.builders import T0, basic_note, result_with
@@ -44,9 +44,9 @@ class StatusRecordingCache(InMemoryResultCache):
         self.harness = harness
         self.seen: list[JobStatus] = []
 
-    async def get(self, request: GenerationRequest) -> GenerationResult | None:
+    async def get(self, fingerprint: Fingerprint) -> GenerationResult | None:
         self.seen.extend(job.status for job in self.harness.store.jobs.values())
-        return await super().get(request)
+        return await super().get(fingerprint)
 
 
 class CancellingCache(InMemoryResultCache):
@@ -55,9 +55,9 @@ class CancellingCache(InMemoryResultCache):
         self.harness = harness
         self.job_id = job_id
 
-    async def get(self, request: GenerationRequest) -> GenerationResult | None:
+    async def get(self, fingerprint: Fingerprint) -> GenerationResult | None:
         await self.harness.cancel(self.job_id)
-        return await super().get(request)
+        return await super().get(fingerprint)
 
 
 async def submit(harness: Harness, request: GenerationRequest, client: int = 1) -> UUID:
@@ -83,8 +83,8 @@ async def test_a_miss_runs_the_pipeline_and_stores_the_result_under_the_request(
     job_id = await run(harness, MULTI_TYPE)
 
     assert await succeeded_result(harness, job_id) == GENERATED
-    assert harness.cache.reads == [MULTI_TYPE]
-    assert harness.cache.writes == [(MULTI_TYPE, GENERATED)]
+    assert harness.cache.reads == [MULTI_TYPE.fingerprint()]
+    assert harness.cache.writes == [(MULTI_TYPE.fingerprint(), GENERATED)]
     assert harness.providers.calls == list(PIPELINE_STAGES)
 
 
@@ -202,7 +202,7 @@ async def test_a_cache_that_cannot_be_read_does_not_fail_the_job_and_the_pipelin
 
     assert await succeeded_result(harness, job_id) == GENERATED
     assert harness.providers.calls == list(PIPELINE_STAGES)
-    assert harness.cache.writes == [(MULTI_TYPE, GENERATED)]
+    assert harness.cache.writes == [(MULTI_TYPE.fingerprint(), GENERATED)]
 
 
 @pytest.mark.parametrize("failure", CACHE_FAILURES.values(), ids=CACHE_FAILURES.keys())
@@ -342,7 +342,7 @@ async def test_a_deck_with_images_is_cached_together_with_its_media() -> None:
     expected = replace(GENERATED, notes=with_images(GENERATED.notes))
     assert await succeeded_result(harness, first) == expected
     assert await succeeded_result(harness, second) == expected
-    assert harness.cache.writes == [(WITH_IMAGES, expected)]
+    assert harness.cache.writes == [(WITH_IMAGES.fingerprint(), expected)]
     assert len(harness.providers.fetched_for) == len(harness.providers.generated_for) == 1
 
 

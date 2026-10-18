@@ -11,7 +11,7 @@ from deckly.domain.generation import (
     DocumentGenerationFingerprint,
     Fingerprint,
     GenerationFingerprint,
-    GenerationRequest,
+    RecordingGenerationFingerprint,
 )
 from deckly.infrastructure.observability.metrics import CacheLookup, Metrics
 from deckly.infrastructure.rate_limit import bounded_redis
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 KEY_PREFIX = "deckly:generation-result:v2"
 DOCUMENT_KEY_PREFIX = "deckly:generation-result:document:v1"
+RECORDING_KEY_PREFIX = "deckly:generation-result:recording:v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,8 @@ def key_prefix(fingerprint: Fingerprint) -> str:
             return KEY_PREFIX
         case DocumentGenerationFingerprint():
             return DOCUMENT_KEY_PREFIX
+        case RecordingGenerationFingerprint():
+            return RECORDING_KEY_PREFIX
 
 
 def cache_key(fingerprint: Fingerprint) -> str:
@@ -55,8 +58,8 @@ class RedisResultCache:
         self._limits = limits
         self._metrics = metrics
 
-    async def get(self, request: GenerationRequest) -> GenerationResult | None:
-        key = cache_key(request.fingerprint())
+    async def get(self, fingerprint: Fingerprint) -> GenerationResult | None:
+        key = cache_key(fingerprint)
         try:
             async with bounded_redis(
                 "generation_result_cache_unavailable", self._limits.command_timeout_seconds
@@ -77,8 +80,8 @@ class RedisResultCache:
         self._looked_up(CacheLookup.HIT)
         return result
 
-    async def put(self, request: GenerationRequest, result: GenerationResult) -> None:
-        key = cache_key(request.fingerprint())
+    async def put(self, fingerprint: Fingerprint, result: GenerationResult) -> None:
+        key = cache_key(fingerprint)
         document = json.dumps(dump_result(result), separators=(",", ":"))
         async with bounded_redis("generation_result_cache_unavailable", self._limits.command_timeout_seconds):
             await self._redis.set(key, document, ex=self._limits.ttl_seconds)

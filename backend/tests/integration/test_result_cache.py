@@ -97,14 +97,20 @@ async def test_a_stored_result_is_read_back_equal_for_an_equivalent_request(
     request = unique_request(language="ru")
     entries.append(request)
 
-    await cache.put(request, FULL_RESULT)
+    await cache.put(request.fingerprint(), FULL_RESULT)
 
-    assert await cache.get(replace(request, language="RU", topic=f"  {request.topic}\n")) == FULL_RESULT
+    assert (
+        await cache.get(replace(request, language="RU", topic=f"  {request.topic}\n").fingerprint())
+        == FULL_RESULT
+    )
 
 
 @pytest.mark.anyio
 async def test_a_request_that_was_never_stored_is_a_miss(pool: ArqRedis) -> None:
-    assert await RedisResultCache(pool, limits(60), metrics=fresh_metrics()).get(unique_request()) is None
+    assert (
+        await RedisResultCache(pool, limits(60), metrics=fresh_metrics()).get(unique_request().fingerprint())
+        is None
+    )
 
 
 @pytest.mark.anyio
@@ -115,7 +121,7 @@ async def test_the_entry_carries_the_configured_ttl(
     request = unique_request()
     entries.append(request)
 
-    await cache.put(request, GENERATED)
+    await cache.put(request.fingerprint(), GENERATED)
 
     remaining = await pool.ttl(cache_key(request.fingerprint()))
     assert (
@@ -132,12 +138,12 @@ async def test_an_entry_expires_when_its_ttl_runs_out(
     cache = RedisResultCache(pool, limits(SHORT_TTL_SECONDS), metrics=fresh_metrics())
     request = unique_request()
     entries.append(request)
-    await cache.put(request, GENERATED)
-    assert await cache.get(request) == GENERATED
+    await cache.put(request.fingerprint(), GENERATED)
+    assert await cache.get(request.fingerprint()) == GENERATED
 
     await asyncio.sleep(EXPIRY_WAIT_SECONDS)
 
-    assert await cache.get(request) is None
+    assert await cache.get(request.fingerprint()) is None
 
 
 @pytest.mark.anyio
@@ -148,7 +154,7 @@ async def test_storing_again_restarts_the_ttl(pool: ArqRedis, entries: list[Gene
     key = cache_key(request.fingerprint())
     await pool.set(key, b"stale", ex=5)
 
-    await cache.put(request, GENERATED)
+    await cache.put(request.fingerprint(), GENERATED)
 
     assert await pool.ttl(key) > 5
 
@@ -167,10 +173,10 @@ async def test_a_corrupt_entry_is_a_miss_and_the_next_store_repairs_it(
     entries.append(request)
     await pool.set(cache_key(request.fingerprint()), garbage, ex=60)
 
-    assert await cache.get(request) is None
+    assert await cache.get(request.fingerprint()) is None
 
-    await cache.put(request, GENERATED)
-    assert await cache.get(request) == GENERATED
+    await cache.put(request.fingerprint(), GENERATED)
+    assert await cache.get(request.fingerprint()) == GENERATED
 
 
 @pytest.mark.anyio
@@ -181,7 +187,7 @@ async def test_an_entry_holds_the_validated_domain_result_and_nothing_else(
     request = unique_request()
     entries.append(request)
 
-    await cache.put(request, FULL_RESULT)
+    await cache.put(request.fingerprint(), FULL_RESULT)
 
     stored = await pool.get(cache_key(request.fingerprint()))
     assert isinstance(stored, bytes)
@@ -195,11 +201,13 @@ async def test_requests_that_differ_only_in_what_shapes_the_output_do_not_share_
     cache = RedisResultCache(pool, limits(60), metrics=fresh_metrics())
     request = unique_request()
     entries.append(request)
-    await cache.put(request, GENERATED)
+    await cache.put(request.fingerprint(), GENERATED)
 
-    assert await cache.get(replace(request, include_images=True)) is None
-    assert await cache.get(replace(request, instructions="Only European signs")) is None
-    assert await cache.get(replace(request, note_types=(NoteType.BASIC, NoteType.CLOZE))) is None
+    assert await cache.get(replace(request, include_images=True).fingerprint()) is None
+    assert await cache.get(replace(request, instructions="Only European signs").fingerprint()) is None
+    assert (
+        await cache.get(replace(request, note_types=(NoteType.BASIC, NoteType.CLOZE)).fingerprint()) is None
+    )
 
 
 @pytest.fixture
@@ -340,11 +348,11 @@ async def test_the_worker_caches_in_the_configured_cache_redis_and_in_the_queue_
     await startup(ctx)
     try:
         cache = from_context(ctx, RUN_GENERATION_KEY, RunGeneration).cache
-        await cache.put(request, FULL_RESULT)
+        await cache.put(request.fingerprint(), FULL_RESULT)
 
         in_cache_redis = await cache_pool.exists(key)
         in_queue_redis = await pool.exists(key)
-        read_back = await cache.get(request)
+        read_back = await cache.get(request.fingerprint())
     finally:
         try:
             await shutdown(ctx)

@@ -11,7 +11,7 @@ from uuid import UUID
 import httpx2
 
 from deckly.application.exceptions import RateLimitedError, UnreadableJobRequestError
-from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
+from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration, lane_for
 from deckly.application.pipeline import DocumentSourcing, RunGeneration
 from deckly.application.ports import (
     FetchedMedia,
@@ -38,7 +38,7 @@ from deckly.domain.media import Media, MediaKind
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.regeneration import RegenerationRequest, RejectionReason
-from deckly.domain.source import CitationUnit, DocumentSource, SourceQuery
+from deckly.domain.source import CitationUnit, DocumentSource, SourceQuery, TranscriptSource
 from deckly.infrastructure.llm.client import LlmPrompt, LlmReply, LlmStop
 from deckly.infrastructure.media.client import ImageCandidate, ImageSearch, MediaEndpoint
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
@@ -118,6 +118,22 @@ DOCUMENT_MATERIAL = (
     SourceMaterial(
         source=DocumentSource(
             title="lecture-3.pdf", document_id=DOCUMENT_ID, unit=CitationUnit.PAGE, number=1
+        ),
+        text="A red triangle warns of danger ahead.",
+    ),
+)
+RECORDING_CONTENT = b"ID3 lecture"
+UPLOADED_RECORDING = replace(
+    UPLOADED_DOCUMENT,
+    filename="lecture-3.m4a",
+    size_bytes=len(RECORDING_CONTENT),
+    document_format=DocumentFormat.M4A,
+    duration_seconds=95.0,
+)
+TRANSCRIPT_MATERIAL = (
+    SourceMaterial(
+        source=TranscriptSource(
+            title="lecture-3.m4a", document_id=DOCUMENT_ID, start_ms=62_480, end_ms=91_900
         ),
         text="A red triangle warns of danger ahead.",
     ),
@@ -488,15 +504,24 @@ class InMemoryJobStore:
 
 
 class InMemoryJobHousekeeping:
-    def __init__(self, store: InMemoryJobStore) -> None:
+    def __init__(self, store: InMemoryJobStore, documents: dict[UUID, Document] | None = None) -> None:
         self.store = store
+        self.documents = {} if documents is None else documents
         self.after_listing: dict[JobStatus, Callable[[], object]] = {}
 
-    async def stale(self, status: JobStatus, updated_before: datetime, limit: int) -> tuple[UUID, ...]:
+    def lane_of(self, job_id: UUID) -> QueueLane:
+        request = self.store.requests.get(job_id)
+        if request is None or request.document_id is None:
+            return QueueLane.GENERATION
+        return lane_for(self.documents.get(request.document_id))
+
+    async def stale(
+        self, status: JobStatus, lane: QueueLane, updated_before: datetime, limit: int
+    ) -> tuple[UUID, ...]:
         candidates = [
             job
             for job in self.store.jobs.values()
-            if job.status is status and job.updated_at < updated_before
+            if job.status is status and job.updated_at < updated_before and self.lane_of(job.job_id) is lane
         ]
         listed = tuple(job.job_id for job in sorted(candidates, key=lambda job: job.updated_at)[:limit])
         hook = self.after_listing.pop(status, None)
@@ -530,22 +555,22 @@ class InMemoryJobHousekeeping:
 class InMemoryResultCache:
     def __init__(self) -> None:
         self.entries: dict[Fingerprint, GenerationResult] = {}
-        self.reads: list[GenerationRequest] = []
-        self.writes: list[tuple[GenerationRequest, GenerationResult]] = []
+        self.reads: list[Fingerprint] = []
+        self.writes: list[tuple[Fingerprint, GenerationResult]] = []
         self.read_failure: Exception | None = None
         self.write_failure: Exception | None = None
 
-    async def get(self, request: GenerationRequest) -> GenerationResult | None:
-        self.reads.append(request)
+    async def get(self, fingerprint: Fingerprint) -> GenerationResult | None:
+        self.reads.append(fingerprint)
         if self.read_failure is not None:
             raise self.read_failure
-        return self.entries.get(request.fingerprint())
+        return self.entries.get(fingerprint)
 
-    async def put(self, request: GenerationRequest, result: GenerationResult) -> None:
-        self.writes.append((request, result))
+    async def put(self, fingerprint: Fingerprint, result: GenerationResult) -> None:
+        self.writes.append((fingerprint, result))
         if self.write_failure is not None:
             raise self.write_failure
-        self.entries[request.fingerprint()] = result
+        self.entries[fingerprint] = result
 
 
 class RecordingJobQueue:
@@ -753,6 +778,7 @@ class FakeDocuments:
 
     async def get(self, document_id: UUID, client_id: UUID) -> Document | None:
         self.lookups.append((document_id, client_id))
+        await self._reach("lookup")
         document = self.documents.get(document_id)
         return document if document is not None and document.client_id == client_id else None
 

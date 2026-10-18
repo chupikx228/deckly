@@ -8,7 +8,7 @@ from uuid import UUID
 
 from deckly.domain.deck import GenerationResult
 from deckly.domain.document import Document, DocumentFormat
-from deckly.domain.generation import GenerationRequest, SourceKind
+from deckly.domain.generation import Fingerprint, GenerationRequest, SourceKind
 from deckly.domain.job import FailureCode, GenerationJob, JobStage, JobStatus
 from deckly.domain.media import Media
 from deckly.domain.notes.note import Note
@@ -148,7 +148,9 @@ class JobStore(Protocol):
 
 
 class JobHousekeeping(Protocol):
-    async def stale(self, status: JobStatus, updated_before: datetime, limit: int) -> tuple[UUID, ...]: ...
+    async def stale(
+        self, status: JobStatus, lane: QueueLane, updated_before: datetime, limit: int
+    ) -> tuple[UUID, ...]: ...
 
     async def release_idempotency_keys(self, created_before: datetime, limit: int) -> int: ...
 
@@ -156,9 +158,9 @@ class JobHousekeeping(Protocol):
 
 
 class ResultCache(Protocol):
-    async def get(self, request: GenerationRequest) -> GenerationResult | None: ...
+    async def get(self, fingerprint: Fingerprint) -> GenerationResult | None: ...
 
-    async def put(self, request: GenerationRequest, result: GenerationResult) -> None: ...
+    async def put(self, fingerprint: Fingerprint, result: GenerationResult) -> None: ...
 
 
 class JobQueue(Protocol):

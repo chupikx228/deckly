@@ -19,6 +19,7 @@ from deckly.application.housekeeping import (
     StalenessPolicy,
     SweepStaleJobs,
 )
+from deckly.application.ports import QueueLane
 from deckly.config import (
     DEFAULT_MODERATION_MAX_CONCURRENCY,
     DOCUMENT_GATED_STAGES_PER_JOB,
@@ -396,8 +397,10 @@ async def test_housekeeping_is_registered_with_the_arq_worker_next_to_the_genera
 
 
 class UnreachableHousekeeping(InMemoryJobHousekeeping):
-    async def stale(self, status: JobStatus, updated_before: datetime, limit: int) -> tuple[UUID, ...]:
-        del status, updated_before, limit
+    async def stale(
+        self, status: JobStatus, lane: QueueLane, updated_before: datetime, limit: int
+    ) -> tuple[UUID, ...]:
+        del status, lane, updated_before, limit
         message = "database unreachable"
         raise ConnectionError(message)
 
@@ -427,7 +430,11 @@ def housekeeping_context(
         SWEEP_STALE_JOBS_KEY: SweepStaleJobs(
             store=jobs,
             housekeeping=job_housekeeping,
-            policy=StalenessPolicy(running_after=timedelta(minutes=15), queued_after=timedelta(hours=1)),
+            policy=StalenessPolicy(
+                running_after=timedelta(minutes=15),
+                queued_after=timedelta(hours=1),
+                recording_queued_after=timedelta(hours=3),
+            ),
             batch_size=10,
             clock=lambda: now,
         ),

@@ -9,11 +9,13 @@ import pytest
 from redis.asyncio import Redis
 
 from deckly.application.exceptions import UpstreamUnavailableError
+from deckly.domain.document import RECORDING_FORMATS, Document, DocumentFormat
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.notes.note_type import NoteType
 from deckly.infrastructure.result_cache import (
     DOCUMENT_KEY_PREFIX,
     KEY_PREFIX,
+    RECORDING_KEY_PREFIX,
     RedisResultCache,
     ResultCacheLimits,
     cache_key,
@@ -21,7 +23,14 @@ from deckly.infrastructure.result_cache import (
 )
 from deckly.infrastructure.stored_result import dump_result
 from tests.domain.builders import FULL_RESULT, RequestChanges
-from tests.fakes import DOCUMENT_ID, document_request, fresh_metrics, generation_request
+from tests.fakes import (
+    DOCUMENT_ID,
+    UPLOADED_DOCUMENT,
+    UPLOADED_RECORDING,
+    document_request,
+    fresh_metrics,
+    generation_request,
+)
 from tests.infrastructure.test_queue import LOOPBACK, never_answer, unused_port
 
 pytestmark = pytest.mark.anyio
@@ -31,8 +40,8 @@ SAFETY_NET_SECONDS = 5
 LIMITS = ResultCacheLimits(ttl_seconds=60, command_timeout_seconds=1.0)
 
 
-def key_of(request: GenerationRequest) -> str:
-    return cache_key(request.fingerprint())
+def key_of(request: GenerationRequest, document: Document | None = None) -> str:
+    return cache_key(request.fingerprint(document))
 
 
 def request_with(**changes: Unpack[RequestChanges]) -> GenerationRequest:
@@ -140,14 +149,14 @@ async def test_reading_from_an_unreachable_redis_raises_upstream_unavailable() -
     cache = unreachable_cache()
 
     with pytest.raises(UpstreamUnavailableError):
-        await cache.get(generation_request())
+        await cache.get(generation_request().fingerprint())
 
 
 async def test_writing_to_an_unreachable_redis_raises_upstream_unavailable() -> None:
     cache = unreachable_cache()
 
     with pytest.raises(UpstreamUnavailableError):
-        await cache.put(generation_request(), FULL_RESULT)
+        await cache.put(generation_request().fingerprint(), FULL_RESULT)
 
 
 async def test_a_redis_that_accepts_the_connection_but_never_answers_is_given_up_on_within_the_timeout() -> (
@@ -162,9 +171,9 @@ async def test_a_redis_that_accepts_the_connection_but_never_answers_is_given_up
     try:
         async with asyncio.timeout(SAFETY_NET_SECONDS):
             with pytest.raises(UpstreamUnavailableError):
-                await cache.get(generation_request())
+                await cache.get(generation_request().fingerprint())
             with pytest.raises(UpstreamUnavailableError):
-                await cache.put(generation_request(), FULL_RESULT)
+                await cache.put(generation_request().fingerprint(), FULL_RESULT)
     finally:
         await redis.aclose()
         server.close()
@@ -190,11 +199,35 @@ def test_a_key_can_be_derived_from_any_text_a_request_can_carry(text: str) -> No
 
 
 def test_document_requests_live_in_their_own_namespace_so_they_never_collide_with_topics() -> None:
-    prefix, _, digest = key_of(document_request()).rpartition(":")
+    prefix, _, digest = key_of(document_request(), UPLOADED_DOCUMENT).rpartition(":")
 
     assert prefix == DOCUMENT_KEY_PREFIX != KEY_PREFIX
     assert len(digest) == SHA256_HEX_LENGTH
-    assert str(DOCUMENT_ID) not in key_of(document_request())
+    assert str(DOCUMENT_ID) not in key_of(document_request(), UPLOADED_DOCUMENT)
+
+
+def test_recording_requests_live_in_a_namespace_of_their_own_apart_from_documents_and_topics() -> None:
+    prefix, _, digest = key_of(document_request(), UPLOADED_RECORDING).rpartition(":")
+
+    assert prefix == RECORDING_KEY_PREFIX
+    assert len({RECORDING_KEY_PREFIX, DOCUMENT_KEY_PREFIX, KEY_PREFIX}) == 3
+    assert len(digest) == SHA256_HEX_LENGTH
+    assert str(DOCUMENT_ID) not in key_of(document_request(), UPLOADED_RECORDING)
+
+
+def test_same_id_and_settings_as_a_recording_or_as_a_document_never_share_a_key() -> None:
+    recording = key_of(document_request(), UPLOADED_RECORDING)
+    document = key_of(document_request(), UPLOADED_DOCUMENT)
+
+    assert recording.rpartition(":")[2] == document.rpartition(":")[2]
+    assert recording != document
+
+
+@pytest.mark.parametrize("document_format", sorted(RECORDING_FORMATS))
+def test_every_recording_format_shares_the_recording_namespace(document_format: DocumentFormat) -> None:
+    recording = replace(UPLOADED_RECORDING, document_format=document_format)
+
+    assert key_of(document_request(), recording) == key_of(document_request(), UPLOADED_RECORDING)
 
 
 def test_topic_keys_are_unchanged_by_the_document_namespace() -> None:
@@ -205,9 +238,19 @@ def test_topic_keys_are_unchanged_by_the_document_namespace() -> None:
 
 
 def test_document_requests_share_a_key_only_when_they_name_the_same_document_with_the_same_settings() -> None:
+    other_id = UUID("6e1d8b2f-4c3a-4d9e-8f7a-2b3c4d5e6f70")
     same = replace(document_request(), language="RU", note_types=(NoteType.BASIC,))
-    other_document = document_request(UUID("6e1d8b2f-4c3a-4d9e-8f7a-2b3c4d5e6f70"))
+    other_document = document_request(other_id)
     more_cards = replace(document_request(), card_count=41)
 
-    assert key_of(same) == key_of(document_request())
-    assert len({key_of(document_request()), key_of(other_document), key_of(more_cards)}) == 3
+    assert key_of(same, UPLOADED_DOCUMENT) == key_of(document_request(), UPLOADED_DOCUMENT)
+    assert (
+        len(
+            {
+                key_of(document_request(), UPLOADED_DOCUMENT),
+                key_of(other_document, replace(UPLOADED_DOCUMENT, document_id=other_id)),
+                key_of(more_cards, UPLOADED_DOCUMENT),
+            }
+        )
+        == 3
+    )

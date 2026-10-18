@@ -6,7 +6,7 @@ import pytest
 from deckly.application.exceptions import NoValidContentError, UpstreamUnavailableError
 from deckly.domain.deck import GenerationResult
 from deckly.domain.exceptions import TopicRejectedError
-from deckly.domain.generation import GenerationRequest
+from deckly.domain.generation import Fingerprint
 from deckly.domain.job import STAGE_ORDER, FailureCode, JobStage
 from tests.fakes import ADDRESS, Harness, InMemoryResultCache, generation_request, scope
 from tests.logs import LogLine, captured_json_logs
@@ -264,8 +264,8 @@ class HangingCacheWrite(InMemoryResultCache):
         super().__init__()
         self.writing = asyncio.Event()
 
-    async def put(self, request: GenerationRequest, result: GenerationResult) -> None:
-        del request, result
+    async def put(self, fingerprint: Fingerprint, result: GenerationResult) -> None:
+        del fingerprint, result
         self.writing.set()
         await asyncio.Event().wait()
 

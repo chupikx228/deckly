@@ -376,6 +376,7 @@ def build_sweep(
         policy=StalenessPolicy(
             running_after=timedelta(seconds=settings.sweep.running_stale_after_seconds),
             queued_after=timedelta(seconds=settings.sweep.queued_stale_after_seconds),
+            recording_queued_after=timedelta(seconds=settings.sweep.recording_queued_stale_after_seconds),
         ),
         batch_size=settings.sweep.batch_size,
         clock=utc_now,

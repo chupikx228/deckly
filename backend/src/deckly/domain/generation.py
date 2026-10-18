@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
+from deckly.domain.document import Document, is_recording
 from deckly.domain.exceptions import InvalidGenerationRequestError, UnsupportedNoteTypeError
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import fields_type_for
@@ -22,6 +23,7 @@ class Difficulty(StrEnum):
 class SourceKind(StrEnum):
     TOPIC = "topic"
     DOCUMENT = "document"
+    RECORDING = "recording"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +48,18 @@ class DocumentGenerationFingerprint:
     instructions: str | None
 
 
-type Fingerprint = GenerationFingerprint | DocumentGenerationFingerprint
+@dataclass(frozen=True, slots=True)
+class RecordingGenerationFingerprint:
+    document_id: UUID
+    language: str
+    card_count: int
+    difficulty: Difficulty
+    note_types: tuple[NoteType, ...]
+    include_images: bool
+    instructions: str | None
+
+
+type Fingerprint = GenerationFingerprint | DocumentGenerationFingerprint | RecordingGenerationFingerprint
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,9 +108,13 @@ class GenerationRequest:
             message = f"note types {ungeneratable} are not generated yet"
             raise InvalidGenerationRequestError(message)
 
-    @property
-    def source_kind(self) -> SourceKind:
-        return SourceKind.TOPIC if self.document_id is None else SourceKind.DOCUMENT
+    def source_kind(self, document: Document | None) -> SourceKind:
+        self._require_named(document)
+        if self.document_id is None:
+            return SourceKind.TOPIC
+        if document is not None and is_recording(document.document_format):
+            return SourceKind.RECORDING
+        return SourceKind.DOCUMENT
 
     def source_query(self) -> SourceQuery:
         if self.topic is None:
@@ -105,26 +122,42 @@ class GenerationRequest:
             raise InvalidGenerationRequestError(message)
         return SourceQuery(topic=self.topic, language=self.language)
 
-    def fingerprint(self) -> Fingerprint:
+    def fingerprint(self, document: Document | None = None) -> Fingerprint:
+        self._require_named(document)
         collapsed = None if self.instructions is None else collapse_whitespace(self.instructions)
         instructions = None if collapsed is None or is_blank(collapsed) else collapsed
         note_types = tuple(sorted(self.note_types))
-        if self.document_id is not None:
-            return DocumentGenerationFingerprint(
-                document_id=self.document_id,
-                language=self.language.lower(),
+        language = self.language.lower()
+        if self.document_id is None:
+            return GenerationFingerprint(
+                topic=collapse_whitespace(self.source_query().topic),
+                language=language,
                 card_count=self.card_count,
                 difficulty=self.difficulty,
                 note_types=note_types,
                 include_images=self.include_images,
                 instructions=instructions,
             )
-        return GenerationFingerprint(
-            topic=collapse_whitespace(self.source_query().topic),
-            language=self.language.lower(),
+        if document is None:
+            message = "a request that generates from a document is fingerprinted together with that document"
+            raise InvalidGenerationRequestError(message)
+        fingerprint_type = (
+            RecordingGenerationFingerprint
+            if is_recording(document.document_format)
+            else DocumentGenerationFingerprint
+        )
+        return fingerprint_type(
+            document_id=self.document_id,
+            language=language,
             card_count=self.card_count,
             difficulty=self.difficulty,
             note_types=note_types,
             include_images=self.include_images,
             instructions=instructions,
         )
+
+    def _require_named(self, document: Document | None) -> None:
+        if document is None or document.document_id == self.document_id:
+            return
+        message = f"document {document.document_id} is not the source this request names"
+        raise InvalidGenerationRequestError(message)
