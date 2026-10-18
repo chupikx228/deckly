@@ -783,6 +783,7 @@ exposing metrics rather than refusing to start.
 | `deckly_provider_call_retries_total`                                       | `operation`                         | both    |
 | `deckly_provider_circuit_rejections_total`, `deckly_provider_circuit_open` | `operation`                         | both    |
 | `deckly_generation_cache_lookups_total`                                    | `result`                            | worker  |
+| `deckly_transcript_cache_lookups_total`                                    | `result`                            | worker  |
 | `deckly_generation_queue_depth`                                            | `queue`                             | API     |
 | `deckly_gate_in_flight`                                                    | `gate`                              | worker  |
 | `deckly_gate_limit`                                                        | `gate`                              | worker  |
@@ -1965,6 +1966,54 @@ the regenerated `@deckly/api-contract` types carry it. The Zod schema needed mor
 was a strict `discriminatedUnion`, so a note with any source kind the app does not know failed the whole
 job's parse, although the contract tells clients to ignore unknown kinds. Sources are now filtered to
 known kinds before validation, which still rejects a malformed source of a known kind.
+
+### Transcript cache
+
+A second generation from the same recording with other `noteTypes`, `difficulty` or `cardCount` is a
+different result-cache fingerprint (see "Redis memory and eviction"), so before DEC-89 it decoded and
+transcribed the recording again, which is the expensive part of the job. `RecordingTranscriber` now
+checks a transcript cache first, keyed by `document_id` alone, and skips the temporary files, ffmpeg
+and the engine process on a hit (`infrastructure/transcription/cache.py`,
+`deckly:transcript:v1:<document_id>`, on the same cache Redis as the result cache). What is stored is
+the raw transcript (segments with `start_ms`, `end_ms`, text, plus the detected language), not the
+passages: grouping and the character budget are applied on every read, so a request with a different
+budget is served from the same entry. A hit still downloads the recording, because the pipeline
+fetches the bytes before it asks the parser to parse them; skipping that needs a pipeline change.
+
+- **Why `document_id` alone is a safe key.** The pipeline resolves the document for the requesting
+  client (`documents.store.get(document_id, client_id)`) before anything is parsed, so a client who
+  does not own a document never reaches its transcript. A document's bytes never change after upload.
+  What the key does not capture is the engine: the `v1` in the prefix is the model and settings
+  version, so changing the pinned model means bumping it.
+- **TTL: its own setting, never longer than the document's.** `DECKLY_CACHE_TRANSCRIPT_TTL_SECONDS`
+  (default one hour, the shortest document retention) is validated to be at most
+  `DECKLY_CACHE_DOCUMENT_RETENTION_SECONDS`, the same shape as the idempotency key TTL against job
+  retention. A transcript is the user's speech: it must not be kept for longer than the document it
+  came from. It is not simply the retention window because the second request that benefits arrives
+  while the user is still working on the deck, and a shorter entry costs Redis memory for less time;
+  raise it toward the retention if users come back to a recording later in the day. The TTL runs from
+  the write, which is after the upload, so an entry can outlive the document by the time the job
+  waited in the queue and transcribed, at most; the job that wrote it references the document for
+  the job retention (at least a day), so the document is normally still there.
+- **No explicit invalidation when the sweep deletes a document.** The sweep cannot be ahead of the TTL
+  in a way that matters: a swept document is no longer found by `documents.store.get`, so the cached
+  transcript is unreachable from then on, and it expires on its own within the TTL. An explicit
+  delete would make the sweep, which runs inside a Postgres transaction next to object-storage
+  deletes, depend on a third system for no behaviour a client can observe.
+- **Fails open.** A Redis timeout, an error or a corrupt entry is a miss on read and a logged warning
+  on write (`transcript_cache_read_failed`, `transcript_cache_write_failed`); transcription runs. Metric:
+  `deckly_transcript_cache_lookups_total{result}` with the result cache's labels.
+- **What is not cached.** A transcript of audio cut at the duration cap (`recording_decode_truncated`),
+  because the cap is a setting and a later, higher cap would otherwise keep serving the cut transcript
+  for the rest of the TTL. A failed transcription caches nothing. A recording with no speech is cached,
+  so it is not re-transcribed just to fail with `DOCUMENT_HAS_NO_TEXT` again.
+- **Not done: single flight.** Two jobs for the same document that start before either has written
+  the entry both transcribe. The transcription worker takes one job at a time per replica, so this
+  needs two replicas and two simultaneous requests for the same recording; a lock would cost a
+  second Redis key and a wait path for a saving of one transcription.
+- **Memory.** An entry is the transcript as JSON, tens of KB for a recording at the duration cap (not
+  measured), on the cache instance, which is sized for result entries of 6 to 8 KB ("Redis memory
+  and eviction"); it is evicted like them.
 
 ### Provider interface and the paid-API swap
 

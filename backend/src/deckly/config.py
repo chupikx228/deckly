@@ -79,6 +79,7 @@ DEFAULT_RECORDING_URL_WINDOW_SECONDS = 60 * 60
 MAX_DOCUMENT_PARSE_DEADLINE_SECONDS = 120
 MIN_DOCUMENT_RETENTION_SECONDS = 60 * 60
 MAX_DOCUMENT_RETENTION_SECONDS = 7 * 24 * 60 * 60
+DEFAULT_TRANSCRIPT_TTL_SECONDS = MIN_DOCUMENT_RETENTION_SECONDS
 MAX_STORAGE_CONCURRENCY = 16
 TRANSCRIPTION_WORKER_MAX_JOBS = 1
 MEASURED_TRANSCRIPTION_REAL_TIME_FACTOR = 0.14
@@ -525,11 +526,19 @@ class CacheSettings(BaseSettings):
     document_retention_seconds: Annotated[
         int, Field(ge=MIN_DOCUMENT_RETENTION_SECONDS, le=MAX_DOCUMENT_RETENTION_SECONDS)
     ]
+    transcript_ttl_seconds: PositiveInt = DEFAULT_TRANSCRIPT_TTL_SECONDS
 
     @model_validator(mode="after")
     def require_idempotency_keys_to_expire_before_their_jobs(self) -> Self:
         if self.idempotency_key_ttl_seconds > self.job_retention_seconds:
             message = "the idempotency key ttl must not exceed the job retention"
+            raise ValueError(message)
+        return self
+
+    @model_validator(mode="after")
+    def require_transcripts_to_expire_before_their_documents(self) -> Self:
+        if self.transcript_ttl_seconds > self.document_retention_seconds:
+            message = "the transcript ttl must not exceed the document retention"
             raise ValueError(message)
         return self
 

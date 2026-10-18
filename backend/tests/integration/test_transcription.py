@@ -37,6 +37,7 @@ from deckly.infrastructure.transcription.self_hosted import ENGINE_MODULE, SelfH
 from deckly.infrastructure.transcription.transcriber import RecordingTranscriber
 from deckly.worker.settings import (
     RUN_GENERATION_KEY,
+    TranscriptionBackend,
     TranscriptionWorkerSettings,
     build_recording_transcriber,
     build_transcription_client,
@@ -59,7 +60,7 @@ from tests.ffmpeg import production_decoder
 from tests.integration.conftest import Cleanup, job_queue
 from tests.logs import captured_json_logs
 from tests.recording_files import FIXTURES, understated_timing
-from tests.transcription import recording
+from tests.transcription import InMemoryTranscriptCache, recording
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -93,8 +94,11 @@ def model_ready(settings: Settings) -> Settings:
 
 
 def transcriber(settings: Settings, *, max_seconds: int | None = None) -> RecordingTranscriber:
-    built = build_recording_transcriber(
-        settings, build_transcription_client(settings), require_ffmpeg(), fresh_metrics()
+    backend = TranscriptionBackend(
+        client=build_transcription_client(settings), ffmpeg=require_ffmpeg(), cache_redis=ArqRedis()
+    )
+    built = replace(
+        build_recording_transcriber(settings, backend, fresh_metrics()), cache=InMemoryTranscriptCache()
     )
     if max_seconds is None:
         return built

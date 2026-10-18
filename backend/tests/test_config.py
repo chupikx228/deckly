@@ -2680,3 +2680,38 @@ def test_both_workers_on_one_metrics_port_are_rejected(clean_environment: pytest
 
     with pytest.raises(ValidationError, match="must serve metrics on different ports"):
         ObservabilitySettings()
+
+
+def test_transcript_ttl_defaults_to_the_shortest_document_retention(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_cache_environment(clean_environment, idempotency_ttl="60", retention=str(MIN_JOB_RETENTION_SECONDS))
+
+    assert CacheSettings().transcript_ttl_seconds == MIN_DOCUMENT_RETENTION_SECONDS
+
+
+@pytest.mark.parametrize("ttl", ["1", "21600", "86400"])
+def test_transcript_ttl_up_to_the_document_retention_is_accepted(
+    clean_environment: pytest.MonkeyPatch, ttl: str
+) -> None:
+    set_cache_environment(clean_environment, idempotency_ttl="60", retention=str(MIN_JOB_RETENTION_SECONDS))
+    clean_environment.setenv("DECKLY_CACHE_TRANSCRIPT_TTL_SECONDS", ttl)
+
+    assert CacheSettings().transcript_ttl_seconds == int(ttl)
+
+
+def test_transcript_outliving_its_document_is_rejected(clean_environment: pytest.MonkeyPatch) -> None:
+    set_cache_environment(clean_environment, idempotency_ttl="60", retention=str(MIN_JOB_RETENTION_SECONDS))
+    clean_environment.setenv("DECKLY_CACHE_TRANSCRIPT_TTL_SECONDS", "86401")
+
+    with pytest.raises(ValidationError, match="transcript ttl must not exceed the document retention"):
+        CacheSettings()
+
+
+@pytest.mark.parametrize("ttl", ["0", "-1", "soon"])
+def test_transcript_ttl_must_be_a_positive_number(clean_environment: pytest.MonkeyPatch, ttl: str) -> None:
+    set_cache_environment(clean_environment, idempotency_ttl="60", retention=str(MIN_JOB_RETENTION_SECONDS))
+    clean_environment.setenv("DECKLY_CACHE_TRANSCRIPT_TTL_SECONDS", ttl)
+
+    with pytest.raises(ValidationError, match="transcript_ttl_seconds"):
+        CacheSettings()

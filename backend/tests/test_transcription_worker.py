@@ -9,6 +9,7 @@ from arq.constants import default_queue_name
 from deckly.config import TRANSCRIPTION_WORKER_MAX_JOBS, ObservabilitySettings, Settings
 from deckly.infrastructure.queue import GENERATION_TASK, TRANSCRIPTION_QUEUE_NAME
 from deckly.infrastructure.transcription import model
+from deckly.infrastructure.transcription.cache import RedisTranscriptCache
 from deckly.infrastructure.transcription.self_hosted import SelfHostedTranscriptionClient
 from deckly.worker.main import (
     build_transcription_worker,
@@ -21,6 +22,7 @@ from deckly.worker.settings import (
     OBSERVABILITY_KEY,
     SETTINGS_KEY,
     TRANSCRIPTION_CLIENT_KEY,
+    TranscriptionBackend,
     WorkerContext,
     build_recording_transcriber,
     build_transcription_client,
@@ -120,14 +122,18 @@ async def test_transcription_worker_refuses_to_start_without_the_pinned_model(
 def test_recording_transcriber_is_built_from_the_duration_cap_and_the_transcription_settings(
     settings: Settings,
 ) -> None:
+    settings = replace(settings, redis=settings.redis.model_copy(update={"connect_timeout_seconds": 2}))
     client = build_transcription_client(settings)
-    transcriber = build_recording_transcriber(settings, client, Path("/usr/bin/ffmpeg"), fresh_metrics())
+    cache_redis = ArqRedis()
+    backend = TranscriptionBackend(client=client, ffmpeg=Path("/usr/bin/ffmpeg"), cache_redis=cache_redis)
+    transcriber = build_recording_transcriber(settings, backend, fresh_metrics())
 
     assert transcriber.decoder.binary == Path("/usr/bin/ffmpeg")
     assert transcriber.decoder.max_seconds == settings.limits.recording_max_duration_seconds
     assert transcriber.decoder.deadline_seconds == settings.transcription.decode_deadline_seconds
     assert transcriber.max_characters == settings.limits.document_max_source_characters
     assert transcriber.client is client
+    assert isinstance(transcriber.cache, RedisTranscriptCache)
     assert client.deadline_seconds == settings.transcription.deadline_seconds
     assert client.invocation.model_directory == settings.transcription.model_directory.resolve()
     assert client.invocation.model_directory.is_absolute()

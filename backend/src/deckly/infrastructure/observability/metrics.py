@@ -49,6 +49,7 @@ class Metrics:
     provider_circuit_rejections: Counter
     provider_circuit_open: Gauge
     cache_lookups: Counter
+    transcript_cache_lookups: Counter
     queue_depth: Gauge
     gate_in_flight: Gauge
     gate_limit: Gauge
@@ -124,6 +125,12 @@ def create_metrics() -> Metrics:
         cache_lookups=Counter(
             "deckly_generation_cache_lookups",
             "Generation result cache lookups, by result.",
+            ["result"],
+            registry=registry,
+        ),
+        transcript_cache_lookups=Counter(
+            "deckly_transcript_cache_lookups",
+            "Recording transcript cache lookups, by result.",
             ["result"],
             registry=registry,
         ),

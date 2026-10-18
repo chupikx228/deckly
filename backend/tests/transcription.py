@@ -1,7 +1,9 @@
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from uuid import UUID
 
 from deckly.domain.document import Document, DocumentFormat
+from deckly.infrastructure.transcription.cache import TranscriptCache
 from deckly.infrastructure.transcription.client import (
     MILLISECONDS_PER_SECOND,
     DecodedAudio,
@@ -62,6 +64,27 @@ class ScriptedTranscriptionClient:
         self.closed = True
 
 
+@dataclass
+class InMemoryTranscriptCache:
+    entries: dict[UUID, Transcript] = field(default_factory=dict)
+    read_failure: Exception | None = None
+    write_failure: Exception | None = None
+    reads: list[UUID] = field(default_factory=list)
+    writes: list[UUID] = field(default_factory=list)
+
+    async def get(self, document_id: UUID) -> Transcript | None:
+        self.reads.append(document_id)
+        if self.read_failure is not None:
+            raise self.read_failure
+        return self.entries.get(document_id)
+
+    async def put(self, document_id: UUID, transcript: Transcript) -> None:
+        self.writes.append(document_id)
+        if self.write_failure is not None:
+            raise self.write_failure
+        self.entries[document_id] = transcript
+
+
 def transcriber_with(
     ffmpeg: FakeProgram | Path,
     client: ScriptedTranscriptionClient,
@@ -75,6 +98,11 @@ def transcriber_with(
             binary=binary, max_seconds=max_seconds, deadline_seconds=TEST_DECODE_DEADLINE_SECONDS
         ),
         client=client,
+        cache=InMemoryTranscriptCache(),
         max_characters=max_characters,
         metrics=fresh_metrics(),
     )
+
+
+def caching(transcriber: RecordingTranscriber, cache: TranscriptCache) -> RecordingTranscriber:
+    return replace(transcriber, cache=cache)
