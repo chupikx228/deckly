@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from arq.constants import default_queue_name
+from arq.worker import Function
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyHttpUrl, SecretStr
@@ -19,13 +20,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deckly.application.documents import UploadDocument
 from deckly.application.exceptions import UpstreamUnavailableError
-from deckly.application.housekeeping import DocumentRetentionPolicy, EnforceDocumentRetention
+from deckly.application.housekeeping import (
+    DocumentRetentionPolicy,
+    EnforceDocumentRetention,
+    StalenessPolicy,
+    SweepStaleJobs,
+)
 from deckly.application.pipeline import RunGeneration
-from deckly.application.ports import IdempotencyScope
+from deckly.application.ports import IdempotencyScope, QueueLane
 from deckly.config import Settings
 from deckly.domain.document import Document, DocumentFormat, storage_key
 from deckly.domain.exceptions import DocumentNotFoundError
-from deckly.domain.job import GenerationJob
+from deckly.domain.job import GenerationJob, JobStatus
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.source import CitationUnit, DocumentSource
 from deckly.infrastructure.card_generator.generator import LlmCardGenerator
@@ -44,7 +50,9 @@ from deckly.infrastructure.observability.metrics import (
     RECORDING_URL_GATE,
 )
 from deckly.infrastructure.queue import TRANSCRIPTION_QUEUE_NAME
+from deckly.infrastructure.rate_limit import KEY_PREFIX as REGENERATION_KEY_PREFIX
 from deckly.infrastructure.tables import DocumentRow, GenerationJobRow
+from deckly.infrastructure.transcription.model import pinned_checksums, require_model
 from deckly.infrastructure.upload_gate import UPLOAD_CAPACITY_RETRY_AFTER_SECONDS, RejectingUploadGate
 from deckly.infrastructure.upload_limit import ADDRESS_KEY_PREFIX, CLIENT_KEY_PREFIX
 from deckly.main import API_PREFIX, create_app
@@ -53,12 +61,14 @@ from deckly.worker.settings import (
     OBSERVABILITY_KEY,
     RUN_GENERATION_KEY,
     SETTINGS_KEY,
+    TranscriptionWorkerSettings,
     WorkerContext,
     build_document_storage,
     build_storage_client,
     from_context,
     shutdown,
     startup,
+    transcription_startup,
 )
 from tests.document_files import TOPIC_TEXT, text_pdf
 from tests.documents import InMemoryDocumentStorage, pdf_bytes, pptx_bytes
@@ -87,6 +97,8 @@ CUTOFF = SWEPT_AT - RETENTION
 TICK = timedelta(microseconds=1)
 BATCH_SIZE = 1000
 UNREACHABLE_STORAGE = "http://127.0.0.1:1"
+
+type WorkerStartup = Callable[[WorkerContext], Awaitable[None]]
 
 
 class DocumentCleanup:
@@ -804,9 +816,11 @@ def generation_api(settings: Settings, cleanup: Cleanup, client_id: UUID) -> Ite
 
 
 @asynccontextmanager
-async def scripted_worker(settings: Settings, llm: FakeLlmClient) -> AsyncIterator[RunGeneration]:
+async def scripted_worker(
+    settings: Settings, llm: FakeLlmClient, start: WorkerStartup = startup
+) -> AsyncIterator[RunGeneration]:
     ctx: WorkerContext = {SETTINGS_KEY: settings, OBSERVABILITY_KEY: fresh_observability()}
-    await startup(ctx)
+    await start(ctx)
     try:
         wired = from_context(ctx, RUN_GENERATION_KEY, RunGeneration)
         yield replace(
@@ -1073,6 +1087,208 @@ async def test_generation_from_a_recording_waits_for_the_transcription_worker_on
         await pool.aclose()
     referencing = await jobs_referencing(documents.session_factory, UUID(str(recording["documentId"])))
     assert [row.job_id for row in referencing] == [job_id]
+
+
+STALENESS = StalenessPolicy(
+    running_after=timedelta(minutes=15),
+    queued_after=timedelta(hours=1),
+    recording_queued_after=timedelta(hours=3),
+)
+
+
+async def queued_from_each_source(
+    documents: DocumentCleanup, probe: StorageProbe, cleanup: Cleanup
+) -> tuple[UUID, UUID, UUID]:
+    session_factory = documents.session_factory
+    store = document_store(session_factory)
+    client_id = documents.client_id()
+    recording = await placed_recording(store, probe, ancient_recording(client_id, ANCIENT))
+    pdf = await placed(store, probe, ancient_document(client_id, ANCIENT))
+    topic = GenerationJob.queue(uuid4(), ANCIENT)
+    cleanup.job_ids.add(topic.job_id)
+    await job_store(session_factory).add(topic, generation_request(), scope_of(client_id))
+    recording_job = await generate_from(session_factory, recording)
+    pdf_job = await generate_from(session_factory, pdf)
+    return topic.job_id, pdf_job.job_id, recording_job.job_id
+
+
+async def test_stale_jobs_are_listed_per_queue_by_whether_their_document_is_a_recording(
+    documents: DocumentCleanup, probe: StorageProbe, cleanup: Cleanup
+) -> None:
+    topic, pdf, recording = await queued_from_each_source(documents, probe, cleanup)
+    housekeeping = PostgresJobHousekeeping(documents.session_factory)
+    cutoff = ANCIENT + TICK
+
+    transcription = await housekeeping.stale(JobStatus.QUEUED, QueueLane.TRANSCRIPTION, cutoff, BATCH_SIZE)
+    generation = await housekeeping.stale(JobStatus.QUEUED, QueueLane.GENERATION, cutoff, BATCH_SIZE)
+
+    ours = {topic, pdf, recording}
+    assert set(transcription) & ours == {recording}
+    assert set(generation) & ours == {topic, pdf}
+
+
+async def test_sweep_waits_out_the_recording_threshold_for_a_queued_recording_only(
+    documents: DocumentCleanup, probe: StorageProbe, cleanup: Cleanup
+) -> None:
+    topic, pdf, recording = await queued_from_each_source(documents, probe, cleanup)
+    store = job_store(documents.session_factory)
+
+    def sweep_at(now: datetime) -> SweepStaleJobs:
+        return SweepStaleJobs(
+            store=store,
+            housekeeping=PostgresJobHousekeeping(documents.session_factory),
+            policy=STALENESS,
+            batch_size=BATCH_SIZE,
+            clock=lambda: now,
+        )
+
+    await sweep_at(ANCIENT + STALENESS.queued_after + TICK)()
+    statuses = [await store.get(job_id) for job_id in (topic, pdf, recording)]
+    assert [job.status if job else None for job in statuses] == [
+        JobStatus.FAILED,
+        JobStatus.FAILED,
+        JobStatus.QUEUED,
+    ]
+
+    await sweep_at(ANCIENT + STALENESS.recording_queued_after + TICK)()
+    swept = await store.get(recording)
+    assert swept is not None
+    assert swept.status is JobStatus.FAILED
+
+
+TRANSCRIBED_RECORDING = "speech-pause.mp3"
+TRANSCRIBED_RECORDING_MS = 22_824
+TRANSCRIPT_CARD_REPLY = {
+    "deck": {"title": "The Balkan war", "tags": []},
+    "notes": [
+        {
+            "noteType": NoteType.BASIC,
+            "fields": {"front": "Which two powers?", "back": "Germany and England"},
+            "sources": [1],
+        }
+    ],
+}
+
+
+@pytest.fixture
+def model_ready(settings: Settings) -> Settings:
+    require_model(settings.transcription.model_directory, pinned_checksums())
+    return settings
+
+
+async def work_off_the_transcription_queue(settings: Settings, run: RunGeneration, job_id: str) -> None:
+    pool = await open_queue_pool(settings)
+    try:
+        assert await pool.zscore(TRANSCRIPTION_QUEUE_NAME, job_id) is not None
+        assert await pool.zscore(default_queue_name, job_id) is None
+        [task] = TranscriptionWorkerSettings.functions
+        assert isinstance(task, Function)
+        await task.coroutine({RUN_GENERATION_KEY: run}, job_id)
+        await pool.zrem(TRANSCRIPTION_QUEUE_NAME, job_id)
+    finally:
+        await pool.aclose()
+
+
+async def test_recording_generation_is_transcribed_by_its_worker_and_polled_to_cards_citing_the_transcript(
+    model_ready: Settings, documents: DocumentCleanup, cleanup: Cleanup
+) -> None:
+    client_id = documents.client_id()
+    llm = FakeLlmClient(model_reply(ALLOW), model_reply(TRANSCRIPT_CARD_REPLY))
+    with generation_api(model_ready, cleanup, client_id) as client:
+        recording = upload_recording(client, client_id, TRANSCRIBED_RECORDING)
+        created = start_generation(
+            client,
+            client_id,
+            {"documentId": recording["documentId"], "language": "en", "cardCount": 5, "includeImages": False},
+        )
+        job_id = str(created["jobId"])
+        cleanup.job_ids.add(UUID(job_id))
+        queued = poll(client, job_id, client_id)
+        async with scripted_worker(model_ready, llm, transcription_startup) as run:
+            await work_off_the_transcription_queue(model_ready, run, job_id)
+        finished = poll(client, job_id, client_id)
+
+    assert recording["status"] == HTTPStatus.CREATED, recording
+    assert created["status_code"] == HTTPStatus.ACCEPTED, created
+    assert queued["status"] == "queued"
+    assert finished["status"] == "succeeded", finished
+    result = finished["result"]
+    assert isinstance(result, dict)
+    [note] = result["notes"]
+    [source] = note["sources"]
+    assert source["kind"] == "transcript"
+    assert source["documentId"] == recording["documentId"]
+    assert source["title"] == TRANSCRIBED_RECORDING
+    assert 0 <= source["startMs"] < source["endMs"] <= TRANSCRIBED_RECORDING_MS
+    screening, generation = llm.prompts
+    assert "england" in screening.user.lower()
+    assert "england" in generation.user.lower()
+
+
+async def test_generation_from_a_recording_cancelled_through_the_api_is_never_transcribed(
+    model_ready: Settings, documents: DocumentCleanup, cleanup: Cleanup
+) -> None:
+    client_id = documents.client_id()
+    llm = FakeLlmClient(model_reply(ALLOW), model_reply(TRANSCRIPT_CARD_REPLY))
+    with generation_api(model_ready, cleanup, client_id) as client:
+        recording = upload_recording(client, client_id, TRANSCRIBED_RECORDING)
+        created = start_generation(
+            client, client_id, {"documentId": recording["documentId"], "language": "en", "cardCount": 5}
+        )
+        job_id = str(created["jobId"])
+        cleanup.job_ids.add(UUID(job_id))
+        cancel = client.post(
+            f"{GENERATIONS_ENDPOINT}/{job_id}/cancel", headers={"X-Client-Id": str(client_id)}
+        )
+        async with scripted_worker(model_ready, llm, transcription_startup) as run:
+            await work_off_the_transcription_queue(model_ready, run, job_id)
+        finished = poll(client, job_id, client_id)
+
+    assert cancel.status_code == HTTPStatus.NO_CONTENT
+    assert finished["status"] == "cancelled"
+    assert llm.prompts == []
+
+
+async def test_note_of_a_deck_generated_from_a_recording_is_refused_regeneration_without_spending_its_budget(
+    settings: Settings, documents: DocumentCleanup
+) -> None:
+    client_id = documents.client_id()
+    with app_client(settings) as client:
+        recording = upload_recording(client, client_id, "tone.m4a")
+        response = client.post(
+            f"{API_PREFIX}/notes/regenerate",
+            json={
+                "documentId": recording["documentId"],
+                "language": "en",
+                "noteType": "basic",
+                "rejectedNote": {
+                    "fields": {"front": "Which two powers?", "back": "Germany and England"},
+                    "sources": [
+                        {
+                            "kind": "transcript",
+                            "title": "tone.m4a",
+                            "documentId": recording["documentId"],
+                            "startMs": 0,
+                            "endMs": 1000,
+                        }
+                    ],
+                },
+                "reason": "too_easy",
+            },
+            headers={"X-Client-Id": str(client_id)},
+        )
+
+    assert recording["status"] == HTTPStatus.CREATED, recording
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY, response.text
+    body = response.json()
+    assert spec_errors("Problem", body) == []
+    assert body["code"] == "DOCUMENT_REGENERATION_UNSUPPORTED"
+    pool = await open_queue_pool(settings)
+    try:
+        budget_keys = [key async for key in pool.scan_iter(match=f"{REGENERATION_KEY_PREFIX}:{client_id}:*")]
+    finally:
+        await pool.aclose()
+    assert budget_keys == []
 
 
 async def test_generation_from_a_recording_where_transcription_is_disabled_is_a_422_that_spends_no_quota(

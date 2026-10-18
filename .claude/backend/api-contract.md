@@ -230,7 +230,8 @@ terminal; the client stops polling on them.
 
 A job never stays non-terminal forever. If a job stops making progress (its worker died, or it
 was never picked up), a scheduled sweep fails it with `GENERATION_FAILED`: a `running` job
-after 15 minutes without a state change, a `queued` job after an hour.
+after 20 minutes without a state change, a `queued` job after an hour, or after three hours for a
+job generating from a recording, which waits for a worker that transcribes one at a time.
 
 **Stages**, reported in order so the client can show meaningful progress:
 
@@ -331,7 +332,7 @@ counts as a block.
   of `topic` and `documentId`, like `POST /v1/generations`: a request with both, with neither, or
   with either one sent as `null` is `400 VALIDATION_FAILED`. A client sends `documentId`, the one its
   generation job was created with, instead of a `topic` for a note of a deck generated from an
-  uploaded document, and gets `422 DOCUMENT_REGENERATION_UNSUPPORTED`. The refusal is decided from
+  uploaded document or a recording, and gets `422 DOCUMENT_REGENERATION_UNSUPPORTED`. The refusal is decided from
   the request alone, before the regeneration budget is touched and before any search, document read
   or content check, so it costs nothing and does not say whether the document still exists. The
   client should not offer regenerate on such a deck; it can still edit or delete the note. See
@@ -488,7 +489,7 @@ recording's, and nothing downstream can tell the two apart. `X-Client-Id` is req
   time, that YouTube refuses (YouTube blocks many datacenter addresses), or that fails for any other
   upstream reason is `503 UPSTREAM_UNAVAILABLE` with `Retry-After: 60`; the attempt was counted.
 - **Retention** is the same as for documents. **No idempotency key**: retrying stores a second copy.
-- **Not yet a generation source**, like any recording (DEC-86).
+- **A generation source** exactly like an uploaded recording; see `POST /v1/generations`.
 
 ### `GET /v1/documents/{documentId}`
 

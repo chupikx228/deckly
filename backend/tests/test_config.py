@@ -13,6 +13,7 @@ from deckly.config import (
     DEFAULT_MODERATION_MAX_CONCURRENCY,
     DEFAULT_RECORDING_MAX_BYTES,
     DEFAULT_RECORDING_MAX_DURATION_SECONDS,
+    DEFAULT_RECORDING_QUEUED_STALE_AFTER_SECONDS,
     DEFAULT_RECORDING_UPLOAD_MAX_CONCURRENCY,
     DEFAULT_RECORDING_UPLOAD_READ_TIMEOUT_SECONDS,
     DEFAULT_RECORDING_URL_FETCHES_PER_ADDRESS_PER_WINDOW,
@@ -57,6 +58,7 @@ from deckly.config import (
     MIN_DOCUMENT_RETENTION_SECONDS,
     MIN_JOB_RETENTION_SECONDS,
     RECORDING_URL_SUBPROCESS_PEAK_BYTES,
+    TRANSCRIPTION_BACKLOG_ALERT_JOBS,
     TRANSCRIPTION_ENGINE_WORKING_SET_BYTES,
     TRANSCRIPTION_MEMORY_SAFETY_MARGIN,
     TRANSCRIPTION_WORKER_MAX_JOBS,
@@ -1238,6 +1240,7 @@ def test_sweep_interval_that_divides_the_hour_is_accepted(
     [
         "DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS",
         "DECKLY_SWEEP_QUEUED_STALE_AFTER_SECONDS",
+        "DECKLY_SWEEP_RECORDING_QUEUED_STALE_AFTER_SECONDS",
         "DECKLY_SWEEP_BATCH_SIZE",
     ],
 )
@@ -1325,6 +1328,139 @@ def test_running_job_going_stale_just_after_a_transcription_job_settles_is_accep
 
 def test_shipped_staleness_outlasts_the_shipped_transcription_job_timeout() -> None:
     assert DEFAULT_TRANSCRIPTION_JOB_TIMEOUT_SECONDS + JOB_STORE_TIMEOUT_SECONDS < 1200
+
+
+SHIPPED_QUEUED_STALE_AFTER_SECONDS = 3600
+SHIPPED_BACKLOG_WAIT_SECONDS = (
+    TRANSCRIPTION_BACKLOG_ALERT_JOBS + 1
+) * DEFAULT_TRANSCRIPTION_JOB_TIMEOUT_SECONDS
+
+
+def test_queued_recordings_go_stale_after_three_hours_by_default(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_sweep_environment(clean_environment)
+
+    assert (
+        SweepSettings().recording_queued_stale_after_seconds == DEFAULT_RECORDING_QUEUED_STALE_AFTER_SECONDS
+    )
+    assert DEFAULT_RECORDING_QUEUED_STALE_AFTER_SECONDS == 3 * 60 * 60
+
+
+def test_shipped_recording_threshold_outlasts_the_alerted_backlog_with_room_to_act_on_the_alert() -> None:
+    headroom = (
+        DEFAULT_RECORDING_QUEUED_STALE_AFTER_SECONDS
+        - SHIPPED_BACKLOG_WAIT_SECONDS
+        - JOB_STORE_TIMEOUT_SECONDS
+    )
+
+    assert TRANSCRIPTION_WORKER_MAX_JOBS == 1
+    assert SHIPPED_BACKLOG_WAIT_SECONDS == 9 * 960 == 8640
+    assert headroom > 2 * DEFAULT_TRANSCRIPTION_JOB_TIMEOUT_SECONDS
+    assert DEFAULT_RECORDING_QUEUED_STALE_AFTER_SECONDS // DEFAULT_TRANSCRIPTION_JOB_TIMEOUT_SECONDS == 11
+    assert DEFAULT_RECORDING_QUEUED_STALE_AFTER_SECONDS // SHIPPED_QUEUED_STALE_AFTER_SECONDS == 3
+
+
+def test_queued_recording_going_stale_before_other_queued_jobs_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_sweep_environment(
+        clean_environment,
+        DECKLY_SWEEP_QUEUED_STALE_AFTER_SECONDS="3600",
+        DECKLY_SWEEP_RECORDING_QUEUED_STALE_AFTER_SECONDS="3599",
+    )
+
+    with pytest.raises(
+        ValidationError, match="queued recording must not go stale sooner than a queued topic"
+    ):
+        SweepSettings()
+
+
+def test_queued_recordings_and_other_queued_jobs_may_go_stale_after_the_same_time(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    set_sweep_environment(
+        clean_environment,
+        DECKLY_SWEEP_QUEUED_STALE_AFTER_SECONDS="3600",
+        DECKLY_SWEEP_RECORDING_QUEUED_STALE_AFTER_SECONDS="3600",
+    )
+
+    assert SweepSettings().recording_queued_stale_after_seconds == 3600
+
+
+def test_backlog_a_queued_recording_waits_behind_is_the_alerted_depth_plus_the_running_job_one_at_a_time(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_from_environment(clean_environment)
+
+    assert settings.transcription_backlog_wait_seconds == SHIPPED_BACKLOG_WAIT_SECONDS
+
+
+def test_queued_recording_going_stale_as_the_alerted_backlog_reaches_it_is_rejected_with_every_term_named(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    stale_after = SHIPPED_BACKLOG_WAIT_SECONDS + JOB_STORE_TIMEOUT_SECONDS
+
+    with pytest.raises(ValueError, match="DECKLY_SWEEP_RECORDING_QUEUED_STALE_AFTER_SECONDS") as raised:
+        settings_from_environment(
+            clean_environment, DECKLY_SWEEP_RECORDING_QUEUED_STALE_AFTER_SECONDS=str(stale_after)
+        )
+
+    message = str(raised.value)
+    assert f"({stale_after}s)" in message
+    assert (
+        f"({TRANSCRIPTION_BACKLOG_ALERT_JOBS} waiting and {TRANSCRIPTION_WORKER_MAX_JOBS} running" in message
+    )
+    assert (
+        f"{DEFAULT_TRANSCRIPTION_JOB_TIMEOUT_SECONDS}s, one at a time: {SHIPPED_BACKLOG_WAIT_SECONDS}s"
+        in message
+    )
+    assert f"job store timeout ({JOB_STORE_TIMEOUT_SECONDS}s)" in message
+
+
+def test_queued_recording_going_stale_just_after_the_alerted_backlog_reaches_it_is_accepted(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    stale_after = SHIPPED_BACKLOG_WAIT_SECONDS + JOB_STORE_TIMEOUT_SECONDS + 1
+
+    settings = settings_from_environment(
+        clean_environment, DECKLY_SWEEP_RECORDING_QUEUED_STALE_AFTER_SECONDS=str(stale_after)
+    )
+
+    assert settings.sweep.recording_queued_stale_after_seconds == stale_after
+
+
+@pytest.mark.parametrize(
+    ("job_timeout", "accepted"),
+    [(1199, True), (1200, False)],
+    ids=["longest timeout the default fits", "first timeout it does not"],
+)
+def test_raising_the_transcription_job_timeout_without_the_recording_threshold_fails_at_startup(
+    clean_environment: pytest.MonkeyPatch, job_timeout: int, *, accepted: bool
+) -> None:
+    environment = {
+        "DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS": str(job_timeout),
+        "DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS": str(job_timeout + JOB_STORE_TIMEOUT_SECONDS + 1),
+    }
+
+    if accepted:
+        settings = settings_from_environment(clean_environment, **environment)
+        assert settings.transcription_backlog_wait_seconds == 9 * job_timeout
+        return
+    with pytest.raises(ValueError, match="must outlast a recording queued behind the backlog"):
+        settings_from_environment(clean_environment, **environment)
+
+
+def test_disabled_transcription_does_not_hold_the_recording_threshold_to_the_backlog(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    settings = settings_from_environment(
+        clean_environment,
+        DECKLY_TRANSCRIPTION_ENABLED="false",
+        DECKLY_SWEEP_RECORDING_QUEUED_STALE_AFTER_SECONDS=str(SHIPPED_QUEUED_STALE_AFTER_SECONDS),
+    )
+
+    assert settings.sweep.recording_queued_stale_after_seconds == SHIPPED_QUEUED_STALE_AFTER_SECONDS
 
 
 OBSERVABILITY_ENVIRONMENT = {
@@ -2488,6 +2624,7 @@ def test_longer_duration_cap_grows_the_decoded_audio_term_until_the_budget_refus
         "DECKLY_TRANSCRIPTION_DEADLINE_SECONDS": "1100",
         "DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS": "1600",
         "DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS": "1700",
+        "DECKLY_SWEEP_RECORDING_QUEUED_STALE_AFTER_SECONDS": "14406",
     }
     settings = settings_from_environment(clean_environment, **hour)
     assert settings.transcription_engine_peak_bytes == TRANSCRIPTION_ENGINE_WORKING_SET_BYTES + 3600 * 32_000
@@ -2502,6 +2639,7 @@ def test_longer_duration_cap_grows_the_decoded_audio_term_until_the_budget_refus
                 "DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS": "20000",
                 "DECKLY_SWEEP_RUNNING_STALE_AFTER_SECONDS": "20100",
                 "DECKLY_SWEEP_QUEUED_STALE_AFTER_SECONDS": "20100",
+                "DECKLY_SWEEP_RECORDING_QUEUED_STALE_AFTER_SECONDS": "20100",
             },
         )
 

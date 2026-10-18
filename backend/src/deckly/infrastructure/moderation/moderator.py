@@ -149,7 +149,11 @@ class LlmTopicModerator:
             verdict = topic_verdict(reply)
         logger.info(
             "topic_screened",
-            extra={"verdict": verdict, "reply_stop": reply.stop, "source_kind": request.source_kind},
+            extra={
+                "verdict": verdict,
+                "reply_stop": reply.stop,
+                "source_kind": request.source_kind(document),
+            },
         )
         return verdict is Verdict.ALLOW
 

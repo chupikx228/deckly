@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -15,6 +14,7 @@ from deckly.application.ports import (
     JobHousekeeping,
     JobStore,
     JobTransition,
+    QueueLane,
 )
 from deckly.domain.job import FailureCode, GenerationJob, JobStatus
 
@@ -22,12 +22,31 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
+class StaleCutoff:
+    status: JobStatus
+    lane: QueueLane
+    updated_before: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class StalenessPolicy:
     running_after: timedelta
     queued_after: timedelta
+    recording_queued_after: timedelta
 
-    def cutoffs(self, now: datetime) -> Mapping[JobStatus, datetime]:
-        return {JobStatus.RUNNING: now - self.running_after, JobStatus.QUEUED: now - self.queued_after}
+    def cutoffs(self, now: datetime) -> tuple[StaleCutoff, ...]:
+        queued_after = {
+            QueueLane.GENERATION: self.queued_after,
+            QueueLane.TRANSCRIPTION: self.recording_queued_after,
+        }
+        return tuple(
+            cutoff
+            for lane in QueueLane
+            for cutoff in (
+                StaleCutoff(JobStatus.RUNNING, lane, now - self.running_after),
+                StaleCutoff(JobStatus.QUEUED, lane, now - queued_after[lane]),
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,23 +82,27 @@ class SweepStaleJobs:
     async def __call__(self) -> int:
         now = self.clock()
         failed = 0
-        for status, cutoff in self.policy.cutoffs(now).items():
-            for job_id in await self.housekeeping.stale(status, cutoff, self.batch_size):
-                failed += await self._fail(job_id, status, cutoff, now)
+        for cutoff in self.policy.cutoffs(now):
+            stale = await self.housekeeping.stale(
+                cutoff.status, cutoff.lane, cutoff.updated_before, self.batch_size
+            )
+            for job_id in stale:
+                failed += await self._fail(job_id, cutoff, now)
         return failed
 
-    async def _fail(self, job_id: UUID, status: JobStatus, cutoff: datetime, now: datetime) -> int:
+    async def _fail(self, job_id: UUID, cutoff: StaleCutoff, now: datetime) -> int:
+        context = {"job_id": str(job_id), "stale_status": cutoff.status, "lane": cutoff.lane}
         try:
-            job = await self.store.update(job_id, fail_if_stale(status, cutoff, now))
+            job = await self.store.update(job_id, fail_if_stale(cutoff.status, cutoff.updated_before, now))
         except JobNoLongerStaleError:
-            logger.info("stale_job_moved_on", extra={"job_id": str(job_id), "stale_status": status})
+            logger.info("stale_job_moved_on", extra=context)
             return 0
         except Exception:
-            logger.exception("stale_job_not_swept", extra={"job_id": str(job_id), "stale_status": status})
+            logger.exception("stale_job_not_swept", extra=context)
             return 0
         if job is None:
             return 0
-        logger.warning("stale_job_failed", extra={**log_context(job), "stale_status": status})
+        logger.warning("stale_job_failed", extra={**log_context(job), **context})
         return 1
 
 

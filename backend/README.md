@@ -1174,7 +1174,7 @@ its own worker (`DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS`, see "Transcription")
 
 **Observability.** Lifecycle lines (`generation_admitted`, `generation_started`,
 `generation_stage_entered`, `generation_succeeded`, `generation_failed`, `generation_abandoned`)
-carry `source_kind` (`topic` or `document`) and, for a document, `document_id`;
+carry `source_kind` (`topic`, `document` or `recording`) and, for either of the last two, `document_id`;
 `generation_document_not_found`, `document_fetched`, `document_parsed` and `document_screened`
 cover the document steps. The admission, job and stage metrics have a `source` label, the run and
 stage spans a `deckly.source_kind` attribute.
@@ -1914,11 +1914,11 @@ and the startup check uses the transcription timeout while transcription is enab
 topic job whose worker crashed shows as running for up to 20 minutes rather than 15 before the sweep
 fails it. A per-source sweep would avoid that and was judged not worth its complexity yet.
 
-**Backlog.** Queued jobs still go stale after `DECKLY_SWEEP_QUEUED_STALE_AFTER_SECONDS` (one hour), so a
-transcription queue deeper than about an hour of work fails the jobs at its tail. There is no admission
-backpressure; `deckly_generation_queue_depth{queue="transcription"}` is reported next to the generation
-queue's on the API's `/metrics`. **Alert on it** (more than about eight waiting per replica) and add
-replicas.
+**Backlog.** A queued recording goes stale after its own threshold,
+`DECKLY_SWEEP_RECORDING_QUEUED_STALE_AFTER_SECONDS` (three hours), not the one-hour threshold of other
+queued jobs; see "Generating from a recording". There is no admission backpressure;
+`deckly_generation_queue_depth{queue="transcription"}` is reported next to the generation queue's on the
+API's `/metrics`. **Alert on it** (more than about eight waiting per replica) and add replicas.
 
 A recording job spends minutes in `parsing_sources` with nothing to show; the stage does not report
 progress within itself.
@@ -2057,7 +2057,7 @@ transcription seconds, real-time factor, language, segments), `recording_transcr
 `transcript_parsed`. Metrics, on the transcription worker's own port
 (`DECKLY_OBSERVABILITY_TRANSCRIPTION_WORKER_METRICS_PORT`, 9465; the two workers' ports must differ):
 `deckly_transcription_real_time_factor` (a histogram: compare it with the 0.6 the deadline allows) and
-`deckly_recording_decode_truncations_total`, beside the usual job and stage metrics with `source="document"`.
+`deckly_recording_decode_truncations_total`, beside the usual job and stage metrics with `source="recording"`.
 `DECKLY_TRANSCRIPTION_ENABLED=false` is the escape hatch for a deployment without the worker: the API
 then answers a recording's generation `422 DOCUMENT_NOT_SUPPORTED_FOR_GENERATION` before the quota is
 touched, as before DEC-86, and the transcription checks are skipped.
@@ -2084,6 +2084,55 @@ The lying file is built in the test from `speech-pause.mp3` (remuxed into MP4 by
 `understated_timing` in `tests/recording_files.py`). The model-backed tests are integration tests, so
 `make test` needs neither the model nor ffmpeg.
 
+### Generating from a recording
+
+DEC-86 already did most of the wiring: `POST /v1/generations` takes a recording's `documentId` exactly as
+it takes a document's (the stored record knows the format, so there is no second discriminator),
+admission routes it to the transcription queue (`lane_for`), the transcription worker runs the same
+`RunGeneration` with `RecordingTranscriber` as its parser, and the full transcript is screened like a
+document's text. The admission screen sees the recording's filename (for a fetched video, its title) and
+the instructions, like a document's. Retention needed nothing: the `ON DELETE RESTRICT` key and
+`is_usable`/`is_expired` never look at the format. DEC-87 closed what DEC-86 left:
+
+**Source kind.** `SourceKind` is `topic`, `document` or `recording`, decided by
+`GenerationRequest.source_kind(document)` from the stored record, so logs, metrics and spans tell a
+recording from a document. Admission already holds the record. The worker reads it once, right after the
+job is marked running and before the cache is consulted (`RunGeneration._resolve`), and reuses it for
+the download, so a job reads its document record exactly as often as before. Reading it inside the
+run's failure handling means a store outage fails the job like any other step instead of leaving it
+queued. A record that is gone fails the job `DOCUMENT_NOT_FOUND` in `planning`, before the cache: the
+foreign key and the retention rule make that unreachable for a stored job. A request naming a document
+that admission cannot find is counted as `document`, since there is nothing to tell what it was.
+
+**Cache.** `RecordingGenerationFingerprint` (the same fields as a document's) keys recordings under
+`deckly:generation-result:recording:v1`. The keys could not collide before (a document id is unique
+across both kinds), but their own namespace lets a change of transcription engine drop every
+recording-sourced result by bumping the version without touching documents. `ResultCache` now takes a
+`Fingerprint` rather than a request, since only the run knows the document a fingerprint needs.
+
+**Regeneration** of a note from a recording-sourced deck is refused with
+`422 DOCUMENT_REGENERATION_UNSUPPORTED`, through DEC-83's check unchanged: it refuses any `documentId`
+before anything is looked up. An integration test uploads a recording and proves the refusal, and that
+no regeneration budget is spent.
+
+**Queued recordings go stale on their own clock.** The transcription worker takes one job at a time,
+and a job may use its whole `DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS` (960 s). Under the shared one-hour
+queued threshold, the fifth of five recordings queued together would start after 4 x 960 = 3,840 s and
+be failed `GENERATION_FAILED` while still waiting its turn. A test replays exactly that.
+`StalenessPolicy` now has `recording_queued_after`; the sweep lists stale jobs per queue (`in_lane`
+joins a job to its document's format), and running jobs keep the one shared threshold.
+
+`DECKLY_SWEEP_RECORDING_QUEUED_STALE_AFTER_SECONDS` defaults to 10,800 s (three hours). It is sized
+against the backlog the queue-depth alert above allows: 8 waiting plus 1 running per transcription
+worker, each taking up to the job timeout, one at a time, is 9 x 960 = 8,640 s before the last one
+starts. Startup refuses a threshold that does not outlast that plus the job store timeout, and moves
+with the job timeout (the default fits timeouts up to 1,199 s). The 2,160 s of headroom is about two more
+worst-case jobs, time to act on the alert. With typical jobs (a 15-minute recording takes 3 to 5
+minutes end to end) three hours absorbs a backlog of roughly 35 to 60. Replicas do not change the check: the alert is per replica,
+and so is the drain rate. A recording also cannot go stale sooner than other queued jobs
+(`SweepSettings` checks that). The cost is the other side of the same threshold: a recording job whose
+enqueue was lost shows as queued for up to three hours, not one, before the sweep fails it.
+
 ### Not done here
 
 - **DEC-89:** caching a transcript per document, so a second generation from the same recording does not
@@ -2091,8 +2140,8 @@ The lying file is built in the test from `speech-pause.mp3` (remuxed into MP4 by
 - **DEC-90:** YouTube's own captions as an alternative to transcribing a fetched video.
 - **Frontend:** the app does not upload recordings or generate from them yet; its contract types and Zod
   schema know the transcript source (above), its UI does not.
-- **Progress within `parsing_sources`**, and a sweep that knows a transcription job's timeout from a
-  topic job's.
+- **Progress within `parsing_sources`** (DEC-91), and a running-job sweep that knows a transcription job's
+  timeout from a topic job's (the queued-job sweep does since DEC-87).
 - **A benchmark on the deployment's hardware.** The cloud speed above is an assumption; the
   real-time-factor histogram is how to replace it.
 

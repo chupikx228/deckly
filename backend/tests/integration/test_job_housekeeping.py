@@ -16,7 +16,7 @@ from deckly.application.housekeeping import (
     fail_if_stale,
 )
 from deckly.application.pipeline import RunGeneration
-from deckly.application.ports import IdempotencyScope
+from deckly.application.ports import IdempotencyScope, QueueLane
 from deckly.config import Settings
 from deckly.domain.job import Failed, FailureCode, GenerationJob, JobStage, JobStatus
 from deckly.domain.notes.note_type import NoteType
@@ -35,6 +35,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 ANCIENT = datetime(2000, 1, 1, tzinfo=UTC)
 RUNNING_AFTER = timedelta(minutes=15)
 QUEUED_AFTER = timedelta(hours=1)
+RECORDING_QUEUED_AFTER = timedelta(hours=3)
 SWEPT_AT = ANCIENT + timedelta(hours=2)
 DAY = timedelta(days=1)
 BATCH_SIZE = 1000
@@ -62,7 +63,11 @@ def sweeper(session_factory: async_sessionmaker[AsyncSession], now: datetime = S
     return SweepStaleJobs(
         store=PostgresJobStore(session_factory, document_retention=DOCUMENT_RETENTION),
         housekeeping=PostgresJobHousekeeping(session_factory),
-        policy=StalenessPolicy(running_after=RUNNING_AFTER, queued_after=QUEUED_AFTER),
+        policy=StalenessPolicy(
+            running_after=RUNNING_AFTER,
+            queued_after=QUEUED_AFTER,
+            recording_queued_after=RECORDING_QUEUED_AFTER,
+        ),
         batch_size=BATCH_SIZE,
         clock=lambda: now,
     )
@@ -115,8 +120,10 @@ async def test_stale_lists_jobs_of_one_status_last_changed_before_the_cutoff_old
     await stored(store, cleanup, running().succeed(FULL_RESULT, ANCIENT))
     housekeeping = PostgresJobHousekeeping(session_factory)
 
-    listed = await housekeeping.stale(JobStatus.RUNNING, at(timedelta(hours=1)), BATCH_SIZE)
-    first = await housekeeping.stale(JobStatus.RUNNING, at(timedelta(hours=1)), 1)
+    listed = await housekeeping.stale(
+        JobStatus.RUNNING, QueueLane.GENERATION, at(timedelta(hours=1)), BATCH_SIZE
+    )
+    first = await housekeeping.stale(JobStatus.RUNNING, QueueLane.GENERATION, at(timedelta(hours=1)), 1)
 
     assert [job_id for job_id in listed if job_id in {older, oldest}] == [oldest, older]
     assert first == (oldest,)

@@ -1,9 +1,11 @@
-from dataclasses import replace
+from dataclasses import asdict, replace
+from datetime import UTC, datetime
 from typing import Unpack
 from uuid import UUID
 
 import pytest
 
+from deckly.domain.document import RECORDING_FORMATS, Document, DocumentFormat
 from deckly.domain.exceptions import InvalidGenerationRequestError
 from deckly.domain.generation import (
     MAX_CARD_COUNT,
@@ -14,6 +16,7 @@ from deckly.domain.generation import (
     Fingerprint,
     GenerationFingerprint,
     GenerationRequest,
+    RecordingGenerationFingerprint,
     SourceKind,
 )
 from deckly.domain.notes.note_type import NoteType
@@ -231,9 +234,25 @@ DOCUMENT_ID = UUID("5d0c7a1e-3b2f-4c8d-9e6f-1a2b3c4d5e6f")
 OTHER_DOCUMENT_ID = UUID("6e1d8b2f-4c3a-4d9e-8f7a-2b3c4d5e6f70")
 
 
+RECORDINGS = sorted(RECORDING_FORMATS)
+TEXT_DOCUMENTS = sorted(set(DocumentFormat) - RECORDING_FORMATS)
+
+
 def document_request_with(**changes: Unpack[RequestChanges]) -> GenerationRequest:
     request = replace(request_with(NoteType.BASIC, NoteType.CLOZE), topic=None, document_id=DOCUMENT_ID)
     return replace(request, **changes)
+
+
+def stored(document_format: DocumentFormat = DocumentFormat.PDF, document_id: UUID = DOCUMENT_ID) -> Document:
+    return Document(
+        document_id=document_id,
+        client_id=UUID(int=1, version=4),
+        filename="lecture",
+        size_bytes=1024,
+        document_format=document_format,
+        uploaded_at=datetime(2026, 10, 18, tzinfo=UTC),
+        duration_seconds=60.0 if document_format in RECORDING_FORMATS else None,
+    )
 
 
 def test_request_from_a_document_names_no_topic_and_is_a_document_source() -> None:
@@ -241,8 +260,68 @@ def test_request_from_a_document_names_no_topic_and_is_a_document_source() -> No
 
     assert request.topic is None
     assert request.document_id == DOCUMENT_ID
-    assert request.source_kind is SourceKind.DOCUMENT
-    assert request_with(NoteType.BASIC).source_kind is SourceKind.TOPIC
+    assert request.source_kind(stored()) is SourceKind.DOCUMENT
+    assert request_with(NoteType.BASIC).source_kind(None) is SourceKind.TOPIC
+
+
+@pytest.mark.parametrize("document_format", RECORDINGS)
+def test_request_naming_a_recording_is_a_recording_source(document_format: DocumentFormat) -> None:
+    assert document_request_with().source_kind(stored(document_format)) is SourceKind.RECORDING
+
+
+@pytest.mark.parametrize("document_format", TEXT_DOCUMENTS)
+def test_request_naming_a_text_document_stays_a_document_source(document_format: DocumentFormat) -> None:
+    assert document_request_with().source_kind(stored(document_format)) is SourceKind.DOCUMENT
+
+
+def test_request_naming_a_document_that_could_not_be_found_is_counted_as_a_document_source() -> None:
+    assert document_request_with().source_kind(None) is SourceKind.DOCUMENT
+
+
+@pytest.mark.parametrize(
+    "request_kind",
+    ["topic", "another document"],
+)
+def test_kind_and_fingerprint_refuse_a_document_the_request_does_not_name(request_kind: str) -> None:
+    request = request_with(NoteType.BASIC) if request_kind == "topic" else document_request_with()
+    unnamed = stored(DocumentFormat.M4A, OTHER_DOCUMENT_ID)
+
+    with pytest.raises(InvalidGenerationRequestError, match="not the source this request names"):
+        request.source_kind(unnamed)
+    with pytest.raises(InvalidGenerationRequestError, match="not the source this request names"):
+        request.fingerprint(unnamed)
+
+
+def test_request_from_a_document_cannot_be_fingerprinted_without_its_document() -> None:
+    with pytest.raises(InvalidGenerationRequestError, match="fingerprinted together with that document"):
+        document_request_with().fingerprint()
+
+
+@pytest.mark.parametrize("document_format", RECORDINGS)
+def test_recording_fingerprint_names_the_recording_and_normalises_like_a_document_fingerprint(
+    document_format: DocumentFormat,
+) -> None:
+    request = document_request_with(language="RU", note_types=(NoteType.CLOZE, NoteType.BASIC))
+
+    assert request.fingerprint(stored(document_format)) == RecordingGenerationFingerprint(
+        document_id=DOCUMENT_ID,
+        language="ru",
+        card_count=40,
+        difficulty=Difficulty.INTERMEDIATE,
+        note_types=(NoteType.BASIC, NoteType.CLOZE),
+        include_images=False,
+        instructions=None,
+    )
+
+
+def test_recording_and_document_fingerprints_of_the_same_settings_are_never_equal() -> None:
+    request = document_request_with()
+
+    recording = request.fingerprint(stored(DocumentFormat.M4A))
+    document = request.fingerprint(stored(DocumentFormat.PDF))
+
+    assert recording != document
+    assert asdict(recording) == asdict(document)
 
 
 @pytest.mark.parametrize(
@@ -276,7 +355,7 @@ def test_request_from_a_document_has_no_topic_to_search_for() -> None:
 def test_document_fingerprint_names_the_document_and_normalises_like_a_topic_fingerprint() -> None:
     request = document_request_with(language="RU", note_types=(NoteType.CLOZE, NoteType.BASIC))
 
-    assert request.fingerprint() == DocumentGenerationFingerprint(
+    assert request.fingerprint(stored()) == DocumentGenerationFingerprint(
         document_id=DOCUMENT_ID,
         language="ru",
         card_count=40,
@@ -285,7 +364,9 @@ def test_document_fingerprint_names_the_document_and_normalises_like_a_topic_fin
         include_images=False,
         instructions=None,
     )
-    assert document_request_with(instructions=" \t ").fingerprint() == document_request_with().fingerprint()
+    assert document_request_with(instructions=" \t ").fingerprint(
+        stored()
+    ) == document_request_with().fingerprint(stored())
 
 
 @pytest.mark.parametrize(
@@ -312,11 +393,14 @@ def test_document_fingerprint_names_the_document_and_normalises_like_a_topic_fin
 def test_every_input_that_shapes_the_deck_changes_the_document_fingerprint(
     changes: RequestChanges,
 ) -> None:
-    assert document_request_with(**changes).fingerprint() != document_request_with().fingerprint()
+    changed = document_request_with(**changes)
+    assert changed.fingerprint(stored(document_id=changed.document_id or DOCUMENT_ID)) != (
+        document_request_with().fingerprint(stored())
+    )
 
 
 def test_document_and_topic_fingerprints_of_otherwise_equal_requests_differ() -> None:
     topic = request_with(NoteType.BASIC, NoteType.CLOZE)
 
-    assert document_request_with().fingerprint() != topic.fingerprint()
+    assert document_request_with().fingerprint(stored()) != topic.fingerprint()
     assert isinstance(topic.fingerprint(), GenerationFingerprint)

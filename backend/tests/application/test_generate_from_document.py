@@ -208,7 +208,15 @@ async def test_recording_is_refused_before_the_quota_or_the_screen_where_transcr
     [refused] = logs.named("generation_document_not_supported")
     assert refused["document_id"] == str(DOCUMENT_ID)
     assert refused["content_type"] == document_format
-    assert sample(harness, "deckly_generation_jobs_admitted_total", outcome="document_not_supported") == 1
+    assert (
+        sample(
+            harness,
+            "deckly_generation_jobs_admitted_total",
+            outcome="document_not_supported",
+            source="recording",
+        )
+        == 1
+    )
 
 
 async def test_document_swept_while_the_request_was_screened_releases_the_quota() -> None:
@@ -291,8 +299,13 @@ async def test_document_job_moves_through_every_stage_in_order() -> None:
     assert stages == [JobStage.PLANNING, *STAGE_ORDER[1:4], JobStage.FINALIZING]
 
 
-@pytest.mark.parametrize("missing", ["record", "object"])
-async def test_document_gone_before_the_worker_reached_it_fails_as_document_not_found(missing: str) -> None:
+@pytest.mark.parametrize(
+    ("missing", "stage"),
+    [("record", JobStage.PLANNING), ("object", JobStage.RETRIEVING_SOURCES)],
+)
+async def test_document_gone_before_the_worker_reached_it_fails_as_document_not_found(
+    missing: str, stage: JobStage
+) -> None:
     harness = harness_with_document()
     job_id = await queued(harness)
     if missing == "record":
@@ -304,9 +317,22 @@ async def test_document_gone_before_the_worker_reached_it_fails_as_document_not_
 
     failure = failure_of(harness, job_id)
     assert failure.code is FailureCode.DOCUMENT_NOT_FOUND
-    assert failure.stage is JobStage.RETRIEVING_SOURCES
+    assert failure.stage is stage
     assert harness.documents.parsed == []
     assert harness.providers.generated_for == []
+
+
+async def test_document_record_gone_before_the_worker_reached_it_fails_without_consulting_the_cache() -> None:
+    harness = harness_with_document()
+    job_id = await queued(harness)
+    harness.cache.entries[document_request().fingerprint(UPLOADED_DOCUMENT)] = GENERATED
+    harness.documents.documents.clear()
+
+    await harness.run(job_id)
+
+    assert failure_of(harness, job_id).code is FailureCode.DOCUMENT_NOT_FOUND
+    assert harness.cache.reads == []
+    assert harness.documents.storage.reads == []
 
 
 async def test_storage_outage_while_reading_the_document_is_provider_unavailable() -> None:
@@ -400,7 +426,7 @@ async def test_second_document_job_with_the_same_settings_is_served_from_the_cac
     assert isinstance(state, Succeeded)
     assert state.result == GENERATED
     assert len(harness.documents.parsed) == 1
-    assert harness.cache.entries == {document_request().fingerprint(): GENERATED}
+    assert harness.cache.entries == {document_request().fingerprint(UPLOADED_DOCUMENT): GENERATED}
 
 
 async def test_document_and_topic_jobs_never_share_a_cached_result() -> None:
@@ -414,7 +440,7 @@ async def test_document_and_topic_jobs_never_share_a_cached_result() -> None:
     assert len(harness.documents.parsed) == 1
     assert set(harness.cache.entries) == {
         generation_request().fingerprint(),
-        document_request().fingerprint(),
+        document_request().fingerprint(UPLOADED_DOCUMENT),
     }
 
 

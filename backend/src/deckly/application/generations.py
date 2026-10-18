@@ -30,7 +30,7 @@ from deckly.domain.exceptions import (
     JobNotFoundError,
     TopicRejectedError,
 )
-from deckly.domain.generation import GenerationRequest
+from deckly.domain.generation import GenerationRequest, SourceKind
 from deckly.domain.job import GenerationJob, JobStatus
 
 logger = logging.getLogger(__name__)
@@ -86,8 +86,9 @@ class CreateGeneration:
         if not await self._screen(request, document, requester, now):
             twin = await self._find(scope)
             if twin is None:
-                logger.info("topic_rejected", extra={"source_kind": request.source_kind})
-                self.telemetry.admitted(AdmissionOutcome.TOPIC_REJECTED, request.source_kind)
+                kind = request.source_kind(document)
+                logger.info("topic_rejected", extra={"source_kind": kind})
+                self.telemetry.admitted(AdmissionOutcome.TOPIC_REJECTED, kind)
                 message = "the request violates the content policy"
                 raise TopicRejectedError(message)
             await self.quota.release(requester, now)
@@ -97,7 +98,7 @@ class CreateGeneration:
             stored = await self.store.add(job, request, scope)
         except DocumentNotFoundError:
             await self.quota.release(requester, now)
-            self._document_missing(request)
+            self._document_missing(request, request.source_kind(document))
             raise
         except Exception:
             await self.quota.release(requester, now)
@@ -106,7 +107,7 @@ class CreateGeneration:
             await self.quota.release(requester, now)
             return await self._replay(stored, request, scope, now)
         await self.queue.enqueue(job.job_id, lane_for(document))
-        self._admit(job, request, AdmissionOutcome.QUEUED)
+        self._admit(job, request, request.source_kind(document), AdmissionOutcome.QUEUED)
         return JobCreated(job=job, quota=quota)
 
     async def _find(self, scope: IdempotencyScope) -> StoredJob | None:
@@ -121,7 +122,7 @@ class CreateGeneration:
             return None
         document = await self.documents.get(request.document_id, client_id)
         if document is None:
-            self._document_missing(request)
+            self._document_missing(request, request.source_kind(document))
             message = f"document {request.document_id} does not exist for this client"
             raise DocumentNotFoundError(message)
         if is_recording(document.document_format) and not self.transcription_enabled:
@@ -129,20 +130,20 @@ class CreateGeneration:
                 "generation_document_not_supported",
                 extra={"document_id": str(document.document_id), "content_type": document.document_format},
             )
-            self.telemetry.admitted(AdmissionOutcome.DOCUMENT_NOT_SUPPORTED, request.source_kind)
+            self.telemetry.admitted(AdmissionOutcome.DOCUMENT_NOT_SUPPORTED, request.source_kind(document))
             message = f"document {document.document_id} is a recording, and this deployment cannot transcribe"
             raise DocumentNotSupportedForGenerationError(message)
         return document
 
-    async def _lane(self, stored: StoredJob) -> QueueLane:
+    async def _stored_document(self, stored: StoredJob) -> Document | None:
         document_id = stored.request.document_id
         if document_id is None:
-            return QueueLane.GENERATION
-        return lane_for(await self.documents.get(document_id, stored.client_id))
+            return None
+        return await self.documents.get(document_id, stored.client_id)
 
-    def _document_missing(self, request: GenerationRequest) -> None:
+    def _document_missing(self, request: GenerationRequest, kind: SourceKind) -> None:
         logger.info("generation_document_not_found", extra={"document_id": str(request.document_id)})
-        self.telemetry.admitted(AdmissionOutcome.DOCUMENT_NOT_FOUND, request.source_kind)
+        self.telemetry.admitted(AdmissionOutcome.DOCUMENT_NOT_FOUND, kind)
 
     async def _screen(
         self, request: GenerationRequest, document: Document | None, requester: Requester, now: datetime
@@ -159,23 +160,26 @@ class CreateGeneration:
         if stored.request != request:
             message = f"{scope} was first used for a different request"
             raise IdempotencyKeyConflictError(message)
+        document = await self._stored_document(stored)
         if stored.job.status is JobStatus.QUEUED:
-            await self.queue.enqueue(stored.job.job_id, await self._lane(stored))
+            await self.queue.enqueue(stored.job.job_id, lane_for(document))
         quota = await self.quota.current(scope.client_id, now)
-        self._admit(stored.job, request, AdmissionOutcome.REPLAYED)
+        self._admit(stored.job, request, request.source_kind(document), AdmissionOutcome.REPLAYED)
         return JobCreated(job=stored.job, quota=quota)
 
-    def _admit(self, job: GenerationJob, request: GenerationRequest, outcome: AdmissionOutcome) -> None:
+    def _admit(
+        self, job: GenerationJob, request: GenerationRequest, kind: SourceKind, outcome: AdmissionOutcome
+    ) -> None:
         context: dict[str, object] = {
             "job_id": str(job.job_id),
             "admission": outcome,
             "status": job.status,
-            "source_kind": request.source_kind,
+            "source_kind": kind,
         }
         if request.document_id is not None:
             context["document_id"] = str(request.document_id)
         logger.info("generation_admitted", extra=context)
-        self.telemetry.admitted(outcome, request.source_kind)
+        self.telemetry.admitted(outcome, kind)
 
 
 @dataclass(frozen=True, slots=True)

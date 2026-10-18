@@ -4,14 +4,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import CTE, Select, delete, select, update
+from sqlalchemy import CTE, ColumnElement, Select, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.dml import ReturningDelete, ReturningUpdate
 
 from deckly.application.exceptions import UnreadableJobRequestError
-from deckly.application.ports import IdempotencyScope, JobStore, JobTransition, StoredJob
+from deckly.application.ports import IdempotencyScope, JobStore, JobTransition, QueueLane, StoredJob
 from deckly.domain.deck import GenerationResult
+from deckly.domain.document import RECORDING_FORMATS
 from deckly.domain.exceptions import DocumentNotFoundError, InvalidGenerationRequestError
 from deckly.domain.generation import Difficulty, GenerationRequest
 from deckly.domain.job import (
@@ -32,7 +33,7 @@ from deckly.domain.notes.note_type import NoteType
 from deckly.infrastructure.bounded import BoundedCalls
 from deckly.infrastructure.documents.store import claim_document_statement
 from deckly.infrastructure.stored_result import dump_result, load_result
-from deckly.infrastructure.tables import GenerationJobRow
+from deckly.infrastructure.tables import DocumentRow, GenerationJobRow
 
 logger = logging.getLogger(__name__)
 
@@ -264,14 +265,30 @@ def purge_finished_statement(finished_before: datetime, limit: int) -> Returning
     )
 
 
+def in_lane(lane: QueueLane) -> ColumnElement[bool]:
+    recordings = select(DocumentRow.document_id).where(
+        DocumentRow.content_type.in_(sorted(RECORDING_FORMATS))
+    )
+    from_recording = GenerationJobRow.document_id.in_(recordings)
+    if lane is QueueLane.TRANSCRIPTION:
+        return from_recording
+    return or_(GenerationJobRow.document_id.is_(None), ~from_recording)
+
+
 class PostgresJobHousekeeping:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
-    async def stale(self, status: JobStatus, updated_before: datetime, limit: int) -> tuple[UUID, ...]:
+    async def stale(
+        self, status: JobStatus, lane: QueueLane, updated_before: datetime, limit: int
+    ) -> tuple[UUID, ...]:
         statement = (
             select(GenerationJobRow.job_id)
-            .where(GenerationJobRow.status == status, GenerationJobRow.updated_at < updated_before)
+            .where(
+                GenerationJobRow.status == status,
+                GenerationJobRow.updated_at < updated_before,
+                in_lane(lane),
+            )
             .order_by(GenerationJobRow.updated_at)
             .limit(limit)
         )

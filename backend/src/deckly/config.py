@@ -94,6 +94,8 @@ MAX_TRANSCRIPTION_DECODE_DEADLINE_SECONDS = 300
 DEFAULT_TRANSCRIPTION_JOB_TIMEOUT_SECONDS = 960
 DEFAULT_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES = 2560 * MEBIBYTE
 DEFAULT_TRANSCRIPTION_WORKER_METRICS_PORT = 9465
+TRANSCRIPTION_BACKLOG_ALERT_JOBS = 8
+DEFAULT_RECORDING_QUEUED_STALE_AFTER_SECONDS = 3 * MINUTES_PER_HOUR * SECONDS_PER_MINUTE
 BUCKET_NAME = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
 ROOT_PATH = "/"
 
@@ -538,6 +540,7 @@ class SweepSettings(BaseSettings):
     interval_minutes: Annotated[int, Field(ge=1, le=MINUTES_PER_HOUR)]
     running_stale_after_seconds: PositiveInt
     queued_stale_after_seconds: PositiveInt
+    recording_queued_stale_after_seconds: PositiveInt = DEFAULT_RECORDING_QUEUED_STALE_AFTER_SECONDS
     batch_size: PositiveInt
     document_batch_size: PositiveInt
 
@@ -553,6 +556,13 @@ class SweepSettings(BaseSettings):
     def require_queued_jobs_to_wait_at_least_as_long_as_running_ones(self) -> Self:
         if self.queued_stale_after_seconds < self.running_stale_after_seconds:
             message = "a queued job must not go stale sooner than a running one"
+            raise ValueError(message)
+        return self
+
+    @model_validator(mode="after")
+    def require_queued_recordings_to_wait_at_least_as_long_as_other_queued_jobs(self) -> Self:
+        if self.recording_queued_stale_after_seconds < self.queued_stale_after_seconds:
+            message = "a queued recording must not go stale sooner than a queued topic or document job"
             raise ValueError(message)
         return self
 
@@ -649,6 +659,12 @@ class Settings:
         return TRANSCRIPTION_WORKER_MAX_JOBS * job_peak * TRANSCRIPTION_MEMORY_SAFETY_MARGIN
 
     @property
+    def transcription_backlog_wait_seconds(self) -> int:
+        waiting_and_running = TRANSCRIPTION_BACKLOG_ALERT_JOBS + TRANSCRIPTION_WORKER_MAX_JOBS
+        rounds = math.ceil(waiting_and_running / TRANSCRIPTION_WORKER_MAX_JOBS)
+        return rounds * self.transcription.job_timeout_seconds
+
+    @property
     def longest_job_timeout_seconds(self) -> int:
         if not self.transcription.enabled:
             return self.limits.generation_job_timeout_seconds
@@ -699,6 +715,19 @@ class Settings:
                 "DECKLY_LIMIT_RECORDING_MAX_BYTES or DECKLY_LIMIT_RECORDING_MAX_DURATION_SECONDS, or raise "
                 "DECKLY_TRANSCRIPTION_WORKER_MEMORY_BUDGET_BYTES; the check assumes a single transcription "
                 "worker process, so divide the budget by the number of them sharing one container"
+            )
+            raise ValueError(message)
+        backlog_started = self.transcription_backlog_wait_seconds + self.database.job_store_timeout_seconds
+        if self.sweep.recording_queued_stale_after_seconds <= backlog_started:
+            message = (
+                "DECKLY_SWEEP_RECORDING_QUEUED_STALE_AFTER_SECONDS "
+                f"({self.sweep.recording_queued_stale_after_seconds}s) must outlast a recording queued "
+                "behind the backlog the queue-depth alert allows "
+                f"({TRANSCRIPTION_BACKLOG_ALERT_JOBS} waiting and {TRANSCRIPTION_WORKER_MAX_JOBS} running "
+                "per transcription worker, each taking up to "
+                f"DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS, {self.transcription.job_timeout_seconds}s, one "
+                f"at a time: {self.transcription_backlog_wait_seconds}s) plus the job store timeout "
+                f"({self.database.job_store_timeout_seconds}s) for it to be marked running"
             )
             raise ValueError(message)
 
