@@ -269,6 +269,57 @@ async def test_yt_dlp_failures_are_classified_by_their_error_line(
         assert raised.value.retry_after_seconds == FETCH_RETRY_AFTER_SECONDS
 
 
+RATE_LIMITED_STDERR = (
+    "WARNING: [youtube] aISXCw0Pi94: Unable to download webpage: HTTP Error 429: Too Many Requests "
+    "(caused by <HTTPError 429: Too Many Requests>)\n"
+    "WARNING: [youtube] Unable to fetch GVS PO Token for web client: Missing required Visitor Data. "
+    'You may need to pass Visitor Data with --extractor-args "youtube:visitor_data=XXX"\n'
+    "ERROR: [youtube] aISXCw0Pi94: This video is not available\n"
+)
+UNRELATED_WARNINGS_STDERR = (
+    "WARNING: [youtube] x429Abc12345: Unable to fetch GVS PO Token for web client: Missing required "
+    "Visitor Data\n"
+    "ERROR: [youtube] x429Abc12345: This video is not available\n"
+)
+PRIVATE_VIDEO_STDERR = (
+    "WARNING: [youtube] aISXCw0Pi94: Some other warning\nERROR: [youtube] aISXCw0Pi94: Private video\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("stderr", "error", "outcome"),
+    [
+        (RATE_LIMITED_STDERR, RecordingBlockedError, FetchOutcome.BLOCKED),
+        (UNRELATED_WARNINGS_STDERR, RecordingUnavailableError, FetchOutcome.UNAVAILABLE),
+        (PRIVATE_VIDEO_STDERR, RecordingUnavailableError, FetchOutcome.UNAVAILABLE),
+    ],
+)
+async def test_rate_limit_warning_before_a_generic_error_is_blocked_not_unavailable(
+    tmp_path: Path, stderr: str, error: type[Exception], outcome: FetchOutcome
+) -> None:
+    fake = FakeYtDlp(tmp_path, {"stderr": stderr, "exit": 1}, good_download())
+    metrics = fresh_metrics()
+
+    with pytest.raises(error) as raised:
+        await fake_fetcher(fake, metrics=metrics).fetch(VIDEO)
+
+    assert type(raised.value) is error
+    assert outcome_count(metrics, outcome) == 1
+    other = FetchOutcome.UNAVAILABLE if outcome is FetchOutcome.BLOCKED else FetchOutcome.BLOCKED
+    assert outcome_count(metrics, other) is None
+
+
+async def test_rate_limit_during_the_download_is_blocked_too(tmp_path: Path) -> None:
+    fake = FakeYtDlp(tmp_path, {"info": video_info()}, {"stderr": RATE_LIMITED_STDERR, "exit": 1})
+    metrics = fresh_metrics()
+
+    with pytest.raises(RecordingBlockedError):
+        await fake_fetcher(fake, metrics=metrics).fetch(VIDEO)
+
+    assert outcome_count(metrics, FetchOutcome.BLOCKED) == 1
+    assert outcome_count(metrics, FetchOutcome.UNAVAILABLE) is None
+
+
 async def test_download_failure_after_a_good_probe_is_classified_too(tmp_path: Path) -> None:
     fake = FakeYtDlp(
         tmp_path,
@@ -366,6 +417,12 @@ def test_last_error_line_is_the_one_classified() -> None:
     completed = Completed(returncode=1, stderr="ERROR: first\nWARNING: x\nERROR: second\n")
 
     assert completed.error == "ERROR: second"
+
+
+def test_warning_lines_are_collected_apart_from_errors() -> None:
+    completed = Completed(returncode=1, stderr="WARNING: a\nERROR: b\nnoise WARNING: c\nWARNING: d\n")
+
+    assert completed.warnings == ["WARNING: a", "WARNING: d"]
 
 
 @pytest.mark.parametrize(
