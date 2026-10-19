@@ -13,6 +13,7 @@ from deckly.application.exceptions import (
 )
 from deckly.application.pipeline import failure_level
 from deckly.application.ports import SourceMaterial
+from deckly.application.progress import ProgressReport, no_progress
 from deckly.domain.document import Document, is_recording
 from deckly.domain.source import TranscriptSource
 from deckly.domain.text import visible_length
@@ -82,7 +83,9 @@ class RecordingTranscriber:
     passage_ms: int = PASSAGE_MILLISECONDS
     clock: MonotonicClock = time.monotonic
 
-    async def parse(self, document: Document, content: bytes) -> tuple[SourceMaterial, ...]:
+    async def parse(
+        self, document: Document, content: bytes, report: ProgressReport = no_progress
+    ) -> tuple[SourceMaterial, ...]:
         if not is_recording(document.document_format):
             message = f"documents of type {document.document_format} are not recordings to transcribe"
             raise UnreadableDocumentError(message)
@@ -95,7 +98,7 @@ class RecordingTranscriber:
             await asyncio.to_thread(source.write_bytes, content)
             audio = await self.decoder.decode(source, document.document_format, workdir / AUDIO_FILE)
             self._decoded(document, audio)
-            transcript = await self._transcribe(document, audio)
+            transcript = await self._transcribe(document, audio, report)
         if not audio.truncated:
             await self._remember(document, transcript)
         return self._material(document, transcript)
@@ -137,10 +140,12 @@ class RecordingTranscriber:
             return
         logger.info("recording_decoded", extra=context)
 
-    async def _transcribe(self, document: Document, audio: DecodedAudio) -> Transcript:
+    async def _transcribe(
+        self, document: Document, audio: DecodedAudio, report: ProgressReport
+    ) -> Transcript:
         started = self.clock()
         try:
-            transcript = await self.client.transcribe(audio)
+            transcript = await self.client.transcribe(audio, report)
         except TranscriptionError as error:
             logger.exception(
                 "recording_transcription_failed",

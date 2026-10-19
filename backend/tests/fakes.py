@@ -28,6 +28,7 @@ from deckly.application.ports import (
     SourceMaterial,
     StoredJob,
 )
+from deckly.application.progress import ProgressReport
 from deckly.application.regeneration import RegenerateNote
 from deckly.domain.deck import Deck, GenerationResult
 from deckly.domain.document import Document, DocumentFormat
@@ -755,6 +756,7 @@ class FakeDocuments:
         self.allowed = True
         self.lookups: list[tuple[UUID, UUID]] = []
         self.parsed: list[tuple[Document, bytes]] = []
+        self.reports: tuple[float, ...] = ()
         self.screened: list[tuple[UUID, Document, tuple[SourceMaterial, ...]]] = []
         self.failures: dict[str, Exception] = {}
         self.during: dict[str, Hook] = {}
@@ -782,9 +784,14 @@ class FakeDocuments:
         document = self.documents.get(document_id)
         return document if document is not None and document.client_id == client_id else None
 
-    async def parse(self, document: Document, content: bytes) -> tuple[SourceMaterial, ...]:
+    async def parse(
+        self, document: Document, content: bytes, report: ProgressReport
+    ) -> tuple[SourceMaterial, ...]:
         self.parsed.append((document, content))
         await self._reach("parse")
+        for fraction in self.reports:
+            await report(fraction)
+            await self._reach("report")
         return self.material
 
     async def allows(self, job_id: UUID, document: Document, material: tuple[SourceMaterial, ...]) -> bool:

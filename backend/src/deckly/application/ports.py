@@ -6,6 +6,7 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
+from deckly.application.progress import ProgressReport
 from deckly.domain.deck import GenerationResult
 from deckly.domain.document import Document, DocumentFormat
 from deckly.domain.generation import Fingerprint, GenerationRequest, SourceKind
@@ -260,7 +261,9 @@ class DocumentStorage(Protocol):
 
 
 class DocumentParser(Protocol):
-    async def parse(self, document: Document, content: bytes) -> tuple[SourceMaterial, ...]: ...
+    async def parse(
+        self, document: Document, content: bytes, report: ProgressReport
+    ) -> tuple[SourceMaterial, ...]: ...
 
 
 class DocumentStore(Protocol):

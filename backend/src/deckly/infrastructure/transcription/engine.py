@@ -14,7 +14,7 @@ from deckly.infrastructure.transcription.client import (
     SAMPLE_RATE,
     SAMPLE_WIDTH_BYTES,
 )
-from deckly.infrastructure.transcription.engine_output import EngineOutput, EngineSegment
+from deckly.infrastructure.transcription.engine_output import EngineOutput, EngineSegment, progress_line
 
 DEVICE = "cpu"
 COMPUTE_TYPE = "int8"
@@ -54,6 +54,7 @@ class SpeechModel(Protocol):
 
 
 type ModelLoader = Callable[[Path, int], SpeechModel]
+type ChunkDone = Callable[[int], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +117,13 @@ def chunk_segments(found: Iterable[SpeechSegment], offset_ms: int, limit_ms: int
     return segments
 
 
-def transcribe_samples(model: SpeechModel, samples: Samples) -> EngineOutput:
+def ignore_chunk(processed: int) -> None:
+    del processed
+
+
+def transcribe_samples(
+    model: SpeechModel, samples: Samples, chunk_done: ChunkDone = ignore_chunk
+) -> EngineOutput:
     language: str | None = None
     segments: list[EngineSegment] = []
     for start, end in chunk_bounds(samples):
@@ -126,6 +133,7 @@ def transcribe_samples(model: SpeechModel, samples: Samples) -> EngineOutput:
         if transcribed and language is None:
             language = detected.language
         segments.extend(transcribed)
+        chunk_done(end)
     return EngineOutput(language=language, segments=tuple(segments))
 
 
@@ -167,7 +175,12 @@ def main(argv: Sequence[str], load: ModelLoader = load_whisper_model, out: TextI
         raise SystemExit(message)
     samples = read_samples(arguments.audio, arguments.samples)
     model = load(arguments.model_directory, arguments.cpu_threads)
-    out.write(transcribe_samples(model, samples).model_dump_json())
+
+    def report(processed: int) -> None:
+        out.write(progress_line(processed))
+        out.flush()
+
+    out.write(transcribe_samples(model, samples, report).model_dump_json())
 
 
 if __name__ == "__main__":

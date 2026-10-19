@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from arq.connections import ArqRedis
 
+from deckly.application.progress import ProgressReport
 from deckly.config import Settings
 from deckly.infrastructure.transcription.cache import (
     RedisTranscriptCache,
@@ -39,9 +40,9 @@ def limits(ttl_seconds: int) -> TranscriptCacheLimits:
 
 @dataclass
 class SlowTranscriptionClient(ScriptedTranscriptionClient):
-    async def transcribe(self, audio: DecodedAudio) -> Transcript:
+    async def transcribe(self, audio: DecodedAudio, report: ProgressReport) -> Transcript:
         await asyncio.sleep(TRANSCRIPTION_SECONDS)
-        return await super().transcribe(audio)
+        return await super().transcribe(audio, report)
 
 
 @pytest.fixture

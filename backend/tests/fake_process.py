@@ -18,6 +18,10 @@ if SCENARIO.get("child_pid_file"):
         pid_file.write(str(child.pid))
 sys.stderr.write(SCENARIO.get("stderr", ""))
 sys.stderr.flush()
+for step in SCENARIO.get("steps", []):
+    time.sleep(step["delay"])
+    sys.stdout.write(step["text"])
+    sys.stdout.flush()
 if SCENARIO.get("stdout_text"):
     sys.stdout.write(SCENARIO["stdout_text"])
     sys.stdout.flush()

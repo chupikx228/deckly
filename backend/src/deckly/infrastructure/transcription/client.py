@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from deckly.application.progress import ProgressReport
 from deckly.infrastructure.resilience import TransientError
 
 SAMPLE_RATE = 16_000
@@ -35,7 +36,7 @@ class Transcript:
 
 
 class TranscriptionClient(Protocol):
-    async def transcribe(self, audio: DecodedAudio) -> Transcript: ...
+    async def transcribe(self, audio: DecodedAudio, report: ProgressReport) -> Transcript: ...
 
     async def aclose(self) -> None: ...
 

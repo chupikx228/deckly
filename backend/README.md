@@ -724,19 +724,20 @@ searches) inherits it.
 
 The events that make up one job, in order:
 
-| Event                                                                                                                                       | Where                  | Carries                                                                    |
-| ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | -------------------------------------------------------------------------- |
-| `http_request_finished`                                                                                                                     | API, every request     | method, route template, status, `duration_ms`                              |
-| `generation_admitted`                                                                                                                       | API                    | `admission` (`queued` or `replayed`), status, `source_kind`, `document_id` |
-| `topic_rejected`, `rate_limit_rejected`                                                                                                     | API                    | `limit` for the rate limit                                                 |
-| `generation_started`                                                                                                                        | worker                 | status, stage                                                              |
-| `generation_cache_checked`                                                                                                                  | worker                 | `result` (`hit`, `miss`, `corrupt`, `error`)                               |
-| `generation_stage_entered`                                                                                                                  | worker, every stage    | stage, progress                                                            |
-| `provider_call_finished`                                                                                                                    | every provider attempt | `operation`, `attempt`, `outcome`, `duration_ms`                           |
-| `provider_call_retrying`, `provider_call_refused`, `circuit_opened`, `circuit_closed`                                                       | resilience layer       | `operation`                                                                |
-| `sources_retrieved`, `sources_parsed`, `card_generation_finished`, `content_screened`, `images_screened`, `media_fetched`, `media_attached` | adapters               | counts only                                                                |
-| `generation_succeeded` / `generation_failed` / `generation_stopped`                                                                         | worker                 | `duration_ms`, failure code, traceback on failure                          |
-| `generation_cancelled`                                                                                                                      | API                    | stage and progress at the time                                             |
+| Event                                                                                                                                       | Where                                    | Carries                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- | -------------------------------------------------------------------------- |
+| `http_request_finished`                                                                                                                     | API, every request                       | method, route template, status, `duration_ms`                              |
+| `generation_admitted`                                                                                                                       | API                                      | `admission` (`queued` or `replayed`), status, `source_kind`, `document_id` |
+| `topic_rejected`, `rate_limit_rejected`                                                                                                     | API                                      | `limit` for the rate limit                                                 |
+| `generation_started`                                                                                                                        | worker                                   | status, stage                                                              |
+| `generation_cache_checked`                                                                                                                  | worker                                   | `result` (`hit`, `miss`, `corrupt`, `error`)                               |
+| `generation_stage_entered`                                                                                                                  | worker, every stage                      | stage, progress                                                            |
+| `generation_progress_not_recorded`                                                                                                          | worker, `parsing_sources` of a recording | stage, progress; the write failed and the job went on                      |
+| `provider_call_finished`                                                                                                                    | every provider attempt                   | `operation`, `attempt`, `outcome`, `duration_ms`                           |
+| `provider_call_retrying`, `provider_call_refused`, `circuit_opened`, `circuit_closed`                                                       | resilience layer                         | `operation`                                                                |
+| `sources_retrieved`, `sources_parsed`, `card_generation_finished`, `content_screened`, `images_screened`, `media_fetched`, `media_attached` | adapters                                 | counts only                                                                |
+| `generation_succeeded` / `generation_failed` / `generation_stopped`                                                                         | worker                                   | `duration_ms`, failure code, traceback on failure                          |
+| `generation_cancelled`                                                                                                                      | API                                      | stage and progress at the time                                             |
 
 To follow one job locally:
 
@@ -1744,8 +1745,9 @@ result. What differs is where it runs and what it cites. The job goes to its own
 `deckly-transcription-worker` reads; the worker decodes the recording with ffmpeg into at most the
 duration cap of audio, runs faster-whisper in a separate engine process, and turns the transcript
 into `SourceMaterial` whose sources are `TranscriptSource` time ranges. The code is
-`infrastructure/transcription/`; nothing in `application/pipeline.py` changed, because the
-transcriber is a `DocumentParser`: transcription is what `parsing_sources` does for a recording.
+`infrastructure/transcription/`; the pipeline's only knowledge of it is that the transcriber is a
+`DocumentParser`: transcription is what `parsing_sources` does for a recording. The parser is given a
+`ProgressReport` (`application/progress.py`) so that stage can say how far along it is (DEC-91, below).
 
 ### Engine: faster-whisper `small`, int8, greedy
 
@@ -1868,8 +1870,9 @@ everything else, and each is why the design is what it is:
    (`python -I -m deckly.infrastructure.transcription.engine`, the yt-dlp runner's recipe: isolated mode,
    its own session, scratch `HOME`/`TMPDIR`, empty `PATH`, `HF_HUB_OFFLINE=1`), and any exception or
    cancellation kills its process group (`process.py`). Its stdout is the transcript as one JSON
-   document, capped at 16 MiB and validated with pydantic (`engine_output.py`); a crash or the deadline
-   fails the job `PROVIDER_UNAVAILABLE`.
+   document, capped at 16 MiB and validated with pydantic (`engine_output.py`), preceded by one
+   `progress <samples>` line per finished chunk (below); a crash or the deadline fails the job
+   `PROVIDER_UNAVAILABLE`.
 4. **Memory.** About 1 GiB per transcription does not fit in the generation worker's 1,280 MiB budget
    at all, so it has its own (below), in its own container.
 
@@ -1921,8 +1924,32 @@ queued jobs; see "Generating from a recording". There is no admission backpressu
 `deckly_generation_queue_depth{queue="transcription"}` is reported next to the generation queue's on the
 API's `/metrics`. **Alert on it** (more than about eight waiting per replica) and add replicas.
 
-A recording job spends minutes in `parsing_sources` with nothing to show; the stage does not report
-progress within itself.
+### Progress while transcribing (DEC-91)
+
+A recording job spends minutes in `parsing_sources`, so the stage reports progress within itself. The
+choice was real progress over a time-based estimate, because the engine already works in chunks and
+its stdout is already read by the worker: after each chunk (about 120 s of audio, cut at the quietest
+moment of its last 10 s) the engine writes `progress <samples finished>` and flushes, and the client
+(`self_hosted.py`) turns that into a fraction of the decoded samples and hands it to the pipeline. The
+answer itself is still the last, unterminated line; a line that starts with `progress ` but is not a
+number is not skipped but left in the answer, which then fails validation as an unexpected shape. No
+process boundary moved, and no estimate can be wrong about how fast the machine is.
+
+The pipeline maps the fraction onto the stage's own band of the job's progress (a sixth of it:
+`progress_within` in `application/pipeline.py`, so `parsing_sources` runs from 0.333 to 0.5) and writes
+it with the same `JobStore.update` as a stage change. A write that would not raise progress is not
+made, which keeps `GenerationJob.advance` strict (it raises on a decrease) while a report that is out of
+order or out of range can never move progress backwards or past the band. Progress is cosmetic, so a
+store error on one of these writes is logged as `generation_progress_not_recorded` and the transcription
+carries on; a job found cancelled is not an error to swallow, and stops the engine at its next report.
+
+Writes happen once per chunk, so a one-hour recording is about thirty of them, spread over minutes. The
+first update comes after the first chunk (and the model load before it), so the bar still sits at the
+start of the band for roughly one chunk's worth of work, about 20-40 s at the measured RTF. Each write
+also refreshes `updatedAt`, so the stale-job sweep counts from the last report rather than from the
+start of the stage, so a worker that dies mid-transcription is failed by the sweep later than before, by
+at most the time it had spent transcribing. A cached transcript reports nothing, because there is
+nothing to wait for.
 
 ### Memory
 

@@ -369,3 +369,30 @@ async def test_a_document_that_is_no_recording_never_touches_the_cache(tmp_path:
         await caching(transcriber_with(decoding(tmp_path), client), cache).parse(document(), b"%PDF-1.7")
 
     assert cache.reads == []
+
+
+async def test_progress_of_the_engine_reaches_whoever_asked_for_the_transcript(tmp_path: Path) -> None:
+    client = ScriptedTranscriptionClient(transcript=lecture((0, 10)), reports=(0.25, 0.5, 1.0))
+    reported: list[float] = []
+
+    async def report(fraction: float) -> None:
+        reported.append(fraction)
+
+    await transcriber_with(decoding(tmp_path), client).parse(recording(), b"stored recording", report)
+
+    assert reported == [0.25, 0.5, 1.0]
+
+
+async def test_cached_transcript_reports_no_progress_because_nothing_is_transcribed(tmp_path: Path) -> None:
+    client = ScriptedTranscriptionClient(transcript=lecture((0, 10)), reports=(0.5,))
+    transcriber = caching(transcriber_with(decoding(tmp_path), client), InMemoryTranscriptCache())
+    uploaded = recording()
+    await transcriber.parse(uploaded, b"stored recording")
+    reported: list[float] = []
+
+    async def report(fraction: float) -> None:
+        reported.append(fraction)
+
+    await transcriber.parse(uploaded, b"stored recording", report)
+
+    assert reported == []

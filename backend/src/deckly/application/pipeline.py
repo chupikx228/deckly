@@ -41,6 +41,7 @@ from deckly.application.ports import (
     SourceRetriever,
     StoredJob,
 )
+from deckly.application.progress import ProgressReport
 from deckly.domain.deck import GenerationResult
 from deckly.domain.document import Document
 from deckly.domain.exceptions import DocumentNotFoundError, JobAlreadyTerminalError
@@ -83,6 +84,12 @@ def failure_code_for(error: Exception) -> FailureCode:
 
 def stage_progress(stage: JobStage) -> float:
     return stage.position / len(STAGE_ORDER)
+
+
+def progress_within(stage: JobStage, fraction: float) -> float:
+    start = stage_progress(stage)
+    end = (stage.position + 1) / len(STAGE_ORDER)
+    return start + (end - start) * min(max(fraction, 0.0), 1.0)
 
 
 def require_notes(result: GenerationResult) -> GenerationResult:
@@ -298,7 +305,9 @@ class RunGeneration:
         async with self._stage(JobStage.RETRIEVING_SOURCES, source):
             content = await self._download(job_id, document)
         async with self._stage(JobStage.PARSING_SOURCES, source):
-            material = await self.documents.parser.parse(document, content)
+            material = await self.documents.parser.parse(
+                document, content, self._report_within(JobStage.PARSING_SOURCES, source)
+            )
             if not await self.documents.moderator.allows(job_id, document, material):
                 message = f"document {document.document_id} violates the content policy"
                 raise DocumentRejectedError(message)
@@ -395,6 +404,33 @@ class RunGeneration:
         progress = stage_progress(stage)
         entered = await self._update(source.job_id, lambda job: job.advance(stage, progress, now))
         logger.info("generation_stage_entered", extra=log_context(entered, source.request, source.kind))
+
+    def _report_within(self, stage: JobStage, source: JobSource) -> ProgressReport:
+        async def report(fraction: float) -> None:
+            await self._advance_within(stage, fraction, source)
+
+        return report
+
+    async def _advance_within(self, stage: JobStage, fraction: float, source: JobSource) -> None:
+        now = self.clock()
+        target = progress_within(stage, fraction)
+
+        def transition(job: GenerationJob) -> GenerationJob:
+            if target <= job.progress.value:
+                return job
+            return job.advance(stage, target, now)
+
+        try:
+            await self._update(source.job_id, transition)
+        except JobStoppedError:
+            raise
+        except Exception as error:
+            logger.log(
+                failure_level(error),
+                "generation_progress_not_recorded",
+                exc_info=error,
+                extra={"job_id": str(source.job_id), "stage": stage, "progress": target},
+            )
 
     async def _reject_unreadable(self, job_id: UUID, run: JobRun) -> None:
         try:

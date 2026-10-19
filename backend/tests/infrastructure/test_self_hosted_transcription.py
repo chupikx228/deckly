@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -173,3 +174,144 @@ async def test_closing_the_self_hosted_client_holds_nothing_open(tmp_path: Path)
     await client(program).aclose()
 
     assert program.invocations == []
+
+
+def progress(samples: int) -> str:
+    return f"progress {samples}\n"
+
+
+class Reports:
+    def __init__(self) -> None:
+        self.fractions: list[float] = []
+        self.times: list[float] = []
+
+    async def __call__(self, fraction: float) -> None:
+        self.fractions.append(fraction)
+        self.times.append(time.monotonic())
+
+
+async def test_engine_progress_lines_are_reported_as_fractions_of_the_audio_and_are_not_part_of_the_answer(
+    tmp_path: Path,
+) -> None:
+    steps = [{"delay": 0, "text": progress(samples)} for samples in (12_000, 24_000, 48_000)]
+    program = fake_program(tmp_path, "engine", {"steps": steps, "stdout_text": json.dumps(ANSWER)})
+    reports = Reports()
+
+    transcript = await client(program).transcribe(AUDIO, reports)
+
+    assert reports.fractions == [0.25, 0.5, 1.0]
+    assert [segment.text for segment in transcript.segments] == [
+        "Перебираться в Жиздренский",
+        "между породой людей",
+    ]
+
+
+async def test_progress_arrives_while_the_engine_is_still_working_not_when_it_exits(tmp_path: Path) -> None:
+    delay = 0.15
+    steps = [
+        {"delay": delay, "text": progress(16_000)},
+        {"delay": delay, "text": progress(32_000)},
+        {"delay": delay, "text": progress(48_000)},
+    ]
+    program = fake_program(tmp_path, "engine", {"steps": steps, "stdout_text": json.dumps(ANSWER)})
+    reports = Reports()
+
+    await client(program).transcribe(AUDIO, reports)
+
+    gaps = [later - earlier for earlier, later in pairwise(reports.times)]
+    assert len(gaps) == 2
+    assert all(gap >= delay * 0.8 for gap in gaps)
+
+
+async def test_progress_beyond_the_decoded_audio_is_capped_at_complete(tmp_path: Path) -> None:
+    steps = [{"delay": 0, "text": progress(AUDIO.samples * 5)}]
+    program = fake_program(tmp_path, "engine", {"steps": steps, "stdout_text": json.dumps(ANSWER)})
+    reports = Reports()
+
+    await client(program).transcribe(AUDIO, reports)
+
+    assert reports.fractions == [1.0]
+
+
+async def test_progress_lines_split_across_reads_are_still_whole_reports(tmp_path: Path) -> None:
+    steps = [
+        {"delay": 0, "text": "prog"},
+        {"delay": 0.05, "text": "ress 2400"},
+        {"delay": 0.05, "text": "0\n"},
+    ]
+    program = fake_program(tmp_path, "engine", {"steps": steps, "stdout_text": json.dumps(ANSWER)})
+    reports = Reports()
+
+    await client(program).transcribe(AUDIO, reports)
+
+    assert reports.fractions == [0.5]
+
+
+@pytest.mark.parametrize("bad", ["progress soon\n", "progress -1\n", "progress \n"])
+async def test_malformed_progress_line_is_an_unexpected_answer_not_silently_dropped(
+    tmp_path: Path, bad: str
+) -> None:
+    program = fake_program(
+        tmp_path, "engine", {"steps": [{"delay": 0, "text": bad}], "stdout_text": json.dumps(ANSWER)}
+    )
+
+    with pytest.raises(TranscriptionResponseError, match="unexpected shape"):
+        await client(program).transcribe(AUDIO)
+
+
+async def test_engine_that_exits_failing_after_reporting_progress_is_still_unavailable(
+    tmp_path: Path,
+) -> None:
+    program = fake_program(
+        tmp_path,
+        "engine",
+        {
+            "steps": [{"delay": 0, "text": progress(12_000)}],
+            "stderr": "RuntimeError: out of memory\n",
+            "exit": 1,
+        },
+    )
+    reports = Reports()
+
+    with pytest.raises(TranscriptionUnavailableError, match="exited 1: RuntimeError: out of memory"):
+        await client(program).transcribe(AUDIO, reports)
+
+    assert reports.fractions == [0.25]
+
+
+async def test_progress_report_that_raises_stops_the_engine_and_everything_it_started(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.pid"
+    program = fake_program(
+        tmp_path,
+        "engine",
+        {"steps": [{"delay": 0, "text": progress(12_000)}], "sleep": 60, "child_pid_file": str(pid_file)},
+    )
+
+    class StoppedError(Exception):
+        pass
+
+    async def report(fraction: float) -> None:
+        del fraction
+        raise StoppedError
+
+    started = time.monotonic()
+    with pytest.raises(StoppedError):
+        await client(program).transcribe(AUDIO, report)
+
+    assert time.monotonic() - started < DEADLINE_SECONDS
+    assert await asyncio.to_thread(wait_until_gone, wait_for_pid(pid_file))
+
+
+async def test_slow_progress_report_counts_against_the_engine_deadline(tmp_path: Path) -> None:
+    program = fake_program(
+        tmp_path,
+        "engine",
+        {"steps": [{"delay": 0, "text": progress(12_000)}], "stdout_text": json.dumps(ANSWER)},
+    )
+
+    async def slow(fraction: float) -> None:
+        del fraction
+        await asyncio.sleep(5)
+
+    with pytest.raises(TranscriptionUnavailableError, match="did not finish"):
+        await client(program, deadline_seconds=0.3).transcribe(AUDIO, slow)
