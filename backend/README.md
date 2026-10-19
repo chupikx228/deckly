@@ -1603,8 +1603,8 @@ Researched to the same depth as DEC-8 (Tavily), DEC-9 (Commons) and DEC-84 (the 
 --no-config` and without `--allow-net`, so the solver has no network or file access.
 - **Rejected:** youtube-dl (effectively unmaintained), pytubefix (single maintainer, in-process,
   breaks often), and third-party download APIs (they would receive users' links, with worse terms).
-  An aside for DEC-86: yt-dlp can also fetch YouTube's own captions, which might replace transcription
-  for YouTube sources altogether.
+  yt-dlp can also fetch YouTube's own captions; DEC-90 measured whether they should replace
+  transcription and decided not yet (see "Transcription" → "YouTube captions instead of transcription").
 
 **New dependencies:** `yt-dlp` 2026.8.19 (Unlicense, no dependencies of its own), `yt-dlp-ejs` 0.8.0
 (Unlicense, bundles MIT and ISC code, no dependencies) and `deno` 2.9.7 (MIT, PyPI's redistribution of
@@ -2182,11 +2182,111 @@ and so is the drain rate. A recording also cannot go stale sooner than other que
 (`SweepSettings` checks that). The cost is the other side of the same threshold: a recording job whose
 enqueue was lost shows as queued for up to three hours, not one, before the sweep fails it.
 
+### YouTube captions instead of transcription: not pursued (DEC-90)
+
+**Decision: a fetched video is always transcribed, even when YouTube has captions for it.** Captions are
+no more accurate than this engine, the saving they offer is CPU nobody is short of yet, and they would
+optimise a path that may not run in production at all. The measurements below were taken on
+2026-10-19 with yt-dlp 2026.8.19 from a developer's residential address, so they should not be
+re-taken without a reason that changes the decision (below).
+
+**Where captions would come from.** DEC-85's probe JSON already lists them: creator tracks under
+`subtitles` and YouTube's speech recognition under `automatic_captions`, where the track in the spoken
+language is keyed `<lang>-orig` (`VideoInfo` ignores both). The files are served from
+`www.youtube.com/api/timedtext`, which the egress proxy already admits, and downloading them inside
+the probe cost no second extraction (9.8 s against about 10 s for a plain probe, which is mostly the
+player challenge). No PO token was needed. Three things the metadata does not make simple: a video
+with dubbed audio tracks has one `-orig` track per track (66 of 526 sampled), so the track has to match
+the chosen audio format's `language`; creator tracks can be named (`en-ehkg1hFWq8A`) and past streams
+list `live_chat` among them; and when YouTube's subtitle PO-token experiment marks a track
+(`exp=xpe` or `xpv` in its URL), yt-dlp drops it with only a debug line, so from an address in the
+experiment "no captions" can mean "captions withheld".
+
+**Availability.** 526 videos, the results of 40 searches for educational content (lectures, lessons,
+tutorials; 20 in English, 20 in Russian), probed with the production flags and no download:
+
+| Up to the 15-minute cap | Videos | Speech recognition only | Creator track in the spoken language | Creator track, no speech recognition | Nothing |
+| ----------------------- | ------ | ----------------------- | ------------------------------------ | ------------------------------------ | ------- |
+| English searches        | 101    | 47.5 %                  | 44.6 %                               | 5.9 %                                | 2.0 %   |
+| Russian searches        | 58     | 87.9 %                  | 8.6 %                                | 0 %                                  | 3.4 %   |
+
+A creator track is not necessarily a human transcript. Every one in the table was downloaded: 42 of the
+45 English ones are punctuated and cased, and one is lowercase without punctuation. Of the five
+Russian ones, four are the speech-recognition track re-uploaded word for word and one could not be told
+apart. A Khan Academy video outside the sample was a re-upload too. So a human transcript exists for
+about 45 % of short English videos and almost no Russian ones, and only the text, not the metadata,
+says which.
+
+**Quality.** Thirteen videos from 5 to 13.5 minutes, with the speech-recognition track and the shipped engine
+(`small`, int8, beam 1, VAD) run on the same audio, scored against the human creator track where there
+is one. Fillers, digits against number words and punctuation are normalised away before scoring;
+_term recall_ is the share of the reference's proper nouns and words of nine letters or more that each
+transcript contains, the words a card is most likely to be about.
+
+| Scored against a human transcript                       | Speech recognition, WER | This engine, WER      | Term recall (recognition / engine) |
+| ------------------------------------------------------- | ----------------------- | --------------------- | ---------------------------------- |
+| English, 6 videos (TED, TED-Ed, Crash Course)           | 2.7–8.3 %, mean 5.7 %   | 2.1–7.7 %, mean 4.8 % | 93.1 % / 93.6 %                    |
+| Russian, a lecture                                      | 9.4 %                   | 10.1 %                | 92.2 % / 92.2 %                    |
+| Russian, a studio talk show with music and two speakers | 33.9 %                  | 26.3 %                | 75.9 % / 75.0 %                    |
+
+The engine was better on four of the six English videos. On four Russian lessons with no human track
+the two disagree on 7.4–17.5 % of words, and reading the disagreements, each is right about as often as
+the other. The errors differ in kind more than in number:
+
+- **Speech recognition** has no punctuation or casing (12 of 13 tracks; YouTube punctuated one), keeps
+  fillers, and repeats its mistakes on the subject's own term ("Duolingo" as "dualingo" six times in one
+  talk). In Russian it switches to Latin letters (`react`, `ekaterin`) and runs words together.
+- **This engine** punctuates, but drops whole phrases now and then ("that's how you make more money")
+  and, in Russian, garbles word roots ("вычет" as "вычатку", "ипотека" as "эпотека"). It hallucinated
+  nothing: no repeated phrases, and no text over music intros, which VAD removes. Its first segment
+  after an intro starts early (the property described under "Transcripts and citations"), where creator
+  cues were accurate.
+
+So only a human transcript is better, and only for English, by about five points of word error rate and
+six of term recall.
+
+**Timestamps.** All three fit `TranscriptSegment(start_ms, end_ms, text)`; no shape change is needed.
+Run through `passages` and `TranscriptSource`, every source was valid. Creator cues (median 2.3 s) do not
+overlap and produce the same passages as the engine. Speech-recognition events in `json3` are a rolling
+two-line display: each overlaps the next, so passages would overlap by up to 5.6 s, and the last can end
+1.8 s after the audio. Ends would have to be clamped to the next start and to the duration; 97 % of
+events carry word offsets (`tOffsetMs`) to cut on.
+
+**Why not.** What captions would save is transcription: at the measured real-time factor (0.10–0.14 on
+two native cores for these videos) 1.5 to 2 minutes of two cores, an estimated 4 to 5 on cloud vCPUs, and
+about 1 GiB of memory per 15-minute recording, for the 97 % of videos that have some track. That is worth having only when transcription is
+a bottleneck, and nothing says it is: there is no production traffic, and since DEC-89 a second
+generation from the same recording does not transcribe again. Against it, it would need track selection
+(the three cases above), a `json3` parser, captions stored with the document (a migration), captioned
+jobs routed off the transcription queue, and its own fallbacks and tests, on top of a fetch that YouTube
+may refuse from a server's address altogether ("Production caveat"). A creator-tracks-only variant would
+be the same plumbing for a quality gain that exists in English only.
+
+**Reopen** when recordings from a URL are fetched successfully from the production address (the
+`blocked` outcome stays low) **and** transcription is measurably the constraint: the transcription
+queue-depth alert firing, or `deckly_transcription_real_time_factor` showing jobs near the deadline.
+A user-visible quality problem with English transcripts would be a second reason; captions would not
+help Russian. The design then: choose the track from the probe's JSON (a punctuated creator track in
+the audio format's language, else that language's `-orig` track, else none), download it in the same
+call as the audio with `--write-subs --write-auto-subs --sub-langs <track> --sub-format json3`, store the
+parsed segments with the document, use them in place of the engine, and fall back to transcription
+when there is no track or its text is too thin for the duration.
+
+**Two constraints learned on the way.** `--write-auto-subs` makes yt-dlp list every creator track
+machine-translated into every language: 24 tracks became 3,904 entries and a 12 MB info JSON, so a
+video with about 33 translations would pass the 16 MiB metadata cap and fail the fetch. Passing
+`--extractor-args youtube:skip=translated_subs` brought the same video to 697 KB. Today's probe passes
+neither flag and is not affected. Separately, **a bug in today's fetch**: when YouTube rate-limits,
+yt-dlp prints the `429` as a warning and ends with `ERROR: … This video is not available`, which
+`classify` reads as `RECORDING_UNAVAILABLE` (`422`, outcome `unavailable`) instead of `blocked`, so the
+block is reported to the user as a removed video and does not reach the series to alert on. Seen live
+during this sampling (about 250 probes in a few minutes, four at a time, drew the bot check from a
+residential address; one at a time every ten seconds, the next 300 did not). Not fixed here.
+
 ### Not done here
 
 - **DEC-89:** caching a transcript per document, so a second generation from the same recording does not
   transcribe it again.
-- **DEC-90:** YouTube's own captions as an alternative to transcribing a fetched video.
 - **Frontend:** the app does not upload recordings or generate from them yet; its contract types and Zod
   schema know the transcript source (above), its UI does not.
 - **Progress within `parsing_sources`** (DEC-91), and a running-job sweep that knows a transcription job's
