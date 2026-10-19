@@ -40,6 +40,7 @@ TRANSCRIPTION_SECONDS = 1.0
 GENERATION_SLOTS = RECORDING_JOBS
 POLL_DELAY_SECONDS = 0.05
 NO_WAIT_SECONDS = 0.5
+NEXT_MILLISECOND_SLEEP_SECONDS = 0.002
 
 
 @dataclass
@@ -123,8 +124,8 @@ class Queues:
 
 async def wait_for_next_millisecond() -> None:
     enqueued_at = timestamp_ms()
-    while timestamp_ms() == enqueued_at:
-        await asyncio.sleep(0)
+    await asyncio.sleep(NEXT_MILLISECOND_SLEEP_SECONDS)
+    assert timestamp_ms() > enqueued_at
 
 
 async def admit(work: Workload, queues: Queues, request: GenerationRequest, lane: QueueLane) -> UUID:
