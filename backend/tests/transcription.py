@@ -2,6 +2,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from uuid import UUID
 
+from deckly.application.progress import ProgressReport
 from deckly.domain.document import Document, DocumentFormat
 from deckly.infrastructure.transcription.cache import TranscriptCache
 from deckly.infrastructure.transcription.client import (
@@ -51,11 +52,14 @@ class Received:
 class ScriptedTranscriptionClient:
     transcript: Transcript = field(default_factory=lambda: Transcript(segments=(), language=None))
     failure: Exception | None = None
+    reports: tuple[float, ...] = ()
     received: list[Received] = field(default_factory=list)
     closed: bool = False
 
-    async def transcribe(self, audio: DecodedAudio) -> Transcript:
+    async def transcribe(self, audio: DecodedAudio, report: ProgressReport) -> Transcript:
         self.received.append(Received(audio=audio, bytes_on_disk=audio.path.stat().st_size))
+        for fraction in self.reports:
+            await report(fraction)
         if self.failure is not None:
             raise self.failure
         return self.transcript

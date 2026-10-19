@@ -130,6 +130,21 @@ async def test_english_lecture_is_transcribed_in_english_with_its_words(
         assert phrase in spoken
 
 
+async def test_real_engine_reports_the_whole_recording_as_done_when_its_only_chunk_finishes(
+    model_ready: Settings, tmp_path: Path
+) -> None:
+    reported: list[float] = []
+
+    async def report(fraction: float) -> None:
+        reported.append(fraction)
+
+    audio = await decoded(PAUSED, tmp_path)
+
+    await build_transcription_client(model_ready).transcribe(audio, report)
+
+    assert reported == [1.0]
+
+
 async def test_russian_reading_is_detected_as_russian_and_transcribed_in_cyrillic(
     model_ready: Settings, tmp_path: Path
 ) -> None:

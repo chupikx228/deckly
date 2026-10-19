@@ -1,18 +1,20 @@
 import asyncio
 import sys
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from pydantic import ValidationError
 
+from deckly.application.progress import ProgressReport, no_progress
 from deckly.infrastructure.transcription.client import (
     DecodedAudio,
     Transcript,
     TranscriptionResponseError,
     TranscriptionUnavailableError,
 )
-from deckly.infrastructure.transcription.engine_output import EngineOutput
+from deckly.infrastructure.transcription.engine_output import EngineOutput, processed_samples_in
 from deckly.infrastructure.transcription.process import Stop, supervise
 
 ENGINE_MODULE = "deckly.infrastructure.transcription.engine"
@@ -53,14 +55,38 @@ class EngineInvocation:
         }
 
 
-async def read_capped(source: asyncio.StreamReader, stop: Stop) -> bytes | None:
-    kept = bytearray()
+type ProcessedSamples = Callable[[int], Awaitable[None]]
+
+NEWLINE = b"\n"
+
+
+def take_lines(pending: bytearray) -> list[bytes]:
+    lines: list[bytes] = []
+    while (end := pending.find(NEWLINE)) >= 0:
+        lines.append(bytes(pending[: end + 1]))
+        del pending[: end + 1]
+    return lines
+
+
+async def read_capped(source: asyncio.StreamReader, stop: Stop, processed: ProcessedSamples) -> bytes | None:
+    output = bytearray()
+    pending = bytearray()
     while chunk := await source.read(READ_CHUNK_BYTES):
-        kept += chunk
-        if len(kept) > MAX_OUTPUT_BYTES:
+        pending += chunk
+        for line in take_lines(pending):
+            samples = processed_samples_in(line)
+            if samples is None:
+                output += line
+            else:
+                await processed(samples)
+        if len(output) + len(pending) > MAX_OUTPUT_BYTES:
             stop()
             return None
-    return bytes(kept)
+    return bytes(output + pending)
+
+
+def completed_fraction(processed: int, total: int) -> float:
+    return min(1.0, processed / max(1, total))
 
 
 def transcript_from(raw: bytes) -> Transcript:
@@ -76,7 +102,10 @@ class SelfHostedTranscriptionClient:
     invocation: EngineInvocation
     deadline_seconds: float
 
-    async def transcribe(self, audio: DecodedAudio) -> Transcript:
+    async def transcribe(self, audio: DecodedAudio, report: ProgressReport = no_progress) -> Transcript:
+        async def processed(samples: int) -> None:
+            await report(completed_fraction(samples, audio.samples))
+
         with TemporaryDirectory(prefix=WORKDIR_PREFIX) as directory:
             workdir = Path(directory)
             try:
@@ -85,7 +114,7 @@ class SelfHostedTranscriptionClient:
                         self.invocation.arguments(audio),
                         environment=self.invocation.environment(workdir),
                         workdir=workdir,
-                        consume=read_capped,
+                        consume=lambda source, stop: read_capped(source, stop, processed),
                     )
             except TimeoutError as error:
                 message = f"the transcription engine did not finish within {self.deadline_seconds} seconds"

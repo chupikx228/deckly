@@ -10,6 +10,7 @@ from types import MappingProxyType
 
 from deckly.application.exceptions import DocumentHasNoTextError, UnreadableDocumentError
 from deckly.application.ports import SourceMaterial
+from deckly.application.progress import ProgressReport, no_progress
 from deckly.domain.document import Document, DocumentFormat
 from deckly.domain.source import CitationUnit, DocumentSource
 from deckly.domain.text import is_blank, visible_length
@@ -61,7 +62,10 @@ class DocumentTextParser:
     deadline_seconds: float
     clock: MonotonicClock = time.monotonic
 
-    async def parse(self, document: Document, content: bytes) -> tuple[SourceMaterial, ...]:
+    async def parse(
+        self, document: Document, content: bytes, report: ProgressReport = no_progress
+    ) -> tuple[SourceMaterial, ...]:
+        del report
         return await asyncio.to_thread(self._parse, document, content)
 
     def _parse(self, document: Document, content: bytes) -> tuple[SourceMaterial, ...]:

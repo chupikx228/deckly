@@ -23,7 +23,13 @@ from deckly.infrastructure.transcription.engine import (
     read_samples,
     transcribe_samples,
 )
-from deckly.infrastructure.transcription.engine_output import EngineOutput, EngineSegment
+from deckly.infrastructure.transcription.engine_output import (
+    PROGRESS_PREFIX,
+    EngineOutput,
+    EngineSegment,
+    processed_samples_in,
+    progress_line,
+)
 
 LOUD = 20_000
 QUIET = 10
@@ -52,6 +58,24 @@ class ScriptedModel:
         self.calls.append((len(audio), language, beam_size, vad_filter))
         segments, detected = self.replies.pop(0)
         return iter(segments), Detected(detected)
+
+
+class FlushRecordingStream(io.StringIO):
+    def __init__(self) -> None:
+        super().__init__()
+        self.flushed_reports: list[str] = []
+        self._unflushed = ""
+
+    def write(self, text: str, /) -> int:
+        if text.startswith(PROGRESS_PREFIX):
+            self._unflushed = text
+        return super().write(text)
+
+    def flush(self) -> None:
+        if self._unflushed:
+            self.flushed_reports.append(self._unflushed)
+            self._unflushed = ""
+        super().flush()
 
 
 def loud(samples: int) -> NDArray[np.int16]:
@@ -222,9 +246,67 @@ def test_engine_main_loads_the_named_model_and_writes_one_json_document(tmp_path
     )
 
     assert loaded == [(models, 3)]
-    assert EngineOutput.model_validate_json(out.getvalue()) == EngineOutput(
+    progress, answer = out.getvalue().rsplit("\n", maxsplit=1)
+    assert progress == progress_line(SAMPLE_RATE).strip()
+    assert EngineOutput.model_validate_json(answer) == EngineOutput(
         language="en", segments=(EngineSegment(start_ms=0, end_ms=1000, text="Hello."),)
     )
+
+
+def test_engine_flushes_each_chunk_report_so_the_parent_sees_it_before_the_next_chunk_finishes(
+    tmp_path: Path,
+) -> None:
+    pcm = tmp_path / "audio.pcm"
+    pcm.write_bytes(loud(CHUNK_SAMPLES + SAMPLE_RATE).tobytes())
+    models = tmp_path / "models"
+    models.mkdir()
+    out = FlushRecordingStream()
+    model = ScriptedModel(replies=[([], "en"), ([], "en")])
+    ends = [end for _, end in chunk_bounds(loud(CHUNK_SAMPLES + SAMPLE_RATE))]
+
+    main(
+        [
+            "--model",
+            str(models),
+            "--threads",
+            "1",
+            "--samples",
+            str(CHUNK_SAMPLES + SAMPLE_RATE),
+            "--",
+            str(pcm),
+        ],
+        lambda *_: model,
+        out,
+    )
+
+    assert len(ends) == 2
+    assert out.flushed_reports == [progress_line(end) for end in ends]
+
+
+def test_every_chunk_reports_how_many_samples_are_done_in_order() -> None:
+    samples = loud(CHUNK_SAMPLES * 2 + SAMPLE_RATE)
+    done: list[int] = []
+    model = ScriptedModel(replies=[([], "en")] * 3)
+    transcribed_when_reported: list[int] = []
+
+    def chunk_done(processed: int) -> None:
+        done.append(processed)
+        transcribed_when_reported.append(len(model.calls))
+
+    transcribe_samples(model, samples, chunk_done)
+
+    assert transcribed_when_reported == [1, 2, 3]
+    assert done == [end for _, end in chunk_bounds(samples)]
+    assert done == sorted(done)
+    assert done[-1] == len(samples)
+
+
+def test_audio_without_chunks_reports_nothing() -> None:
+    done: list[int] = []
+
+    transcribe_samples(ScriptedModel(replies=[]), loud(0), done.append)
+
+    assert done == []
 
 
 @pytest.mark.parametrize("directory", ["models/faster-whisper-small", "/nonexistent/model"])
@@ -250,3 +332,38 @@ def test_segment_the_model_places_after_the_end_of_its_chunk_has_no_audio_and_is
     )
 
     assert [segment.text for segment in segments] == ["Spoken."]
+
+
+def test_progress_line_is_read_back_as_the_samples_it_names() -> None:
+    assert processed_samples_in(progress_line(1_920_000).encode()) == 1_920_000
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        b'{"language":null,"segments":[]}',
+        b"",
+        b"progress\n",
+        b"progress \n",
+        b"progress -5\n",
+        b"progress 1.5\n",
+        b"progress twelve\n",
+        b"Progress 5\n",
+        b" progress 5\n",
+        b"progress " + b"9" * 19 + b"\n",
+    ],
+    ids=[
+        "json answer",
+        "empty",
+        "no number",
+        "blank number",
+        "negative",
+        "fractional",
+        "word",
+        "other case",
+        "indented",
+        "too many digits",
+    ],
+)
+def test_line_that_is_not_a_well_formed_progress_report_is_not_one(line: bytes) -> None:
+    assert processed_samples_in(line) is None
