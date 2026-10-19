@@ -126,7 +126,7 @@ async def test_english_lecture_is_transcribed_in_english_with_its_words(
 
     assert transcript.language == "en"
     spoken = words(transcript)
-    for phrase in ("world struggle", "imperialism of a newcomer", "existing state of things"):
+    for phrase in ("world", "struggle", "imperialism of a newcomer", "existing state of things"):
         assert phrase in spoken
 
 

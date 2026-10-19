@@ -64,6 +64,7 @@ BLOCKED_MARKERS = (
     "http error 429",
     "too many requests",
 )
+RATE_LIMIT_WARNING_MARKERS = ("http error 429",)
 UNAVAILABLE_MARKERS = (
     "video unavailable",
     "this video is unavailable",
@@ -129,8 +130,13 @@ def upstream_failure(message: str) -> UpstreamUnavailableError:
 
 def classify(completed: Completed) -> Exception:
     error = completed.error.lower()
+    rate_limit_warnings = [
+        warning
+        for warning in completed.warnings
+        if any(marker in warning.lower() for marker in RATE_LIMIT_WARNING_MARKERS)
+    ]
     failure: Exception
-    if any(marker in error for marker in BLOCKED_MARKERS):
+    if rate_limit_warnings or any(marker in error for marker in BLOCKED_MARKERS):
         failure = RecordingBlockedError(FETCH_RETRY_AFTER_SECONDS)
     elif any(marker in error for marker in UNAVAILABLE_MARKERS):
         failure = RecordingUnavailableError(
@@ -139,6 +145,8 @@ def classify(completed: Completed) -> Exception:
     else:
         failure = UpstreamUnavailableError(FETCH_RETRY_AFTER_SECONDS)
     failure.add_note(f"yt-dlp exited with {completed.returncode}: {completed.error}")
+    for warning in rate_limit_warnings:
+        failure.add_note(warning)
     return failure
 
 

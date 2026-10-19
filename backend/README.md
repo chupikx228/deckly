@@ -1692,11 +1692,12 @@ that claims 10 seconds in its metadata and plays 120 (`422`, nothing stored) and
 files as downloads (`415` or `422`). Because YouTube rounds, a video listed at exactly the cap can
 still be refused after downloading, by under a second.
 
-Failures are classified from yt-dlp's last `ERROR:` line, pinned to the yt-dlp version: the bot check
-and HTTP 429 are `blocked`; private, removed, age-restricted, region-blocked, members-only, live,
-upcoming and format-less videos are `422 RECORDING_UNAVAILABLE`; anything else is `503`. Any tunnel
-the proxy refused fails the fetch as `egress_refused` (`503`) whatever yt-dlp printed, and a refused
-byte budget is `413 DOCUMENT_TOO_LARGE`. The filename is the video title with path separators made
+Failures are classified from yt-dlp's last `ERROR:` line and its `WARNING:` lines, pinned to the yt-dlp
+version: the bot check and HTTP 429 are `blocked`, whether the 429 is in the final error or in a warning
+that yt-dlp followed with a generic `This video is not available` (DEC-92); private, removed,
+age-restricted, region-blocked, members-only, live, upcoming and format-less videos are
+`422 RECORDING_UNAVAILABLE`; anything else is `503`. Any tunnel the proxy refused fails the fetch as
+`egress_refused` (`503`) whatever yt-dlp printed, and a refused byte budget is `413 DOCUMENT_TOO_LARGE`. The filename is the video title with path separators made
 hyphens, cleaned like an upload's and cut to 200 characters, plus `.m4a`; a title with nothing
 printable left becomes the video id.
 
@@ -2303,12 +2304,14 @@ when there is no track or its text is too thin for the duration.
 machine-translated into every language: 24 tracks became 3,904 entries and a 12 MB info JSON, so a
 video with about 33 translations would pass the 16 MiB metadata cap and fail the fetch. Passing
 `--extractor-args youtube:skip=translated_subs` brought the same video to 697 KB. Today's probe passes
-neither flag and is not affected. Separately, **a bug in today's fetch**: when YouTube rate-limits,
-yt-dlp prints the `429` as a warning and ends with `ERROR: … This video is not available`, which
-`classify` reads as `RECORDING_UNAVAILABLE` (`422`, outcome `unavailable`) instead of `blocked`, so the
-block is reported to the user as a removed video and does not reach the series to alert on. Seen live
+neither flag and is not affected. Separately, **a bug found in the fetch, fixed in DEC-92**: when YouTube
+rate-limits, yt-dlp prints the `429` as a warning (`WARNING: [youtube] <id>: Unable to download webpage:
+HTTP Error 429: Too Many Requests`) and ends with `ERROR: … This video is not available`, which
+`classify` read as `RECORDING_UNAVAILABLE` (`422`, outcome `unavailable`) instead of `blocked`, so the
+block was reported to the user as a removed video and did not reach the series to alert on. Seen live
 during this sampling (about 250 probes in a few minutes, four at a time, drew the bot check from a
-residential address; one at a time every ten seconds, the next 300 did not). Not fixed here.
+residential address; one at a time every ten seconds, the next 300 did not). `classify` now also reads
+`WARNING:` lines and treats `HTTP Error 429` in one as `blocked`.
 
 ### Not done here
 

@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 from arq.connections import ArqRedis
 from arq.constants import default_queue_name
+from arq.utils import timestamp_ms
 from arq.worker import Worker
 
 from deckly.application.pipeline import RunGeneration
@@ -39,6 +40,7 @@ TRANSCRIPTION_SECONDS = 1.0
 GENERATION_SLOTS = RECORDING_JOBS
 POLL_DELAY_SECONDS = 0.05
 NO_WAIT_SECONDS = 0.5
+NEXT_MILLISECOND_SLEEP_SECONDS = 0.002
 
 
 @dataclass
@@ -120,6 +122,12 @@ class Queues:
     cleanup: Cleanup
 
 
+async def wait_for_next_millisecond() -> None:
+    enqueued_at = timestamp_ms()
+    await asyncio.sleep(NEXT_MILLISECOND_SLEEP_SECONDS)
+    assert timestamp_ms() > enqueued_at
+
+
 async def admit(work: Workload, queues: Queues, request: GenerationRequest, lane: QueueLane) -> UUID:
     job = GenerationJob.queue(uuid4(), T0)
     queues.cleanup.job_ids.add(job.job_id)
@@ -127,6 +135,7 @@ async def admit(work: Workload, queues: Queues, request: GenerationRequest, lane
         job, request, IdempotencyScope(client_id=DOCUMENT_CLIENT_ID, idempotency_key=uuid4())
     )
     await job_queue(queues.pool).enqueue(job.job_id, lane)
+    await wait_for_next_millisecond()
     return job.job_id
 
 

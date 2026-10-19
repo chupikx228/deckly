@@ -29,6 +29,7 @@ DENO_EXECUTABLE = "deno"
 SCRIPTS_PATH = "scripts"
 REQUIRED_MODULES = ("yt_dlp", "yt_dlp_ejs")
 ERROR_PREFIX = "ERROR:"
+WARNING_PREFIX = "WARNING:"
 
 
 def bundled_deno() -> Path:
@@ -120,6 +121,10 @@ class Completed:
     def error(self) -> str:
         errors = [line for line in self.stderr.splitlines() if line.startswith(ERROR_PREFIX)]
         return errors[-1] if errors else ""
+
+    @property
+    def warnings(self) -> list[str]:
+        return [line for line in self.stderr.splitlines() if line.startswith(WARNING_PREFIX)]
 
 
 def isolated_environment(workdir: Path) -> dict[str, str]:
