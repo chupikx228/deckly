@@ -60,7 +60,41 @@ class RedisUploadLimiter:
 RECORDING_URL_CLIENT_KEY_PREFIX = "deckly:recording-url:client"
 RECORDING_URL_ADDRESS_KEY_PREFIX = "deckly:recording-url:address"
 RECORDING_URL_SERVER_KEY_PREFIX = "deckly:recording-url:server"
+ARTICLE_URL_CLIENT_KEY_PREFIX = "deckly:article-url:client"
+ARTICLE_URL_ADDRESS_KEY_PREFIX = "deckly:article-url:address"
+ARTICLE_URL_SERVER_KEY_PREFIX = "deckly:article-url:server"
 SERVER_SUBJECT = "all"
+
+
+@dataclass(frozen=True, slots=True)
+class FetchKeys:
+    client_prefix: str
+    address_prefix: str
+    server_prefix: str
+    client_limit: RateLimit
+    address_limit: RateLimit
+    server_limit: RateLimit
+    unavailable_event: str
+
+
+RECORDING_URL_KEYS = FetchKeys(
+    client_prefix=RECORDING_URL_CLIENT_KEY_PREFIX,
+    address_prefix=RECORDING_URL_ADDRESS_KEY_PREFIX,
+    server_prefix=RECORDING_URL_SERVER_KEY_PREFIX,
+    client_limit=RateLimit.RECORDING_URL_CLIENT,
+    address_limit=RateLimit.RECORDING_URL_ADDRESS,
+    server_limit=RateLimit.RECORDING_URL_SERVER,
+    unavailable_event="recording_url_limit_unavailable",
+)
+ARTICLE_URL_KEYS = FetchKeys(
+    client_prefix=ARTICLE_URL_CLIENT_KEY_PREFIX,
+    address_prefix=ARTICLE_URL_ADDRESS_KEY_PREFIX,
+    server_prefix=ARTICLE_URL_SERVER_KEY_PREFIX,
+    client_limit=RateLimit.ARTICLE_URL_CLIENT,
+    address_limit=RateLimit.ARTICLE_URL_ADDRESS,
+    server_limit=RateLimit.ARTICLE_URL_SERVER,
+    unavailable_event="article_url_limit_unavailable",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,9 +104,10 @@ class FetchWindow:
     fetches_per_server: int
     window_seconds: int
     command_timeout_seconds: float
+    keys: FetchKeys = RECORDING_URL_KEYS
 
 
-class RedisRecordingUrlLimiter:
+class RedisUrlFetchLimiter:
     def __init__(self, redis: Redis, window: FetchWindow, metrics: Metrics) -> None:
         self._redis = redis
         self._window = window
@@ -80,31 +115,27 @@ class RedisRecordingUrlLimiter:
 
     async def acquire(self, requester: Requester, now: datetime) -> None:
         window = self._window
-        keys = (
-            window_key(RECORDING_URL_CLIENT_KEY_PREFIX, requester.client_id, now, window.window_seconds),
-            window_key(
-                RECORDING_URL_ADDRESS_KEY_PREFIX,
-                address_bucket(requester.address),
-                now,
-                window.window_seconds,
-            ),
-            window_key(RECORDING_URL_SERVER_KEY_PREFIX, SERVER_SUBJECT, now, window.window_seconds),
+        keys = window.keys
+        counted = (
+            window_key(keys.client_prefix, requester.client_id, now, window.window_seconds),
+            window_key(keys.address_prefix, address_bucket(requester.address), now, window.window_seconds),
+            window_key(keys.server_prefix, SERVER_SUBJECT, now, window.window_seconds),
         )
         async with (
-            bounded_redis("recording_url_limit_unavailable", window.command_timeout_seconds),
+            bounded_redis(keys.unavailable_event, window.command_timeout_seconds),
             self._redis.pipeline(transaction=True) as pipeline,
         ):
-            for key in keys:
+            for key in counted:
                 pipeline.incr(key)
                 pipeline.expire(key, window.window_seconds)
             answers = await pipeline.execute()
         client_count, address_count, server_count = (require_count(count, "INCR") for count in answers[::2])
         if client_count > window.fetches_per_client:
-            self._reject(RateLimit.RECORDING_URL_CLIENT, now)
+            self._reject(keys.client_limit, now)
         if address_count > window.fetches_per_address:
-            self._reject(RateLimit.RECORDING_URL_ADDRESS, now)
+            self._reject(keys.address_limit, now)
         if server_count > window.fetches_per_server:
-            self._reject(RateLimit.RECORDING_URL_SERVER, now)
+            self._reject(keys.server_limit, now)
 
     def _reject(self, limit: RateLimit, now: datetime) -> NoReturn:
         record_rejection(self._metrics, limit)

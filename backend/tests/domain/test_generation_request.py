@@ -5,7 +5,7 @@ from uuid import UUID
 
 import pytest
 
-from deckly.domain.document import RECORDING_FORMATS, Document, DocumentFormat
+from deckly.domain.document import RECORDING_FORMATS, Document, DocumentFormat, is_article
 from deckly.domain.exceptions import InvalidGenerationRequestError
 from deckly.domain.generation import (
     MAX_CARD_COUNT,
@@ -252,6 +252,7 @@ def stored(document_format: DocumentFormat = DocumentFormat.PDF, document_id: UU
         document_format=document_format,
         uploaded_at=datetime(2026, 10, 18, tzinfo=UTC),
         duration_seconds=60.0 if document_format in RECORDING_FORMATS else None,
+        source_url="https://en.wikipedia.org/wiki/Spaced_repetition" if is_article(document_format) else None,
     )
 
 

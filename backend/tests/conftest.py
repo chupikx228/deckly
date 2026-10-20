@@ -1,7 +1,10 @@
+import asyncio
 import os
 from pathlib import Path
 
 import pytest
+
+from tests.article_url import TlsMaterial, issue_tls_material
 
 LOCAL_ENVIRONMENT_MARKERS = ("integration", "live")
 
@@ -20,3 +23,8 @@ def isolated_from_local_environment(
     monkeypatch.chdir(tmp_path)
     for name in [name for name in os.environ if name.startswith("DECKLY_")]:
         monkeypatch.delenv(name)
+
+
+@pytest.fixture(scope="session")
+def tls_material(tmp_path_factory: pytest.TempPathFactory) -> TlsMaterial:
+    return asyncio.run(issue_tls_material(tmp_path_factory.mktemp("tls")))

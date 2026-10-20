@@ -7,6 +7,7 @@ from typing import Protocol
 from uuid import UUID
 
 from deckly.application.progress import ProgressReport
+from deckly.domain.article_url import ArticleUrl
 from deckly.domain.deck import GenerationResult
 from deckly.domain.document import Document, DocumentFormat
 from deckly.domain.generation import Fingerprint, GenerationRequest, SourceKind
@@ -117,6 +118,7 @@ class FetchedMedia:
 class DocumentUpload:
     filename: str
     content: bytes = field(repr=False)
+    source_url: str | None = None
 
 
 type UploadReader = Callable[[], Awaitable[DocumentUpload]]
@@ -250,6 +252,10 @@ class DocumentInspector(Protocol):
 
 class RecordingFetcher(Protocol):
     async def fetch(self, video: YouTubeVideo) -> DocumentUpload: ...
+
+
+class ArticleFetcher(Protocol):
+    async def fetch(self, article: ArticleUrl) -> DocumentUpload: ...
 
 
 class DocumentStorage(Protocol):

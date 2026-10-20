@@ -12,10 +12,11 @@ from deckly.application.exceptions import DocumentHasNoTextError, UnreadableDocu
 from deckly.application.ports import SourceMaterial
 from deckly.application.progress import ProgressReport, no_progress
 from deckly.domain.document import Document, DocumentFormat
-from deckly.domain.source import CitationUnit, DocumentSource
+from deckly.domain.source import CitationUnit, DocumentSource, Source, WebSource
 from deckly.domain.text import is_blank, visible_length
 from deckly.infrastructure.documents.extraction import ExtractedUnit, ExtractionDeadline, MonotonicClock
 from deckly.infrastructure.documents.pdf import pdf_pages
+from deckly.infrastructure.documents.plain_text import plain_text
 from deckly.infrastructure.documents.pptx import pptx_slides
 from deckly.infrastructure.search.cleaning import clean_text, clean_title, garbage_share
 from deckly.infrastructure.search.parser import (
@@ -27,18 +28,35 @@ from deckly.infrastructure.search.parser import (
 logger = logging.getLogger(__name__)
 
 type UnitExtractor = Callable[[bytes, ExtractionDeadline], Generator[ExtractedUnit]]
+type Citation = Callable[[Document, str, int], Source]
+
+
+def unit_citation(unit: CitationUnit) -> Citation:
+    def cite(document: Document, title: str, number: int) -> Source:
+        return DocumentSource(title=title, document_id=document.document_id, unit=unit, number=number)
+
+    return cite
+
+
+def page_citation(document: Document, title: str, number: int) -> Source:
+    del number
+    if document.source_url is None:
+        message = f"document {document.document_id} is a fetched page without its source url"
+        raise UnreadableDocumentError(message)
+    return WebSource(title=title, url=document.source_url, retrieved_at=document.uploaded_at)
 
 
 @dataclass(frozen=True, slots=True)
 class FormatReader:
     extract: UnitExtractor
-    unit: CitationUnit
+    cite: Citation
 
 
 FORMAT_READERS: Mapping[DocumentFormat, FormatReader] = MappingProxyType(
     {
-        DocumentFormat.PDF: FormatReader(extract=pdf_pages, unit=CitationUnit.PAGE),
-        DocumentFormat.PPTX: FormatReader(extract=pptx_slides, unit=CitationUnit.SLIDE),
+        DocumentFormat.PDF: FormatReader(extract=pdf_pages, cite=unit_citation(CitationUnit.PAGE)),
+        DocumentFormat.PPTX: FormatReader(extract=pptx_slides, cite=unit_citation(CitationUnit.SLIDE)),
+        DocumentFormat.TEXT: FormatReader(extract=plain_text, cite=page_citation),
     }
 )
 
@@ -85,12 +103,7 @@ class DocumentTextParser:
                 outcome = UnitOutcome.KEPT if text else self._rejection(window)
                 outcomes[outcome] += 1
                 if text:
-                    source = DocumentSource(
-                        title=title,
-                        document_id=document.document_id,
-                        unit=reader.unit,
-                        number=extracted.number,
-                    )
+                    source = reader.cite(document, title, extracted.number)
                     material.append(SourceMaterial(source=source, text=text))
                     remaining -= len(text)
                 if remaining < MIN_VISIBLE_CHARACTERS:

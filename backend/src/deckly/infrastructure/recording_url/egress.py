@@ -11,7 +11,11 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 
+from prometheus_client import Counter
+
+from deckly.domain.article_url import is_public_host_name
 from deckly.infrastructure.observability.metrics import Metrics
 
 logger = logging.getLogger(__name__)
@@ -40,6 +44,10 @@ IPV4_COMPATIBLE_PREFIX = ipaddress.IPv6Network("::/96")
 IPV4_TRANSLATED_PREFIX = ipaddress.IPv6Network("::ffff:0:0:0/96")
 GLOBAL_UNICAST = ipaddress.IPv6Network("2000::/3")
 IPV4_BITS = 0xFFFF_FFFF
+FULLY_QUALIFIED_SUFFIX = "."
+REFUSED_EVENT = "egress_refused"
+TUNNEL_DROPPED_EVENT = "egress_tunnel_dropped"
+PLATFORM_ADDRESSES = frozenset({ipaddress.IPv4Address("168.63.129.16")})
 
 type Address = ipaddress.IPv4Address | ipaddress.IPv6Address
 type Resolver = Callable[[str, int], Awaitable[list[str]]]
@@ -60,11 +68,23 @@ class EgressRefusal(StrEnum):
     BYTES = "bytes"
 
 
+class EgressSubject(StrEnum):
+    RECORDING_URL = "recording_url"
+    ARTICLE_URL = "article_url"
+
+
 class RefusedError(Exception):
     def __init__(self, reason: EgressRefusal, host: str | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
         self.host = host
+
+
+class HostPolicy(Protocol):
+    @property
+    def port(self) -> int: ...
+
+    def allows(self, host: str) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +97,14 @@ class EgressPolicy:
         return host in self.hosts or any(
             host.endswith(suffix) and len(host) > len(suffix) for suffix in self.host_suffixes
         )
+
+
+@dataclass(frozen=True, slots=True)
+class PublicHostPolicy:
+    port: int = TLS_PORT
+
+    def allows(self, host: str) -> bool:
+        return is_public_host_name(host)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +135,7 @@ def is_public(address: Address) -> bool:
             return is_public(embedded)
         if address not in GLOBAL_UNICAST:
             return False
-    return address.is_global and not address.is_multicast
+    return address.is_global and not address.is_multicast and address not in PLATFORM_ADDRESSES
 
 
 def public_address(raw: str) -> Address | None:
@@ -118,8 +146,14 @@ def public_address(raw: str) -> Address | None:
     return address if is_public(address) else None
 
 
+def fully_qualified(host: str) -> str:
+    return host if host.endswith(FULLY_QUALIFIED_SUFFIX) else f"{host}{FULLY_QUALIFIED_SUFFIX}"
+
+
 async def resolve(host: str, port: int) -> list[str]:
-    answers = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    answers = await asyncio.get_running_loop().getaddrinfo(
+        fully_qualified(host), port, type=socket.SOCK_STREAM
+    )
     return [str(answer[4][0]) for answer in answers]
 
 
@@ -195,11 +229,12 @@ def parse_head(head: bytes) -> tuple[str, Target | None, list[str]]:
 
 @dataclass(frozen=True, slots=True)
 class EgressProxy:
-    policy: EgressPolicy
+    policy: HostPolicy
     limits: EgressLimits
     metrics: Metrics
     resolver: Resolver = resolve
     connector: Connector = connect
+    subject: EgressSubject = EgressSubject.RECORDING_URL
 
     @asynccontextmanager
     async def serve(self) -> AsyncIterator[EgressSession]:
@@ -238,7 +273,7 @@ class EgressProxy:
         except RefusedError as refusal:
             self._refuse(session, refusal, writer)
         except (ConnectionError, OSError):
-            logger.info("recording_url_egress_tunnel_dropped")
+            logger.info(self._event(TUNNEL_DROPPED_EVENT))
         finally:
             writer.close()
             with suppress(ConnectionError, OSError):
@@ -327,7 +362,15 @@ class EgressProxy:
 
     def _refuse(self, session: EgressSession, refusal: RefusedError, writer: asyncio.StreamWriter) -> None:
         session.refusals.append(refusal.reason)
-        self.metrics.recording_url_egress_refusals.labels(reason=refusal.reason).inc()
-        logger.warning("recording_url_egress_refused", extra={"reason": refusal.reason, "host": refusal.host})
+        self._refusals().labels(reason=refusal.reason).inc()
+        logger.warning(self._event(REFUSED_EVENT), extra={"reason": refusal.reason, "host": refusal.host})
         if refusal.reason not in {EgressRefusal.UNREACHABLE, EgressRefusal.BYTES}:
             writer.write(REFUSED)
+
+    def _event(self, name: str) -> str:
+        return f"{self.subject}_{name}"
+
+    def _refusals(self) -> Counter:
+        if self.subject == EgressSubject.ARTICLE_URL:
+            return self.metrics.article_url_egress_refusals
+        return self.metrics.recording_url_egress_refusals

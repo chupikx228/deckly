@@ -7,6 +7,7 @@ from uuid import UUID
 from deckly.application.exceptions import UpstreamUnavailableError
 from deckly.application.generations import Clock
 from deckly.application.ports import (
+    ArticleFetcher,
     DocumentInspector,
     DocumentStorage,
     DocumentStore,
@@ -17,6 +18,7 @@ from deckly.application.ports import (
     UploadLimiter,
     UploadReader,
 )
+from deckly.domain.article_url import parse_article_url
 from deckly.domain.document import Document, clean_filename
 from deckly.domain.exceptions import DocumentNotFoundError, DocumentTooLargeError
 from deckly.domain.recording_url import parse_youtube_video
@@ -79,6 +81,7 @@ class UploadDocument:
             document_format=inspected.document_format,
             uploaded_at=self.clock(),
             duration_seconds=inspected.duration_seconds,
+            source_url=upload.source_url,
         )
 
     async def _withdraw(self, document: Document) -> None:
@@ -105,6 +108,16 @@ class FetchRecording:
     async def __call__(self, requester: Requester, url: str) -> Document:
         video = parse_youtube_video(url)
         return await self.upload(requester, partial(self.fetcher.fetch, video))
+
+
+@dataclass(frozen=True, slots=True)
+class FetchArticle:
+    upload: UploadDocument
+    fetcher: ArticleFetcher
+
+    async def __call__(self, requester: Requester, url: str) -> Document:
+        article = parse_article_url(url)
+        return await self.upload(requester, partial(self.fetcher.fetch, article))
 
 
 @dataclass(frozen=True, slots=True)

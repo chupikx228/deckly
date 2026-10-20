@@ -9,6 +9,7 @@ MODERATION_GATE = "moderation"
 DOCUMENT_UPLOAD_GATE = "document_upload"
 RECORDING_UPLOAD_GATE = "recording_upload"
 RECORDING_URL_GATE = "recording_url"
+ARTICLE_URL_GATE = "article_url"
 REAL_TIME_FACTOR_BUCKETS = (0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.5)
 PROVIDER_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0, 90.0, 180.0)
 
@@ -34,6 +35,9 @@ class RateLimit(StrEnum):
     RECORDING_URL_CLIENT = "recording_url_client"
     RECORDING_URL_ADDRESS = "recording_url_address"
     RECORDING_URL_SERVER = "recording_url_server"
+    ARTICLE_URL_CLIENT = "article_url_client"
+    ARTICLE_URL_ADDRESS = "article_url_address"
+    ARTICLE_URL_SERVER = "article_url_server"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +62,9 @@ class Metrics:
     rate_limit_rejections: Counter
     recording_url_fetches: Counter
     recording_url_egress_refusals: Counter
+    article_url_fetches: Counter
+    article_url_egress_refusals: Counter
+    article_url_truncations: Counter
     transcription_real_time_factor: Histogram
     recording_decode_truncations: Counter
 
@@ -181,6 +188,24 @@ def create_metrics() -> Metrics:
             "deckly_recording_url_egress_refusals",
             "Connections the recording fetch egress proxy refused, by reason.",
             ["reason"],
+            registry=registry,
+        ),
+        article_url_fetches=Counter(
+            "deckly_article_url_fetches",
+            "Web pages fetched from a URL as articles, by outcome.",
+            ["outcome"],
+            registry=registry,
+        ),
+        article_url_egress_refusals=Counter(
+            "deckly_article_url_egress_refusals",
+            "Connections the article fetch egress proxy refused, by reason.",
+            ["reason"],
+            registry=registry,
+        ),
+        article_url_truncations=Counter(
+            "deckly_article_url_truncations",
+            "Fetched pages cut short before extraction or storage, by the limit that cut them.",
+            ["limit"],
             registry=registry,
         ),
         transcription_real_time_factor=Histogram(
