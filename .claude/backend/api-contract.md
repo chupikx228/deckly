@@ -545,7 +545,7 @@ and `sourceUrl`; the reply's `documentId` is used exactly like an uploaded docum
 - **Slow by nature.** The response is sent once the text is stored, typically about a second and at
   most `DECKLY_LIMIT_ARTICLE_URL_TIMEOUT_SECONDS` (30 by default). A fetch that does not finish in
   time, a site that answers `5xx` or `429`, or any other upstream failure is `503
-  UPSTREAM_UNAVAILABLE` with `Retry-After: 60`; the attempt was counted.
+UPSTREAM_UNAVAILABLE` with `Retry-After: 60`; the attempt was counted.
 - **Retention** is the same as for documents. **No idempotency key**: retrying stores a second copy.
 - **A generation source** exactly like an uploaded document; its notes cite `kind: "web"` sources
   with `sourceUrl` as the `url`. See `POST /v1/generations` and "Sources".
