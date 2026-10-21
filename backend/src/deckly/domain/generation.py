@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
-from deckly.domain.document import Document, is_recording
+from deckly.domain.document import Document, is_article, is_recording
 from deckly.domain.exceptions import InvalidGenerationRequestError, UnsupportedNoteTypeError
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import fields_type_for
@@ -24,6 +24,7 @@ class SourceKind(StrEnum):
     TOPIC = "topic"
     DOCUMENT = "document"
     RECORDING = "recording"
+    ARTICLE = "article"
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +115,8 @@ class GenerationRequest:
             return SourceKind.TOPIC
         if document is not None and is_recording(document.document_format):
             return SourceKind.RECORDING
+        if document is not None and is_article(document.document_format):
+            return SourceKind.ARTICLE
         return SourceKind.DOCUMENT
 
     def source_query(self) -> SourceQuery:
