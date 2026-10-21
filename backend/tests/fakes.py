@@ -39,7 +39,7 @@ from deckly.domain.media import Media, MediaKind
 from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.regeneration import RegenerationRequest, RejectionReason
-from deckly.domain.source import CitationUnit, DocumentSource, SourceQuery, TranscriptSource
+from deckly.domain.source import CitationUnit, DocumentSource, SourceQuery, TranscriptSource, WebSource
 from deckly.infrastructure.llm.client import LlmPrompt, LlmReply, LlmStop
 from deckly.infrastructure.media.client import ImageCandidate, ImageSearch, MediaEndpoint
 from deckly.infrastructure.media.commons_client import CommonsImageSearchClient
@@ -136,6 +136,21 @@ TRANSCRIPT_MATERIAL = (
         source=TranscriptSource(
             title="lecture-3.m4a", document_id=DOCUMENT_ID, start_ms=62_480, end_ms=91_900
         ),
+        text="A red triangle warns of danger ahead.",
+    ),
+)
+ARTICLE_URL = "https://en.wikipedia.org/wiki/Road_signs_in_the_United_Kingdom"
+ARTICLE_CONTENT = b"A red triangle warns of danger ahead."
+UPLOADED_ARTICLE = replace(
+    UPLOADED_DOCUMENT,
+    filename="Road signs in the United Kingdom",
+    size_bytes=len(ARTICLE_CONTENT),
+    document_format=DocumentFormat.TEXT,
+    source_url=ARTICLE_URL,
+)
+ARTICLE_MATERIAL = (
+    SourceMaterial(
+        source=WebSource(title="Road signs in the United Kingdom", url=ARTICLE_URL, retrieved_at=T0),
         text="A red triangle warns of danger ahead.",
     ),
 )

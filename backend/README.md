@@ -1181,7 +1181,7 @@ its own worker (`DECKLY_TRANSCRIPTION_JOB_TIMEOUT_SECONDS`, see "Transcription")
 
 **Observability.** Lifecycle lines (`generation_admitted`, `generation_started`,
 `generation_stage_entered`, `generation_succeeded`, `generation_failed`, `generation_abandoned`)
-carry `source_kind` (`topic`, `document` or `recording`) and, for either of the last two, `document_id`;
+carry `source_kind` (`topic`, `document`, `recording` or `article`) and, for any but `topic`, `document_id`;
 `generation_document_not_found`, `document_fetched`, `document_parsed` and `document_screened`
 cover the document steps. The admission, job and stage metrics have a `source` label, the run and
 stage spans a `deckly.source_kind` attribute.
@@ -1973,6 +1973,35 @@ costs minutes of CPU; an article fetch does not. A retry stores a second copy, a
   arrive as lxml releases that `make audit` sees, and the process boundary contains a crash.
 - **protego** 0.7.0 (BSD-3, no dependencies), above.
 
+### Generating from an article (DEC-94)
+
+DEC-93 already did the wiring: `POST /v1/generations` takes an article's `documentId` like any other
+document's, and `DocumentTextParser` has a `text/plain` reader that yields the stored text as one unit
+under the document character budget and cites it as `kind: "web"` with the final URL and the fetch
+time. Everything else is format-agnostic and needed no change, which DEC-94 proves with tests rather
+than assumes (`tests/application/test_generate_from_article.py`, and the end-to-end tests at the bottom
+of `tests/integration/test_article_url.py`):
+
+- **Admission and lane.** `lane_for` sends an article to the generation queue; the transcription switch
+  refuses only recordings, so an article is admitted where transcription is disabled.
+- **Moderation, all three layers.** The admission screen sees the page title (the stored filename) and
+  the instructions; the whole stored text is screened in the worker before any card is written
+  (`DOCUMENT_REJECTED` otherwise); the generated cards go through the content filter.
+- **Cache.** An article is keyed by `DocumentGenerationFingerprint` under the document prefix. It has no
+  namespace of its own, unlike a recording: DEC-87's reason for one (a transcription engine change
+  invalidating its results) has no counterpart here, since extraction runs once at fetch time and the
+  stored text never changes.
+- **Regeneration** of a note from an article-sourced deck is `422 DOCUMENT_REGENERATION_UNSUPPORTED`
+  through DEC-83's check, with no regeneration budget spent.
+- **Job timeout and memory.** An article job takes the document path (download, parse, screen, cards)
+  on the generation worker, so the document budget check covers it unchanged; its parse is a UTF-8
+  decode. A stored article is at most 200,000 characters (800,000 bytes), well inside the document
+  worker memory check's parse working set whatever `DECKLY_LIMIT_DOCUMENT_MAX_BYTES` is.
+
+**Source kind** is the one change: `SourceKind.ARTICLE` (`article`, the name DEC-93 uses for its gate,
+limits and metrics), so admission, job and stage metrics, lifecycle lines and spans tell an article
+from an uploaded PDF or PPTX. A request whose document cannot be found is still counted as `document`.
+
 ### Not done here
 
 - **Frontend:** the app does not call the endpoint yet; its generated contract types are not
@@ -2420,7 +2449,7 @@ document's text. The admission screen sees the recording's filename (for a fetch
 the instructions, like a document's. Retention needed nothing: the `ON DELETE RESTRICT` key and
 `is_usable`/`is_expired` never look at the format. DEC-87 closed what DEC-86 left:
 
-**Source kind.** `SourceKind` is `topic`, `document` or `recording`, decided by
+**Source kind.** `SourceKind` is `topic`, `document` or `recording` (and `article` since DEC-94), decided by
 `GenerationRequest.source_kind(document)` from the stored record, so logs, metrics and spans tell a
 recording from a document. Admission already holds the record. The worker reads it once, right after the
 job is marked running and before the cache is consulted (`RunGeneration._resolve`), and reuses it for

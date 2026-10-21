@@ -1,11 +1,14 @@
 import logging
 from collections.abc import AsyncIterator, Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
+from datetime import datetime
 from http import HTTPStatus
 from uuid import UUID
 
 import pytest
+from arq.constants import default_queue_name
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -13,12 +16,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deckly.application.documents import FetchArticle
 from deckly.config import Settings
 from deckly.domain.document import DocumentFormat
+from deckly.domain.notes.note_type import NoteType
 from deckly.infrastructure.article_url.extraction import ExtractorInvocation, SubprocessArticleExtractor
 from deckly.infrastructure.article_url.fetcher import HttpArticleFetcher
 from deckly.infrastructure.documents.store import DocumentStatus
+from deckly.infrastructure.moderation.moderator import LlmTopicModerator
+from deckly.infrastructure.queue import TRANSCRIPTION_QUEUE_NAME
 from deckly.infrastructure.quota import address_bucket
+from deckly.infrastructure.rate_limit import KEY_PREFIX as REGENERATION_KEY_PREFIX
 from deckly.infrastructure.recording_url.egress import EgressRefusal
-from deckly.infrastructure.tables import DocumentRow
+from deckly.infrastructure.tables import DocumentRow, GenerationJobRow
 from deckly.infrastructure.upload_limit import (
     ARTICLE_URL_ADDRESS_KEY_PREFIX,
     ARTICLE_URL_CLIENT_KEY_PREFIX,
@@ -43,8 +50,10 @@ from tests.article_url import (
     resolving_hosts,
     serving,
 )
-from tests.integration.conftest import TEST_PEER_ADDRESSES, open_queue_pool
+from tests.fakes import FakeLlmClient, model_reply
+from tests.integration.conftest import TEST_PEER_ADDRESSES, Cleanup, open_queue_pool, screen_topics_with
 from tests.integration.storage import ObjectBucket
+from tests.integration.test_documents import ALLOW, poll, scripted_worker, start_generation
 from tests.recording_url import PUBLIC_ADDRESS, ScriptedResolver, listening
 from tests.reserved_clients import reserved_client_id
 from tests.transport.openapi import spec_errors
@@ -76,6 +85,8 @@ class FetchCleanup:
 
     async def purge(self) -> None:
         async with self.session_factory.begin() as session:
+            owned = select(DocumentRow.document_id).where(DocumentRow.client_id.in_(self.client_ids))
+            await session.execute(delete(GenerationJobRow).where(GenerationJobRow.document_id.in_(owned)))
             removed = await session.scalars(
                 delete(DocumentRow)
                 .where(DocumentRow.client_id.in_(self.client_ids))
@@ -256,3 +267,186 @@ def app_with_fetcher_untouched(settings: Settings) -> Iterator[FetchArticle]:
             yield wired
     finally:
         root.handlers, root.level = handlers, level
+
+
+ARTICLE_CARD_REPLY = {
+    "deck": {"title": "Spaced repetition", "description": "How reviews are scheduled", "tags": ["memory"]},
+    "notes": [
+        {
+            "noteType": NoteType.BASIC,
+            "fields": {"front": "Who first described the spacing effect?", "back": "Hermann Ebbinghaus"},
+            "sources": [1],
+        }
+    ],
+}
+BLOCK = {"verdict": "block"}
+
+
+@asynccontextmanager
+async def app_serving_the_article(
+    settings: Settings, tls_material: TlsMaterial, cleanup: Cleanup, client_id: UUID
+) -> AsyncIterator[TestClient]:
+    cleanup.client_ids.add(client_id)
+    async with serving(tls_material) as site:
+        site_with_article(site)
+        connector = RoutingConnector({PUBLIC_ADDRESS: site.port})
+        fetcher = with_real_extractor(article_fetcher(tls_material, public_dns(ARTICLE_HOST), connector))
+        with app_with_fetcher(settings, fetcher) as client:
+            yield client
+
+
+def fetch_article(client: TestClient, client_id: UUID) -> dict[str, object]:
+    response = client.post(FROM_URL, json={"url": LINK}, headers={"X-Client-Id": str(client_id)})
+    assert response.status_code == HTTPStatus.CREATED, response.text
+    body: dict[str, object] = response.json()
+    return body
+
+
+def generate_from(client: TestClient, client_id: UUID, article: dict[str, object], cleanup: Cleanup) -> str:
+    created = start_generation(
+        client, client_id, {"documentId": article["documentId"], "language": "en", "cardCount": 5}
+    )
+    assert created["status_code"] == HTTPStatus.ACCEPTED, created
+    job_id = str(created["jobId"])
+    cleanup.job_ids.add(UUID(job_id))
+    return job_id
+
+
+async def queues_holding(settings: Settings, job_id: str) -> list[str]:
+    pool = await open_queue_pool(settings)
+    try:
+        return [
+            queue
+            for queue in (default_queue_name, TRANSCRIPTION_QUEUE_NAME)
+            if await pool.zscore(queue, job_id) is not None
+        ]
+    finally:
+        await pool.aclose()
+
+
+async def test_article_generation_runs_the_real_pipeline_and_cites_the_page_it_was_fetched_from(
+    settings: Settings, fetched: FetchCleanup, cleanup: Cleanup, tls_material: TlsMaterial
+) -> None:
+    client_id = fetched.client_id()
+    llm = FakeLlmClient(model_reply(ALLOW), model_reply(ARTICLE_CARD_REPLY))
+    async with app_serving_the_article(settings, tls_material, cleanup, client_id) as client:
+        article = fetch_article(client, client_id)
+        job_id = generate_from(client, client_id, article, cleanup)
+        queued = poll(client, job_id, client_id)
+        lanes = await queues_holding(settings, job_id)
+        async with scripted_worker(settings, llm) as run:
+            await run(UUID(job_id))
+        finished = poll(client, job_id, client_id)
+
+    assert queued["status"] == "queued"
+    assert lanes == [default_queue_name]
+    assert finished["status"] == "succeeded", finished
+    result = finished["result"]
+    assert isinstance(result, dict)
+    [note] = result["notes"]
+    [source] = note["sources"]
+    assert source == {
+        "kind": "web",
+        "title": ARTICLE_TITLE,
+        "url": LINK,
+        "retrievedAt": source["retrievedAt"],
+    }
+    assert datetime.fromisoformat(source["retrievedAt"]) == datetime.fromisoformat(str(article["uploadedAt"]))
+    assert spec_errors("GenerationJob", finished) == []
+    screening, generation = llm.prompts
+    assert ARTICLE_PARAGRAPHS[1] in screening.user
+    assert ARTICLE_PARAGRAPHS[1] in generation.user
+    async with fetched.session_factory() as session:
+        row = await session.get(DocumentRow, UUID(str(article["documentId"])))
+    assert row is not None
+    assert row.used_at is not None
+
+
+async def test_article_whose_page_text_the_screen_blocks_fails_before_any_card_is_written(
+    settings: Settings, fetched: FetchCleanup, cleanup: Cleanup, tls_material: TlsMaterial
+) -> None:
+    client_id = fetched.client_id()
+    llm = FakeLlmClient(model_reply(BLOCK), model_reply(ARTICLE_CARD_REPLY))
+    async with app_serving_the_article(settings, tls_material, cleanup, client_id) as client:
+        article = fetch_article(client, client_id)
+        job_id = generate_from(client, client_id, article, cleanup)
+        async with scripted_worker(settings, llm) as run:
+            await run(UUID(job_id))
+        finished = poll(client, job_id, client_id)
+
+    assert finished["status"] == "failed", finished
+    error = finished["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "DOCUMENT_REJECTED"
+    assert finished["stage"] == "parsing_sources"
+    [screening] = llm.prompts
+    assert ARTICLE_PARAGRAPHS[0] in screening.user
+
+
+async def test_article_request_is_screened_at_admission_by_its_page_title_and_refused_without_a_job(
+    settings: Settings, fetched: FetchCleanup, cleanup: Cleanup, tls_material: TlsMaterial
+) -> None:
+    client_id = fetched.client_id()
+    llm = FakeLlmClient(model_reply(BLOCK))
+    async with app_serving_the_article(settings, tls_material, cleanup, client_id) as client:
+        article = fetch_article(client, client_id)
+        assert isinstance(client.app, FastAPI)
+        screen_topics_with(client.app, LlmTopicModerator(llm=llm))
+        created = start_generation(
+            client,
+            client_id,
+            {
+                "documentId": article["documentId"],
+                "language": "en",
+                "cardCount": 5,
+                "instructions": "Dates only",
+            },
+        )
+
+    assert created["status_code"] == HTTPStatus.UNPROCESSABLE_ENTITY, created
+    assert created["code"] == "TOPIC_REJECTED"
+    [screening] = llm.prompts
+    assert ARTICLE_TITLE in screening.user
+    assert "Dates only" in screening.user
+    async with fetched.session_factory() as session:
+        jobs = await session.scalars(
+            select(GenerationJobRow).where(GenerationJobRow.document_id == UUID(str(article["documentId"])))
+        )
+        assert list(jobs.all()) == []
+
+
+async def test_note_of_a_deck_generated_from_an_article_is_refused_regeneration_without_spending_its_budget(
+    settings: Settings, fetched: FetchCleanup, cleanup: Cleanup, tls_material: TlsMaterial
+) -> None:
+    client_id = fetched.client_id()
+    async with app_serving_the_article(settings, tls_material, cleanup, client_id) as client:
+        article = fetch_article(client, client_id)
+        response = client.post(
+            f"{API_PREFIX}/notes/regenerate",
+            json={
+                "documentId": article["documentId"],
+                "language": "en",
+                "noteType": "basic",
+                "rejectedNote": {
+                    "fields": {
+                        "front": "Who first described the spacing effect?",
+                        "back": "Hermann Ebbinghaus",
+                    },
+                    "sources": [{"kind": "web", "title": ARTICLE_TITLE, "url": LINK}],
+                },
+                "reason": "too_easy",
+            },
+            headers={"X-Client-Id": str(client_id)},
+        )
+
+    assert article["contentType"] == DocumentFormat.TEXT
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY, response.text
+    body = response.json()
+    assert spec_errors("Problem", body) == []
+    assert body["code"] == "DOCUMENT_REGENERATION_UNSUPPORTED"
+    pool = await open_queue_pool(settings)
+    try:
+        budget_keys = [key async for key in pool.scan_iter(match=f"{REGENERATION_KEY_PREFIX}:{client_id}:*")]
+    finally:
+        await pool.aclose()
+    assert budget_keys == []

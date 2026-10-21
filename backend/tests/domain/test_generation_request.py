@@ -235,7 +235,7 @@ OTHER_DOCUMENT_ID = UUID("6e1d8b2f-4c3a-4d9e-8f7a-2b3c4d5e6f70")
 
 
 RECORDINGS = sorted(RECORDING_FORMATS)
-TEXT_DOCUMENTS = sorted(set(DocumentFormat) - RECORDING_FORMATS)
+TEXT_DOCUMENTS = sorted(set(DocumentFormat) - RECORDING_FORMATS - {DocumentFormat.TEXT})
 
 
 def document_request_with(**changes: Unpack[RequestChanges]) -> GenerationRequest:
@@ -273,6 +273,22 @@ def test_request_naming_a_recording_is_a_recording_source(document_format: Docum
 @pytest.mark.parametrize("document_format", TEXT_DOCUMENTS)
 def test_request_naming_a_text_document_stays_a_document_source(document_format: DocumentFormat) -> None:
     assert document_request_with().source_kind(stored(document_format)) is SourceKind.DOCUMENT
+
+
+def test_request_naming_a_page_fetched_from_a_url_is_an_article_source() -> None:
+    assert document_request_with().source_kind(stored(DocumentFormat.TEXT)) is SourceKind.ARTICLE
+
+
+def test_every_document_format_is_exactly_one_kind_of_source() -> None:
+    kinds = {
+        document_format: document_request_with().source_kind(stored(document_format))
+        for document_format in DocumentFormat
+    }
+
+    assert set(kinds.values()) == {SourceKind.DOCUMENT, SourceKind.RECORDING, SourceKind.ARTICLE}
+    assert [document_format for document_format, kind in kinds.items() if kind is SourceKind.ARTICLE] == [
+        DocumentFormat.TEXT
+    ]
 
 
 def test_request_naming_a_document_that_could_not_be_found_is_counted_as_a_document_source() -> None:
@@ -323,6 +339,19 @@ def test_recording_and_document_fingerprints_of_the_same_settings_are_never_equa
 
     assert recording != document
     assert asdict(recording) == asdict(document)
+
+
+def test_article_is_fingerprinted_like_any_other_document_by_its_own_id() -> None:
+    request = document_request_with()
+
+    article = request.fingerprint(stored(DocumentFormat.TEXT))
+
+    assert isinstance(article, DocumentGenerationFingerprint)
+    assert article == request.fingerprint(stored(DocumentFormat.PDF))
+    other = document_request_with(document_id=OTHER_DOCUMENT_ID).fingerprint(
+        stored(DocumentFormat.TEXT, OTHER_DOCUMENT_ID)
+    )
+    assert article != other
 
 
 @pytest.mark.parametrize(
