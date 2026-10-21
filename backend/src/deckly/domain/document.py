@@ -11,6 +11,7 @@ from deckly.domain.text import (
     is_timezone_aware,
     is_unstorable_character,
     is_uuid_v4,
+    is_web_url,
 )
 
 MAX_FILENAME_LENGTH = 255
@@ -26,6 +27,7 @@ class DocumentFormat(StrEnum):
     WAV = "audio/wav"
     MP4 = "video/mp4"
     MOV = "video/quicktime"
+    TEXT = "text/plain"
 
 
 RECORDING_FORMATS = frozenset(
@@ -35,6 +37,10 @@ RECORDING_FORMATS = frozenset(
 
 def is_recording(document_format: DocumentFormat) -> bool:
     return document_format in RECORDING_FORMATS
+
+
+def is_article(document_format: DocumentFormat) -> bool:
+    return document_format == DocumentFormat.TEXT
 
 
 def last_path_component(raw: str) -> str:
@@ -69,6 +75,7 @@ class Document:
     document_format: DocumentFormat
     uploaded_at: datetime
     duration_seconds: float | None = None
+    source_url: str | None = None
 
     def __post_init__(self) -> None:
         if not is_uuid_v4(self.document_id):
@@ -84,6 +91,7 @@ class Document:
             message = "document timestamps must carry an explicit offset"
             raise InvalidTimestampError(message)
         self._require_duration_only_for_recordings()
+        self._require_source_url_only_for_articles()
 
     def _require_duration_only_for_recordings(self) -> None:
         if not is_recording(self.document_format):
@@ -96,6 +104,16 @@ class Document:
             raise InvalidDocumentError(message)
         if self.duration_seconds <= 0:
             message = "a recording must not be empty"
+            raise InvalidDocumentError(message)
+
+    def _require_source_url_only_for_articles(self) -> None:
+        if not is_article(self.document_format):
+            if self.source_url is not None:
+                message = "only a page fetched from a url has a source url"
+                raise InvalidDocumentError(message)
+            return
+        if self.source_url is None or not is_web_url(self.source_url):
+            message = "a page fetched from a url must keep the http(s) url it was fetched from"
             raise InvalidDocumentError(message)
 
     @property

@@ -14,12 +14,14 @@ dependencies = [
     "opentelemetry-api>=1.45.0",
     "opentelemetry-sdk>=1.45.0",
     "prometheus-client>=0.26.0",
+    "protego>=0.7.0",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
     "pypdf>=6.20.1",
     "python-multipart>=0.0.32",
     "redis==5.3.1",
     "sqlalchemy[asyncio]>=2.0.54",
+    "trafilatura>=2.3.1",
     "uvicorn>=0.53.0",
     "yt-dlp==2026.8.19",
     "yt-dlp-ejs==0.8.0",
@@ -146,6 +148,7 @@ forbidden_modules = [
     "prometheus_client",
     "opentelemetry",
     "pypdf",
+    "protego",
 ]
 
 [[tool.importlinter.contracts]]
@@ -194,6 +197,7 @@ forbidden_modules = [
     "httpx2",
     "prometheus_client",
     "opentelemetry",
+    "protego",
 ]
 
 [[tool.importlinter.contracts]]
@@ -202,6 +206,13 @@ type = "forbidden"
 source_modules = ["deckly"]
 forbidden_modules = ["faster_whisper", "ctranslate2", "av", "onnxruntime"]
 ignore_imports = ["deckly.infrastructure.transcription.engine -> faster_whisper"]
+
+[[tool.importlinter.contracts]]
+name = "Only the article extractor, in its own process, parses untrusted HTML"
+type = "forbidden"
+source_modules = ["deckly"]
+forbidden_modules = ["trafilatura", "lxml", "lxml_html_clean", "justext", "htmldate", "courlan"]
+ignore_imports = ["deckly.infrastructure.article_url.extractor -> trafilatura"]
 
 [tool.vulture]
 paths = ["src"]

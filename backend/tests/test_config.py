@@ -6,6 +6,13 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from deckly.config import (
+    ARTICLE_URL_SLOT_PEAK_BYTES,
+    DEFAULT_ARTICLE_URL_FETCHES_PER_ADDRESS_PER_WINDOW,
+    DEFAULT_ARTICLE_URL_FETCHES_PER_WINDOW,
+    DEFAULT_ARTICLE_URL_MAX_CONCURRENCY,
+    DEFAULT_ARTICLE_URL_SERVER_FETCHES_PER_WINDOW,
+    DEFAULT_ARTICLE_URL_TIMEOUT_SECONDS,
+    DEFAULT_ARTICLE_URL_WINDOW_SECONDS,
     DEFAULT_DOCUMENT_UPLOAD_MAX_CONCURRENCY,
     DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES,
     DEFAULT_DOCUMENT_UPLOAD_READ_TIMEOUT_SECONDS,
@@ -32,6 +39,8 @@ from deckly.config import (
     DOCUMENT_DOWNLOAD_PEAK_COPIES,
     DOCUMENT_PARSE_WORKING_SET_BYTES,
     DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN,
+    MAX_ARTICLE_URL_CONCURRENCY,
+    MAX_ARTICLE_URL_TIMEOUT_SECONDS,
     MAX_DOCUMENT_BYTES,
     MAX_DOCUMENT_PARSE_DEADLINE_SECONDS,
     MAX_DOCUMENT_RETENTION_SECONDS,
@@ -234,7 +243,8 @@ SHIPPED_RECORDING_MAX_BYTES = 48 * MEBIBYTE
 SHIPPED_RECORDING_UPLOAD_SHARE_BYTES = (
     2 * SHIPPED_RECORDING_MAX_BYTES + RECORDING_URL_SUBPROCESS_PEAK_BYTES
 ) * 2
-SHIPPED_UPLOAD_WORST_CASE_BYTES = 1288 * MEBIBYTE
+SHIPPED_ARTICLE_URL_SHARE_BYTES = ARTICLE_URL_SLOT_PEAK_BYTES * 2
+SHIPPED_UPLOAD_WORST_CASE_BYTES = 1544 * MEBIBYTE
 RECORDING_LIMIT_THAT_FILLS_THE_DEFAULT_UPLOAD_BUDGET = 48 * MEBIBYTE
 ROOMY_JOB_TIMEOUT_SECONDS = "336"
 REGENERATE_ENVIRONMENT = {
@@ -1734,6 +1744,7 @@ def test_document_upload_concurrency_within_its_bounds_is_accepted(
         DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES=str(
             value * SHIPPED_DOCUMENT_MAX_BYTES * DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN
             + SHIPPED_RECORDING_UPLOAD_SHARE_BYTES
+            + SHIPPED_ARTICLE_URL_SHARE_BYTES
         ),
     )
 
@@ -1829,25 +1840,25 @@ def test_document_batch_deleted_just_within_one_sweep_interval_is_accepted(
     assert settings.sweep.document_batch_size == 40
 
 
-def test_document_upload_memory_budget_defaults_to_the_documented_twelve_hundred_and_eighty_eight_mebibytes(
+def test_document_upload_memory_budget_defaults_to_the_documented_fifteen_hundred_and_forty_four_mebibytes(
     clean_environment: pytest.MonkeyPatch,
 ) -> None:
     settings = limit_settings_with(clean_environment)
 
     assert settings.document_upload_memory_budget_bytes == DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES
-    assert DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES == 1288 * MEBIBYTE
+    assert DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES == 1544 * MEBIBYTE
 
 
 def test_document_upload_memory_safety_margin_is_the_measured_two_times() -> None:
     assert DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN == 2
 
 
-def test_default_caps_size_limits_and_url_subprocess_exactly_fill_the_default_memory_budget(
+def test_default_caps_size_limits_url_subprocess_and_article_slot_exactly_fill_the_default_memory_budget(
     clean_environment: pytest.MonkeyPatch,
 ) -> None:
     settings = limit_settings_with(clean_environment)
 
-    assert settings.upload_worst_case_bytes == (4 * 25 + 2 * 48 + 1 * 448) * MEBIBYTE * 2
+    assert settings.upload_worst_case_bytes == (4 * 25 + 2 * 48 + 1 * 448 + 1 * 128) * MEBIBYTE * 2
     assert settings.upload_worst_case_bytes == SHIPPED_UPLOAD_WORST_CASE_BYTES
     assert settings.document_upload_memory_budget_bytes == settings.upload_worst_case_bytes
 
@@ -1945,6 +1956,7 @@ def test_raising_the_budget_makes_room_for_a_larger_size_limit(
             * MAX_DOCUMENT_BYTES
             * DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN
             + SHIPPED_RECORDING_UPLOAD_SHARE_BYTES
+            + SHIPPED_ARTICLE_URL_SHARE_BYTES
         ),
         DECKLY_LIMIT_DOCUMENT_WORKER_MEMORY_BUDGET_BYTES=str(LARGEST_DOCUMENT_WORKER_BUDGET_BYTES),
     )
@@ -1966,12 +1978,18 @@ def test_memory_budget_error_reports_every_term_and_the_single_process_assumptio
     assert f"recording size limit ({SHIPPED_RECORDING_MAX_BYTES} bytes)" in message
     assert "safety margin (2)" in message
     assert f"measured yt-dlp and deno peak ({RECORDING_URL_SUBPROCESS_PEAK_BYTES} bytes)" in message
+    assert "article url fetch concurrency cap (1)" in message
+    assert f"page, text and extractor peak ({ARTICLE_URL_SLOT_PEAK_BYTES} bytes)" in message
     worst_case = (
-        4 * MAX_DOCUMENT_BYTES + 2 * SHIPPED_RECORDING_MAX_BYTES + RECORDING_URL_SUBPROCESS_PEAK_BYTES
+        4 * MAX_DOCUMENT_BYTES
+        + 2 * SHIPPED_RECORDING_MAX_BYTES
+        + RECORDING_URL_SUBPROCESS_PEAK_BYTES
+        + ARTICLE_URL_SLOT_PEAK_BYTES
     ) * 2
     assert f"is {worst_case} bytes" in message
     assert "DECKLY_LIMIT_RECORDING_UPLOAD_MAX_CONCURRENCY" in message
     assert "DECKLY_LIMIT_RECORDING_URL_MAX_CONCURRENCY" in message
+    assert "DECKLY_LIMIT_ARTICLE_URL_MAX_CONCURRENCY" in message
     assert "DECKLY_LIMIT_RECORDING_MAX_BYTES" in message
     assert f"budget ({DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES} bytes)" in message
     assert "DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES" in message
@@ -2122,7 +2140,8 @@ def test_recording_size_limit_no_longer_moves_the_generation_worker_check(
         DECKLY_LIMIT_RECORDING_MAX_BYTES=str(MAX_RECORDING_BYTES),
         DECKLY_LIMIT_RECORDING_UPLOAD_MAX_CONCURRENCY="1",
         DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES=str(
-            (4 + 2 * MAX_RECORDING_BYTES + RECORDING_URL_SUBPROCESS_PEAK_BYTES) * 2
+            (4 + 2 * MAX_RECORDING_BYTES + RECORDING_URL_SUBPROCESS_PEAK_BYTES + ARTICLE_URL_SLOT_PEAK_BYTES)
+            * 2
         ),
     )
 
@@ -2210,6 +2229,7 @@ def test_largest_recording_size_limit_and_concurrency_are_accepted_with_a_budget
                 4 * SHIPPED_DOCUMENT_MAX_BYTES
                 + (MAX_RECORDING_UPLOAD_CONCURRENCY + 1) * MAX_RECORDING_BYTES
                 + RECORDING_URL_SUBPROCESS_PEAK_BYTES
+                + ARTICLE_URL_SLOT_PEAK_BYTES
             )
             * 2
         ),
@@ -2278,7 +2298,7 @@ def test_default_upload_and_url_slots_fit_the_default_memory_budget_with_the_doc
 ) -> None:
     settings = limit_settings_with(clean_environment)
 
-    assert settings.upload_worst_case_bytes == (4 * 25 + 1 * 48 + 1 * 48 + 1 * 448) * 2 * MEBIBYTE
+    assert settings.upload_worst_case_bytes == (4 * 25 + 1 * 48 + 1 * 48 + 1 * 448 + 1 * 128) * 2 * MEBIBYTE
     assert settings.upload_worst_case_bytes == DEFAULT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES
 
 
@@ -2321,6 +2341,7 @@ def test_largest_recording_url_concurrency_is_accepted_with_a_budget_that_holds_
         4 * SHIPPED_DOCUMENT_MAX_BYTES
         + (1 + MAX_RECORDING_URL_CONCURRENCY) * SHIPPED_RECORDING_MAX_BYTES
         + MAX_RECORDING_URL_CONCURRENCY * RECORDING_URL_SUBPROCESS_PEAK_BYTES
+        + ARTICLE_URL_SLOT_PEAK_BYTES
     )
     settings = limit_settings_with(
         clean_environment,
@@ -2380,6 +2401,7 @@ def url_slots_worst_case(url_slots: int) -> int:
         4 * SHIPPED_DOCUMENT_MAX_BYTES
         + (1 + url_slots) * SHIPPED_RECORDING_MAX_BYTES
         + url_slots * RECORDING_URL_SUBPROCESS_PEAK_BYTES
+        + ARTICLE_URL_SLOT_PEAK_BYTES
     )
     return held * DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN
 
@@ -2715,3 +2737,114 @@ def test_transcript_ttl_must_be_a_positive_number(clean_environment: pytest.Monk
 
     with pytest.raises(ValidationError, match="transcript_ttl_seconds"):
         CacheSettings()
+
+
+def test_article_url_limits_default_to_the_documented_values(clean_environment: pytest.MonkeyPatch) -> None:
+    settings = limit_settings_with(clean_environment)
+
+    assert settings.article_url_max_concurrency == DEFAULT_ARTICLE_URL_MAX_CONCURRENCY == 1
+    assert settings.article_url_timeout_seconds == DEFAULT_ARTICLE_URL_TIMEOUT_SECONDS == 30
+    assert settings.article_url_fetches_per_window == DEFAULT_ARTICLE_URL_FETCHES_PER_WINDOW == 10
+    assert (
+        settings.article_url_fetches_per_address_per_window
+        == DEFAULT_ARTICLE_URL_FETCHES_PER_ADDRESS_PER_WINDOW
+        == 30
+    )
+    assert (
+        settings.article_url_server_fetches_per_window == DEFAULT_ARTICLE_URL_SERVER_FETCHES_PER_WINDOW == 500
+    )
+    assert settings.article_url_window_seconds == DEFAULT_ARTICLE_URL_WINDOW_SECONDS == 3600
+
+
+def test_article_url_slot_is_the_measured_extractor_peak_with_the_page_and_text_rounded_up() -> None:
+    assert ARTICLE_URL_SLOT_PEAK_BYTES == 128 * MEBIBYTE
+
+
+def test_a_second_article_url_slot_does_not_fit_the_default_memory_budget(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="article url fetch concurrency cap \\(2\\)"):
+        limit_settings_with(clean_environment, DECKLY_LIMIT_ARTICLE_URL_MAX_CONCURRENCY="2")
+
+
+@pytest.mark.parametrize("article_slots", [1, 2, MAX_ARTICLE_URL_CONCURRENCY])
+def test_budget_exactly_holding_the_article_slots_is_accepted_and_one_byte_less_is_not(
+    clean_environment: pytest.MonkeyPatch, article_slots: int
+) -> None:
+    held = (
+        4 * SHIPPED_DOCUMENT_MAX_BYTES
+        + 2 * SHIPPED_RECORDING_MAX_BYTES
+        + RECORDING_URL_SUBPROCESS_PEAK_BYTES
+        + article_slots * ARTICLE_URL_SLOT_PEAK_BYTES
+    ) * DOCUMENT_UPLOAD_MEMORY_SAFETY_MARGIN
+    settings = limit_settings_with(
+        clean_environment,
+        DECKLY_LIMIT_ARTICLE_URL_MAX_CONCURRENCY=str(article_slots),
+        DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES=str(held),
+    )
+
+    assert settings.upload_worst_case_bytes == held
+    with pytest.raises(ValidationError, match="exceeds the upload memory budget"):
+        limit_settings_with(
+            clean_environment,
+            DECKLY_LIMIT_ARTICLE_URL_MAX_CONCURRENCY=str(article_slots),
+            DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES=str(held - 1),
+        )
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("DECKLY_LIMIT_ARTICLE_URL_MAX_CONCURRENCY", "0"),
+        ("DECKLY_LIMIT_ARTICLE_URL_MAX_CONCURRENCY", str(MAX_ARTICLE_URL_CONCURRENCY + 1)),
+        ("DECKLY_LIMIT_ARTICLE_URL_TIMEOUT_SECONDS", "0"),
+        ("DECKLY_LIMIT_ARTICLE_URL_TIMEOUT_SECONDS", str(MAX_ARTICLE_URL_TIMEOUT_SECONDS + 1)),
+        ("DECKLY_LIMIT_ARTICLE_URL_TIMEOUT_SECONDS", "2.5"),
+        ("DECKLY_LIMIT_ARTICLE_URL_FETCHES_PER_WINDOW", "0"),
+        ("DECKLY_LIMIT_ARTICLE_URL_FETCHES_PER_ADDRESS_PER_WINDOW", "-1"),
+        ("DECKLY_LIMIT_ARTICLE_URL_SERVER_FETCHES_PER_WINDOW", "0"),
+        ("DECKLY_LIMIT_ARTICLE_URL_WINDOW_SECONDS", ""),
+    ],
+)
+def test_article_url_limit_outside_its_bounds_is_rejected(
+    clean_environment: pytest.MonkeyPatch, variable: str, value: str
+) -> None:
+    with pytest.raises(ValidationError, match=variable.removeprefix("DECKLY_LIMIT_").lower()):
+        limit_settings_with(clean_environment, **{variable: value})
+
+
+def test_article_url_timeout_at_its_maximum_is_accepted(clean_environment: pytest.MonkeyPatch) -> None:
+    settings = limit_settings_with(
+        clean_environment, DECKLY_LIMIT_ARTICLE_URL_TIMEOUT_SECONDS=str(MAX_ARTICLE_URL_TIMEOUT_SECONDS)
+    )
+
+    assert settings.article_url_timeout_seconds == MAX_ARTICLE_URL_TIMEOUT_SECONDS
+
+
+def test_per_address_article_url_limit_below_the_per_client_one_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="per-address article url fetch limit"):
+        limit_settings_with(
+            clean_environment,
+            DECKLY_LIMIT_ARTICLE_URL_FETCHES_PER_WINDOW="11",
+            DECKLY_LIMIT_ARTICLE_URL_FETCHES_PER_ADDRESS_PER_WINDOW="10",
+        )
+
+
+def test_server_article_url_limit_below_the_per_address_one_is_rejected(
+    clean_environment: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="server-wide article url fetch limit"):
+        limit_settings_with(clean_environment, DECKLY_LIMIT_ARTICLE_URL_SERVER_FETCHES_PER_WINDOW="29")
+
+
+def test_equal_article_url_limits_at_every_level_are_accepted(clean_environment: pytest.MonkeyPatch) -> None:
+    settings = limit_settings_with(
+        clean_environment,
+        DECKLY_LIMIT_ARTICLE_URL_FETCHES_PER_WINDOW="7",
+        DECKLY_LIMIT_ARTICLE_URL_FETCHES_PER_ADDRESS_PER_WINDOW="7",
+        DECKLY_LIMIT_ARTICLE_URL_SERVER_FETCHES_PER_WINDOW="7",
+    )
+
+    assert settings.article_url_server_fetches_per_window == 7

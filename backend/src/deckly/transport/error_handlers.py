@@ -17,6 +17,9 @@ from deckly.application.exceptions import (
     UpstreamUnavailableError,
 )
 from deckly.domain.exceptions import (
+    ArticleBlockedByRobotsError,
+    ArticleHasNoTextError,
+    ArticleUnavailableError,
     DocumentNotFoundError,
     DocumentNotSupportedForGenerationError,
     DocumentRegenerationUnsupportedError,
@@ -29,6 +32,7 @@ from deckly.domain.exceptions import (
     RecordingTooLongError,
     RecordingUnavailableError,
     TopicRejectedError,
+    UnsupportedArticleUrlError,
     UnsupportedDocumentError,
     UnsupportedRecordingUrlError,
 )
@@ -106,6 +110,18 @@ PROBLEM_KINDS: Mapping[type[Exception], ProblemKind] = {
     ),
     RecordingUnavailableError: ProblemKind(
         HTTPStatus.UNPROCESSABLE_ENTITY, ErrorCode.RECORDING_UNAVAILABLE, "Recording unavailable"
+    ),
+    UnsupportedArticleUrlError: ProblemKind(
+        HTTPStatus.UNPROCESSABLE_ENTITY, ErrorCode.UNSUPPORTED_ARTICLE_URL, "Unsupported article URL"
+    ),
+    ArticleUnavailableError: ProblemKind(
+        HTTPStatus.UNPROCESSABLE_ENTITY, ErrorCode.ARTICLE_UNAVAILABLE, "Article unavailable"
+    ),
+    ArticleBlockedByRobotsError: ProblemKind(
+        HTTPStatus.UNPROCESSABLE_ENTITY, ErrorCode.ARTICLE_BLOCKED_BY_ROBOTS, "Article blocked by robots.txt"
+    ),
+    ArticleHasNoTextError: ProblemKind(
+        HTTPStatus.UNPROCESSABLE_ENTITY, ErrorCode.ARTICLE_HAS_NO_TEXT, "Article has no text"
     ),
 }
 

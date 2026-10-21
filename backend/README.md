@@ -16,7 +16,8 @@ src/deckly/
   infrastructure/    adapters: async SQLAlchemy + asyncpg, Arq/Redis, JSON logging, web search and
                      source parsing (Tavily), the LLM card generator (Anthropic, DeepSeek or
                      Gemini), S3-compatible document storage, recording fetches from YouTube
-                     (yt-dlp behind an egress proxy), recording transcription (ffmpeg and
+                     (yt-dlp behind an egress proxy), article fetches from any web page (the same
+                     proxy, trafilatura in its own process), recording transcription (ffmpeg and
                      faster-whisper, each in its own process) and the retry/circuit-breaker layer
   worker/            the two Arq worker entrypoints (generation, transcription), their settings and
                      composition root
@@ -949,7 +950,11 @@ lives in the margin inside the budget. Measure the subprocess peak on the deploy
 the constant if Linux differs. Four concurrent document uploads is still far above what per-client limits produce with no
 production traffic; revisit with `deckly_gate_rejections_total{gate="document_upload"}` if 4 proves
 tight, by raising the budget to what the container really has rather than by trimming the margin.
-The 2 is the margin measured above and is not a setting. The budget is an assumption about the
+_Since DEC-93 it also carries the article fetch slot_ (`DECKLY_LIMIT_ARTICLE_URL_MAX_CONCURRENCY`, 1):
+the page, its text and the extractor process, 128 MiB (`ARTICLE_URL_SLOT_PEAK_BYTES`, see "Articles
+from a URL"), so the defaults need (4 x 25 + 1 x 48 + 1 x 48 + 1 x 448 + 1 x 128) x 2 = **1,544 MiB**,
+the new default budget, again with nothing to spare, and the container assumption moves to about
+2.25 GiB. The 2 is the margin measured above and is not a setting. The budget is an assumption about the
 container, not something the process reads from it: set it to what the container can actually spare.
 **The check assumes a single process.** The limit and the budget are per process, so with several
 workers or replicas sharing one container's memory, divide the budget by their number (or lower the
@@ -1645,6 +1650,12 @@ installed, so it uses its standard-library networking and the system CA store.
 3. **The deployment should still deny internal ranges** to the API container's egress (RFC 1918,
    link-local and the metadata address), as a third line (see "Production deployment").
 
+Since DEC-93 the same proxy serves article fetches with a policy that allows any public domain name,
+and two hardenings that matter there were applied to YouTube's fetches too: Azure's WireServer
+address (`168.63.129.16`) is refused, and names are resolved fully qualified so a resolver's search
+list never applies (see "Articles from a URL" → "SSRF without an allowlist"). The refusal metric and
+log names are per fetcher, so `deckly_recording_url_egress_refusals_total` counts YouTube's only.
+
 The tests demonstrate this rather than assert that an allowlist exists: the real proxy, with a
 resolver that answers `127.0.0.1`, `169.254.169.254`, `10.1.2.3`, `::1` or `::ffff:127.0.0.1` for
 `www.youtube.com`, refuses the tunnel while a listener on that loopback port records **zero
@@ -1737,6 +1748,244 @@ deadline) and stores a document nobody reads, swept like any other.
   decision, not code.
 - **Request body size:** like every JSON endpoint here, the body is read before it is validated;
   the reverse proxy's body limit is what bounds it.
+
+## Articles from a URL
+
+`POST /v1/documents/from-url` (DEC-93) takes `{"url": "<any web page>"}`, fetches the page, extracts
+its readable article text and stores that text as a document. It is `UploadDocument` wired a fourth
+time, like DEC-85, so the result goes through the same gate, `documents` row, object key, retention
+and sweep as an upload; nothing about storage is new. The stored object is the extracted UTF-8 text
+(`contentType` `text/plain`), and the row keeps the `https` address it was read from after redirects
+(`source_url`, a nullable column added by migration `8c4e2f7a1b93`; `Document` requires it exactly
+when the format is text). A generation from it goes down the ordinary document path:
+`DocumentTextParser` reads the text as one unit and cites it as a `kind: "web"` source with that
+URL and the fetch time, so the card generator, moderation and stored results needed no change, and
+the preview screen can link a card back to the article. The contract is in `api-contract.md`; the
+code is `domain/article_url.py` (the link), `infrastructure/article_url/` (the fetcher, robots.txt,
+the extractor runner and the extractor process) and the shared egress proxy.
+
+### JavaScript-rendered pages are not supported
+
+**The server reads the HTML a site sends and runs no JavaScript.** A page that builds its content
+in the browser (a single-page application, many dashboards, some news sites behind a client-side
+paywall) has no article in its HTML, and the request fails cleanly with `422 ARTICLE_HAS_NO_TEXT`,
+whose message says so; nothing is stored and no generation unit is spent. Server-rendered pages,
+including ones that also ship scripts, are extracted normally. A headless browser was ruled out for
+v1: it would put a JavaScript engine that executes arbitrary sites' code in the API container, its
+memory is measured in hundreds of MiB per page, and every network request it makes would need the
+same SSRF controls as the fetch itself. `deckly_article_url_fetches_total{outcome="no_text"}` shows
+how often users hit this.
+
+### Extraction: trafilatura, precision mode, in its own process
+
+Researched to the depth of DEC-75's PDF choice, on eleven real pages (English and Russian
+Wikipedia, MDN, the Python docs, Paul Graham, gwern.net, ncase.me, web.dev, a Guardian section page,
+a NASA 404 page and a JavaScript-only app):
+
+| Library                       | License    | Installed weight   | Result                                                                                                                                                                                                               |
+| ----------------------------- | ---------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **trafilatura 2.3.1**         | Apache-2.0 | 17 packages, 67 MB | Cleanest output: title and body, with "Jump to content", menus, cookie banners and footers gone. Typed (`py.typed`), four releases since June 2026. Best single tool by ROUGE-LSum in Bevendorff et al. (SIGIR 2023) |
+| readability-lxml 0.9          | Apache-2.0 | 5 packages, 22 MB  | Lost most of non-standard layouts (gwern 27k of 133k characters, ncase 2.4k of 22k) and dropped MDN's introduction. Untyped; depends on chardet (LGPL)                                                               |
+| resiliparse 1.0.9             | Apache-2.0 | 6 packages, 21 MB  | Fastest (about 8 ms a page) but keeps breadcrumbs, "Jump to content" and "Retrieved from". Untyped native C++, the crash argument DEC-75 made against pypdfium2                                                      |
+| justext 3.0.2                 | BSD-2      | 3 packages, 23 MB  | Needs the page's language up front (a stop-word list), which a multilingual app does not know. Low recall (Python docs 12k of 31k)                                                                                   |
+| boilerpy3 1.0.7               | Apache-2.0 | none, 136 KB       | Last release 2023, untyped, low recall (Wikipedia 13k of 26k)                                                                                                                                                        |
+| Standard library `HTMLParser` | PSF        | none               | Dumps menus, footers and cookie text along with the article; that boilerplate would become cards                                                                                                                     |
+
+**Precision mode** (`favor_precision=True`) is what separates "an article" from "a page": on the
+Guardian section page, the NASA 404 and the JavaScript-only app it returns nothing, where the default
+mode stores their navigation as text, and on real articles it keeps 97–100% of what the default
+keeps. The cost is pages that are interactive explainers rather than articles: ncase.me's
+"How to Remember Anything Forever-ish" kept 1,880 of 21,769 characters. Comments are left out,
+tables kept.
+
+**A process per extraction**, not a thread. trafilatura walks the tree in Python holding the GIL:
+70–170 ms on real pages, but 7 s for 2 MiB of tiny `<div>`s and 16 s for 5 MiB, during which an
+in-process extraction would stall every other request on the API's event loop; and lxml is
+libxml2, C code whose crash would take the API down. `extraction.py` runs
+`python -I -m deckly.infrastructure.article_url.extractor` the way the transcription engine runs
+(`transcription/process.py`'s `supervise`): an argument list, an empty `PATH`, a fresh temporary
+working directory and `HOME`, its own process group, killed on a 15-second deadline or on
+cancellation, its JSON answer read through a cap and validated with pydantic. The page goes to it as
+a file and the HTTP charset as a validated `--charset=` argument. One extraction costs about 0.16 s
+and 50 MiB for a typical page, interpreter start-up included. An import-linter contract makes the
+extractor the only module that may import trafilatura or lxml.
+
+**Caps before parsing.** libxml2's tree costs memory per node and per attribute, not per byte:
+2 MiB of a real article repeated cost 112 MiB, but 2 MiB of `<span>`s with 2,000 boolean attributes
+each cost 342 MiB and 4 s, and the same at 1 MiB still 206 MiB. So the bytes are capped, and inside
+the extractor process, before trafilatura sees them, so are the nodes and the attributes:
+
+| Limit                     | Value              | Why                                                                                                                 |
+| ------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| HTML, after decompression | 2 MiB              | Four times the largest page sampled (the Guardian's 546 KB); the Web Almanac's 90th percentile is 147 KB compressed |
+| Nodes (`<` characters)    | 50,000             | Eight times the most in any sampled page (6,071, the Python docs)                                                   |
+| Attributes in start tags  | 25,000             | Five times the most sampled (5,199, Wikipedia); boolean attributes count, a quoted value with spaces counts once    |
+| Stored text               | 200,000 characters | The most any job can be configured to read (`MAX_DOCUMENT_SOURCE_CHARACTERS`), cut at a word                        |
+
+Past any of them the page is **cut, not refused**, and `deckly_article_url_truncations_total` counts
+which limit cut it: an article's text is nearly always early in its HTML, so a long page still
+yields its article, and a page that declares a gigabyte costs 2 MiB of reading. The node and
+attribute counting is two linear regular-expression passes (the attribute pattern is anchored and
+possessive; the first version was quadratic on a tag full of whitespace, which the bug hunt found),
+about 40 ms for 2 MiB of worst-case markup. With the caps, the worst shapes measured peaked at
+**122 MiB** of resident memory and 1.6 s (2,400 tags with 100 long attributes each, under both caps),
+real pages at 50–90 MiB. Stored text then goes through DEC-75's budget at generation time like a
+PDF's: `DECKLY_LIMIT_DOCUMENT_MAX_SOURCE_CHARACTERS` (40,000 by default), cut at a word, so a
+133,000-character essay generates from its first 40,000.
+
+### SSRF without an allowlist
+
+DEC-85 could allowlist YouTube's hosts and rebuild the URL from a video id; an article URL can be
+anything, so the protections that were a backstop there carry all the weight here. What DEC-85
+provided that is general-purpose, and reused as is: the per-fetch `CONNECT` proxy with a random
+credential, resolve once and require **every** answer to be public, connect to the address that was
+checked, TLS end to end, a new tunnel (and the same checks) for every redirect, and caps on tunnels
+and bytes. What was allowlist-specific: the host check before any DNS lookup, and the rebuilt URL.
+In their place:
+
+1. **The link is parsed strictly** (`domain/article_url.py`): `http` or `https`, the standard port
+   only, no credentials, visible ASCII only, a host of two or more LDH labels whose last label is
+   alphabetic or an `xn--` label. That last rule is the WHATWG URL standard's "ends in a number"
+   test: `getaddrinfo` reads `2130706433`, `0x7f.1`, `017700000001` and `127.1` as `127.0.0.1`, and
+   none of them get past it. IP literals of either family, and special-use names (`localhost`,
+   `.local`, which would go to multicast DNS, `.internal`, `.home.arpa` and all of `.arpa`, `.test`,
+   `.invalid`, `.example`, `.onion`, `.alt`), are refused before anything is counted. A fuzz of
+   200,000 generated links found no case where this parser and httpx2 disagree about the host.
+2. **The proxy's policy for articles** (`PublicHostPolicy` in `egress.py`) applies the same host
+   rule to every `CONNECT`, port 443 only, so a redirect that slipped past the fetcher still could
+   not name an address.
+3. **The address check** is DEC-85's, with two additions that applied to YouTube too and were
+   retrofitted there: Azure's WireServer, `168.63.129.16`, which is a public address that is local
+   to the VM's host and passed `ipaddress`'s `is_global`, is refused by name (as are its IPv4-mapped
+   and NAT64 forms); and names are resolved **fully qualified** (with a trailing dot), so a resolver's
+   search list (Kubernetes' `ndots:5` turns `kubernetes.default` into a cluster service) is never
+   applied.
+4. **Redirects are followed by the fetcher, by hand** (at most five): each `Location` is resolved
+   against the current URL, percent-encoded the way a browser does, and parsed with the same rules,
+   except that plain `http` is refused rather than upgraded. A redirect to an address, a local
+   name, another port or `http` is never attempted.
+5. **No oracle.** An internal address, a name that does not resolve and a refused redirect all answer
+   `422 ARTICLE_UNAVAILABLE` with the same message; which check refused is in the log and in
+   `deckly_article_url_egress_refusals_total`, never in the response.
+6. **The deployment should still deny internal ranges** to the API container's egress, now for both
+   fetchers (see "Production deployment").
+
+`http` links are fetched over `https`: the proxy only tunnels, and forwarding plain HTTP would mean
+parsing and relaying whole requests (with their smuggling surface) with no integrity on the content.
+A site that does not answer over `https` is a clear `422` saying so, not a retryable `503`; an `http`
+link to a site that does, such as `http://paulgraham.com/…`, works.
+
+The tests demonstrate this through the real proxy, the real httpx2 client and a real TLS server
+(certificates issued per test session with `openssl`, so `openssl` is a test dependency like
+ffmpeg): a page whose host resolves to `127.0.0.1`, `169.254.169.254`, RFC 1918, CGNAT,
+`168.63.129.16`, `::1`, `::ffff:127.0.0.1`, `fd00:ec2::254` or `fe80::1` is refused while a listener
+standing in for that address records **zero connections**, and a positive control with a public
+answer reaches the same listener. A redirect chain ending at the metadata endpoint, redirects to
+address literals, numeric and hexadecimal host forms, local names, `http`, another port and
+credentials, a DNS rebinding between tunnels, a robots.txt redirect to an internal host and an
+internal answer mixed with a public one are each refused with the internal listener untouched. The
+integration suite runs the same attacks through the whole app (Postgres, Redis, object storage) and
+checks nothing was stored; the live suite fetches `https://169.254.169.254.nip.io/` with the real
+resolver and sees it refused.
+
+### Probe before parse
+
+The response headers are the cheap check: only `200` continues; a type other than `text/html` or
+`application/xhtml+xml` (a PDF, an image) is `415` before the body is read; `4xx` is `422`, and
+`408`, `429` and `5xx` are a retryable `503`. The body is then read through a counter that stops at
+2 MiB, whatever `Content-Length` says. Only `gzip` is advertised, and it is inflated by the fetcher
+with `zlib`'s output limit rather than by httpx, so a gzip bomb (128 MiB of padding in 128 KiB) stops
+at 2 MiB of output, with Python's peak allocation under 12 MiB in the test; other encodings are
+refused. The proxy's byte cap (2 MiB plus 8 MiB for robots.txt files, redirects and TLS) is the
+backstop. A deadline covers the whole fetch (`DECKLY_LIMIT_ARTICLE_URL_TIMEOUT_SECONDS`, 30 by
+default, 1 to 120), and each request has a 10-second timeout.
+
+### robots.txt: honoured
+
+There is no settled norm for a fetch a user asked for. Google documents that its user-triggered
+fetchers (Site Verifier, Feedfetcher, NotebookLM) "generally ignore robots.txt", OpenAI says its
+rules "may not apply" to ChatGPT-User, and Perplexity-User ignores it; Anthropic says its bots,
+Claude-User among them, honour it. Deckly is closest to the last case: it sends the page's text to a
+third-party model and turns it into derived content, which is exactly the use publishers express
+opt-outs about, increasingly through robots.txt. So it honours it, at the cost of one small request
+per host:
+
+- Before each host is fetched (the first and every redirect target), `https://<host>/robots.txt` is
+  read through the same proxy, cached for the fetch, and evaluated with **protego** for the product
+  token `Deckly`, falling back to the `*` group. The User-Agent is honest:
+  `Mozilla/5.0 (compatible; Deckly/1.0; user-requested fetch)`.
+- RFC 9309's status rules: `2xx` is parsed (the first 500 KiB, the RFC's minimum; a UTF-8 byte-order
+  mark is ignored); `4xx` means no rules, so everything is allowed; `5xx` or a network failure
+  means complete disallow, which is `503` with `Retry-After: 60` here; up to five redirects are
+  followed, and more, or a redirect to something not fetched, counts as unavailable.
+- A disallowed page is `422 ARTICLE_BLOCKED_BY_ROBOTS` and is never requested.
+- No cache across fetches: RFC 9309 allows up to 24 hours, but at these budgets one extra request per
+  fetch is cheap, and a cache would be shared state keyed by arbitrary hosts.
+- `Crawl-delay` is not applied: it is not in RFC 9309, and this is one user-triggered request, not a
+  crawl.
+
+**protego** (new dependency, 0.7.0, BSD-3, no dependencies of its own, typed, 40 KB, maintained by
+the Scrapy project) rather than the standard library's `urllib.robotparser`, which is not RFC 9309:
+it applies the first matching rule instead of the longest, and ignores `*` and `$`. Checked here:
+it refused `/private/public/a` under `Disallow: /private` + `Allow: /private/public`, and allowed
+`/report.pdf` under `Disallow: /*.pdf$`. protego parses in the API process; a fuzz of 20,000 random
+files raised nothing and took at most 1 ms each, and 500 KiB of rules parses in under 50 ms.
+
+### Budget, capacity and memory
+
+**Its own budget**, separate from uploads and from YouTube fetches: 10 per client, 30 per address and
+**500 per hour for the whole server** (`DECKLY_LIMIT_ARTICLE_URL_*`, keys `deckly:article-url:*`,
+counted in one `MULTI` by the same `RedisUrlFetchLimiter` as recordings, now taking its keys and
+limit labels as configuration). Looser than YouTube's because a fetch is about a second and 50 MiB,
+not a 400 MiB subprocess, and spends no single platform's standing; still server-wide, because every
+fetch is the server's bandwidth on behalf of an anonymous client, and 500 an hour also bounds how
+hard the service could be pointed at one third-party site. An unsupported link is not counted.
+
+**One fetch at a time per API process** (`DECKLY_LIMIT_ARTICLE_URL_MAX_CONCURRENCY`, default 1, at
+most 4, gate `article_url`), refused at once with `503` and `Retry-After: 5`. A slot holds the page
+(2 MiB), the text (at most 200,000 characters, 0.8 MB) and the extractor process (122 MiB at worst,
+measured on macOS as above), rounded up to **128 MiB** (`ARTICLE_URL_SLOT_PEAK_BYTES`), inside the
+same x 2 margin as every term of the upload memory check. That raised the default
+`DECKLY_LIMIT_DOCUMENT_UPLOAD_MEMORY_BUDGET_BYTES` from 1,288 to **1,544 MiB**:
+(4 x 25 + 1 x 48 + 1 x 48 + 1 x 448 + 1 x 128) x 2. The container assumption grows from about 2 GiB
+to about 2.25 GiB. Measure the extractor on the deployment target, as for yt-dlp.
+
+### Deduplication: none
+
+Fetching the same URL twice fetches it twice. A cache keyed by URL would save about a second, but
+pages change (news is updated, articles corrected) and would be served stale for as long as it
+lived; documents are scoped to one client, so a shared cache would also let one client learn, from
+timing, that another had fetched a URL. DEC-89's transcript cache is worth it because transcription
+costs minutes of CPU; an article fetch does not. A retry stores a second copy, as with recordings.
+
+### New dependencies
+
+- **trafilatura** 2.3.1 (Apache-2.0 since 1.8; it was GPL-3.0 before), and what it brings, all new
+  to `uv.lock`: lxml 6.1.3 (BSD-3, bundles libxml2 and libxslt, MIT), lxml-html-clean (BSD-3),
+  justext (BSD-2), htmldate (Apache-2.0), courlan (Apache-2.0), babel (BSD-3, 33 MB of locale data,
+  pulled in by courlan), dateparser (BSD-3), regex (Apache-2.0 and CNRI), python-dateutil
+  (Apache-2.0 or BSD), pytz (MIT), tzlocal (MIT), six (MIT), tld (MPL-1.1, GPL-2.0 or LGPL-2.1, used
+  under MPL-1.1), charset-normalizer (MIT), urllib3 (MIT) and certifi (MPL-2.0): 17 packages, about
+  67 MB installed. trafilatura's own downloader (urllib3) is never called; the import-linter contract
+  keeps every one of them inside the extractor process. **libxml2's maintenance is a known risk**:
+  its maintainer stopped honouring security embargoes in 2025 and stepped down in September 2025.
+  Releases have continued (2.15.x, with CVE fixes in 2026), lxml ships its own build of it, so fixes
+  arrive as lxml releases that `make audit` sees, and the process boundary contains a crash.
+- **protego** 0.7.0 (BSD-3, no dependencies), above.
+
+### Not done here
+
+- **Frontend:** the app does not call the endpoint yet; its generated contract types are not
+  regenerated.
+- **A link to a PDF** is `415` today; handing such a response to the document upload path (it is a
+  file the user could have uploaded) is a natural follow-up.
+- **Non-ASCII links:** the endpoint takes visible ASCII, as a browser's `URL.href` produces; raw
+  Unicode hosts and paths from a share sheet must be encoded by the app. Raw UTF-8 in a redirect's
+  `Location` is percent-encoded and followed.
+- **Paywalls and bot walls:** a site that answers our honest User-Agent with `403`, a login page or a
+  challenge page gets `422 ARTICLE_UNAVAILABLE` or `ARTICLE_HAS_NO_TEXT`; no browser is impersonated.
+- **Terms of use:** sites' terms vary; robots.txt is honoured, which is a technical courtesy, not a
+  legal review. It needs one before real users, like YouTube's.
 
 ## Transcription
 
@@ -2400,11 +2649,14 @@ under test, while memory and eviction separation is a property of the Redis depl
   `documents/` cannot be a second line: a document a client keeps generating from has no fixed
   lifetime (see "Generating from a document"), and a rule that deletes its object fails the next
   job with `DOCUMENT_NOT_FOUND`.
-- **Deny internal ranges to the API's egress.** The recording fetch's proxy already refuses them
-  (see "Recordings from a URL"); a security group or firewall rule that blocks RFC 1918, link-local
-  (including `169.254.169.254`) and the cloud's metadata endpoints is the layer under it.
-- **The reverse proxy must allow the fetch's response time** on `/v1/recordings/from-url`, at least
-  `DECKLY_LIMIT_RECORDING_URL_TIMEOUT_SECONDS` plus the upload to the object store.
+- **Deny internal ranges to the API's egress.** The egress proxy behind the recording and article
+  fetches already refuses them (see "Recordings from a URL" and "Articles from a URL"); a security
+  group or firewall rule that blocks RFC 1918, link-local (including `169.254.169.254`), the
+  platform's own addresses (Azure's `168.63.129.16`) and the cloud's metadata endpoints is the layer
+  under it. It matters more for articles, where no allowlist stands in front of the address check.
+- **The reverse proxy must allow the fetch's response time** on `/v1/recordings/from-url` and
+  `/v1/documents/from-url`, at least `DECKLY_LIMIT_RECORDING_URL_TIMEOUT_SECONDS` and
+  `DECKLY_LIMIT_ARTICLE_URL_TIMEOUT_SECONDS` plus the upload to the object store.
 - **The reverse proxy must allow the body.** At least `DECKLY_LIMIT_DOCUMENT_MAX_BYTES` plus 16 KiB
   on `/v1/documents` (nginx's default `client_max_body_size` is 1 MiB), and a request-body read
   timeout: uvicorn does not bound how long a client may take to send its body, so a slow sender
@@ -2449,7 +2701,7 @@ transcription queue's depth and watch the real-time factor histogram (see "Trans
 make check          # suppression guard, ruff format --check, ruff check (incl. complexity budget),
                     # mypy --strict, import-linter, vulture
 make fix            # ruff format + ruff check --fix
-make test           # pytest with coverage, no infrastructure needed
+make test           # pytest with coverage, no infrastructure needed; the article fetch tests need openssl
 make test-integration  # Postgres + Redis tests, appends to the coverage data; needs make up && make migrate,
                        # and ffmpeg and make model for the transcription tests
 make coverage-gate  # coverage floors; run after make test and make test-integration

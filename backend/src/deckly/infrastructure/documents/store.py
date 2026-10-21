@@ -74,6 +74,7 @@ def restore_document(row: DocumentRow) -> Document:
         document_format=document_format,
         uploaded_at=row.uploaded_at,
         duration_seconds=row.duration_seconds,
+        source_url=row.source_url,
     )
 
 
@@ -96,6 +97,7 @@ class PostgresDocumentStore:
                     size_bytes=document.size_bytes,
                     content_type=document.document_format,
                     duration_seconds=document.duration_seconds,
+                    source_url=document.source_url,
                     status=DocumentStatus.PENDING,
                     uploaded_at=document.uploaded_at,
                     used_at=None,

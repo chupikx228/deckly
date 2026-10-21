@@ -132,3 +132,19 @@ class UnsupportedRecordingUrlError(InvalidDocumentError):
 
 class RecordingUnavailableError(InvalidDocumentError):
     pass
+
+
+class UnsupportedArticleUrlError(InvalidDocumentError):
+    pass
+
+
+class ArticleUnavailableError(InvalidDocumentError):
+    pass
+
+
+class ArticleBlockedByRobotsError(InvalidDocumentError):
+    pass
+
+
+class ArticleHasNoTextError(InvalidDocumentError):
+    pass

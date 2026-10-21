@@ -65,6 +65,7 @@ class DocumentRow(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     content_type: Mapped[str] = mapped_column(Text)
     duration_seconds: Mapped[float | None] = mapped_column(Double)
+    source_url: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

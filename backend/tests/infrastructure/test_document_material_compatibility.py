@@ -4,8 +4,9 @@ import pytest
 
 from deckly.application.ports import SourceMaterial
 from deckly.domain.deck import GenerationResult
+from deckly.domain.document import DocumentFormat
 from deckly.domain.notes.note_type import NoteType
-from deckly.domain.source import CitationUnit, DocumentSource
+from deckly.domain.source import CitationUnit, DocumentSource, WebSource
 from deckly.infrastructure.card_generator.generator import LlmCardGenerator
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.documents.parser import DocumentTextParser
@@ -82,3 +83,32 @@ async def test_moderator_screens_document_cited_notes_and_keeps_their_citations(
 
     assert screened == result
     assert screened.notes[0].sources == (page(1),)
+
+
+PAGE_URL = "https://en.wikipedia.org/wiki/Road_signs"
+FETCHED_PAGE = replace(
+    document(2), filename="Road signs - Wikipedia", document_format=DocumentFormat.TEXT, source_url=PAGE_URL
+)
+
+
+async def test_card_generator_cites_a_fetched_page_as_the_web_source_it_was_read_from() -> None:
+    parser = DocumentTextParser(max_characters=4000, deadline_seconds=30)
+    material = await parser.parse(FETCHED_PAGE, f"{TOPIC_TEXT}\n{SECOND_TEXT}".encode())
+    llm = FakeLlmClient(model_reply({"deck": DECK, "notes": [note_citing("Triangle?", [1])]}))
+    ids = sequential_job_ids()
+    generator = LlmCardGenerator(llm=llm, new_id=lambda: next(ids), handlers=NOTE_TYPE_HANDLERS)
+
+    result = (await generator.generate(JOB_ID, generation_request(), material)).result
+
+    cited = WebSource(title=FETCHED_PAGE.filename, url=PAGE_URL, retrieved_at=FETCHED_PAGE.uploaded_at)
+    assert [note.sources for note in result.notes] == [(cited,)]
+    body = GenerationResultBody.from_result(result).model_dump(mode="json", by_alias=True)
+    assert spec_errors("GenerationResult", body) == []
+    assert body["notes"][0]["sources"] == [
+        {
+            "kind": "web",
+            "title": FETCHED_PAGE.filename,
+            "url": PAGE_URL,
+            "retrievedAt": "2026-08-14T10:30:00Z",
+        }
+    ]

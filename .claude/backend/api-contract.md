@@ -22,7 +22,8 @@ Therefore in v1 there are:
 Adding any of these silently would break the offline guarantee. If the backend needs one,
 raise it as a contract change first.
 
-Uploaded documents (`POST /documents`) and recordings (`POST /recordings`, or fetched with
+Uploaded documents (`POST /documents`, or the text of a web page fetched with
+`POST /documents/from-url`) and recordings (`POST /recordings`, or fetched with
 `POST /recordings/from-url`) are not user data the backend owns. They are short-lived
 inputs to generation, readable only by the client that uploaded them, and deleted 24 hours after
 upload unless a generation uses them; a document a generation used is deleted once the last job
@@ -491,10 +492,69 @@ recording's, and nothing downstream can tell the two apart. `X-Client-Id` is req
 - **Retention** is the same as for documents. **No idempotency key**: retrying stores a second copy.
 - **A generation source** exactly like an uploaded recording; see `POST /v1/generations`.
 
+### `POST /v1/documents/from-url`
+
+Fetches one web page, extracts its readable article text and stores that text as a document.
+Returns `201` with the same metadata body as `POST /documents`, with `contentType` `text/plain`
+and `sourceUrl`; the reply's `documentId` is used exactly like an uploaded document's.
+`X-Client-Id` is required.
+
+```json
+{ "url": "https://en.wikipedia.org/wiki/Spaced_repetition" }
+```
+
+```json
+{
+  "documentId": "…",
+  "filename": "Spaced repetition - Wikipedia",
+  "sizeBytes": 25818,
+  "contentType": "text/plain",
+  "uploadedAt": "2026-10-20T10:30:00Z",
+  "sourceUrl": "https://en.wikipedia.org/wiki/Spaced_repetition"
+}
+```
+
+- **Which links.** `http` or `https`, on the standard port, naming a public domain, in visible
+  ASCII (an internationalised domain is sent in its `xn--` form, a non-ASCII path percent-encoded,
+  as a browser's `URL.href` gives them). IP addresses, credentials, other ports, other schemes and
+  local names (`localhost`, `.local`, `.internal`, `.home.arpa`, `.test`, single-label names and the
+  like) are `422 UNSUPPORTED_ARTICLE_URL`, decided before anything is fetched or counted. The
+  fragment is dropped. An `http` link is fetched over `https`; a site that does not answer over
+  `https` is `422 ARTICLE_UNAVAILABLE`.
+- **Body.** JSON with exactly one field, `url` (1–2048 characters). Anything else is
+  `400 VALIDATION_FAILED`.
+- **Unreachable pages.** The server never connects to a private, loopback, link-local, cloud
+  metadata or other non-public address, on the first request or on any redirect, however the name
+  resolves. A page whose name resolves to such an address, whose name does not resolve, that answers
+  `4xx`, or that redirects more than five times or to plain `http`, an address or another port, is
+  `422 ARTICLE_UNAVAILABLE`, with the same message whichever applied.
+- **robots.txt.** The site's `robots.txt` is read before each host is fetched and honoured for the
+  product token `Deckly` (RFC 9309). A page it disallows is `422 ARTICLE_BLOCKED_BY_ROBOTS`; a
+  `robots.txt` that answers `5xx` or cannot be fetched is `503 UPSTREAM_UNAVAILABLE`, retryable.
+- **Web pages only.** A response that is not `text/html` or `application/xhtml+xml` (a PDF, an
+  image) is `415 UNSUPPORTED_DOCUMENT_TYPE`, decided from its headers.
+- **No JavaScript.** The page's HTML is read as the server sends it; nothing is executed. A page
+  that builds its content in the browser, or that has no readable article text, is
+  `422 ARTICLE_HAS_NO_TEXT`.
+- **Long pages are cut, not refused.** The HTML at 2 MiB, 50,000 tags or 25,000 attributes, and the
+  stored text at 200,000 characters, cut at a word.
+- **Budget and capacity.** Article fetches have their **own** budget: 10 per hour per
+  `X-Client-Id`, 30 per network address and 500 per hour for the whole server (`429 RATE_LIMITED`,
+  see "Quota"), and their own concurrency limit (`DECKLY_LIMIT_ARTICLE_URL_MAX_CONCURRENCY`, 1 by
+  default, per API process), `503 UPSTREAM_UNAVAILABLE` with `Retry-After: 5` when full.
+- **Slow by nature.** The response is sent once the text is stored, typically about a second and at
+  most `DECKLY_LIMIT_ARTICLE_URL_TIMEOUT_SECONDS` (30 by default). A fetch that does not finish in
+  time, a site that answers `5xx` or `429`, or any other upstream failure is `503
+UPSTREAM_UNAVAILABLE` with `Retry-After: 60`; the attempt was counted.
+- **Retention** is the same as for documents. **No idempotency key**: retrying stores a second copy.
+- **A generation source** exactly like an uploaded document; its notes cite `kind: "web"` sources
+  with `sourceUrl` as the `url`. See `POST /v1/generations` and "Sources".
+
 ### `GET /v1/documents/{documentId}`
 
 Returns `200` with the same metadata body as the upload. It never returns the file itself.
-`durationSeconds` is present only for a recording.
+`durationSeconds` is present only for a recording, `sourceUrl` only for a page fetched with
+`POST /documents/from-url`.
 
 **Access.** Unlike a job, a document is scoped to the client that uploaded it: the request must
 carry that client's `X-Client-Id`. Any other client, an unknown or malformed id, a document still
@@ -597,6 +657,15 @@ one later refused for its duration, size or availability; an unsupported link an
 because every fetch slot is busy do not. When Redis cannot be reached in time the fetch is
 `503 UPSTREAM_UNAVAILABLE`. This budget is not reported in `quota`.
 
+`POST /documents/from-url` has a fifth budget, counted the same way under its own keys: by default
+10 per hour per `X-Client-Id` (`DECKLY_LIMIT_ARTICLE_URL_FETCHES_PER_WINDOW`), 30 per network
+address (`DECKLY_LIMIT_ARTICLE_URL_FETCHES_PER_ADDRESS_PER_WINDOW`) and 500 for the whole server
+(`DECKLY_LIMIT_ARTICLE_URL_SERVER_FETCHES_PER_WINDOW`), in fixed one-hour windows
+(`DECKLY_LIMIT_ARTICLE_URL_WINDOW_SECONDS`). It does not share the recording fetch budget. Every
+request with a supported link counts, including one later refused by the site, its `robots.txt`,
+its type or its lack of text; an unsupported link and a request refused because every slot is busy
+do not. This budget is not reported in `quota`.
+
 ## Note field shapes
 
 `fields` is an object whose keys depend on `noteType`. The client validates it with a Zod
@@ -646,7 +715,8 @@ verify a card before saving it.
 - Every source has a `kind` and a non-blank `title`. The client branches on `kind` and ignores a
   source whose `kind` it does not know, so new kinds can be added without breaking old builds.
 - `kind: "web"` is a web page: an `http(s)` `url`, and `retrievedAt`, when present, carries an
-  explicit offset.
+  explicit offset. Notes generated from a page fetched with `POST /documents/from-url` cite it this
+  way, with the page's `sourceUrl` and its fetch time.
 - `kind: "document"` is a page or slide of a document the client uploaded: `documentId` (as
   returned by `POST /documents`), `title` (the file name), `unit` (`page` for a PDF, `slide` for a
   presentation) and `number`, 1-based as the document's own viewer numbers it. A note may cite
@@ -750,6 +820,10 @@ localised and is for logs.
 | `RECORDING_TOO_LONG`                    | 422                 | Uploaded or fetched recording is over the duration cap  |
 | `UNSUPPORTED_RECORDING_URL`             | 422                 | The link is not to a single YouTube video               |
 | `RECORDING_UNAVAILABLE`                 | 422                 | The video is private, removed, restricted or live       |
+| `UNSUPPORTED_ARTICLE_URL`               | 422                 | The link is not to a page on a public web host          |
+| `ARTICLE_UNAVAILABLE`                   | 422                 | The page could not be reached or answered with an error |
+| `ARTICLE_BLOCKED_BY_ROBOTS`             | 422                 | The site's robots.txt disallows fetching the page       |
+| `ARTICLE_HAS_NO_TEXT`                   | 422                 | The page's HTML has no readable article text            |
 | `ROUTE_NOT_FOUND`                       | 404                 | No endpoint exists at this path                         |
 | `METHOD_NOT_ALLOWED`                    | 405                 | Endpoint exists but not for this HTTP method            |
 | `INTERNAL_ERROR`                        | 500                 | Anything else                                           |

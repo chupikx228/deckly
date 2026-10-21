@@ -8,6 +8,7 @@ from deckly.domain.document import (
     RECORDING_FORMATS,
     DocumentFormat,
     clean_filename,
+    is_article,
     is_recording,
 )
 from deckly.domain.exceptions import InvalidDocumentError, InvalidTimestampError
@@ -108,3 +109,37 @@ def test_document_is_not_a_recording_and_has_no_duration(document_format: Docume
 def test_recording_without_a_positive_finite_duration_is_rejected(duration: float | None) -> None:
     with pytest.raises(InvalidDocumentError):
         replace(document(1), document_format=DocumentFormat.MP3, duration_seconds=duration)
+
+
+PAGE_URL = "https://en.wikipedia.org/wiki/Spaced_repetition"
+
+
+def test_page_fetched_from_a_url_keeps_the_url_it_came_from() -> None:
+    fetched = replace(document(1), document_format=DocumentFormat.TEXT, source_url=PAGE_URL)
+
+    assert is_article(fetched.document_format)
+    assert not is_recording(fetched.document_format)
+    assert fetched.source_url == PAGE_URL
+
+
+@pytest.mark.parametrize("source_url", [None, "", "javascript:alert(1)", "ftp://example.com/a", "not a url"])
+def test_page_without_an_http_source_url_is_rejected(source_url: str | None) -> None:
+    with pytest.raises(InvalidDocumentError, match="must keep the http"):
+        replace(document(1), document_format=DocumentFormat.TEXT, source_url=source_url)
+
+
+@pytest.mark.parametrize("document_format", [DocumentFormat.PDF, DocumentFormat.PPTX, DocumentFormat.M4A])
+def test_only_a_fetched_page_has_a_source_url(document_format: DocumentFormat) -> None:
+    assert not is_article(document_format)
+    with pytest.raises(InvalidDocumentError, match="only a page fetched from a url has a source url"):
+        replace(
+            document(1),
+            document_format=document_format,
+            duration_seconds=1.0 if is_recording(document_format) else None,
+            source_url=PAGE_URL,
+        )
+
+
+def test_fetched_page_has_no_duration() -> None:
+    with pytest.raises(InvalidDocumentError, match="only a recording has a duration"):
+        replace(document(1), document_format=DocumentFormat.TEXT, source_url=PAGE_URL, duration_seconds=3.0)

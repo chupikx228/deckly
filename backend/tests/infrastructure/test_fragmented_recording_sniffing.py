@@ -1,3 +1,4 @@
+import math
 import time
 
 import pytest
@@ -43,6 +44,9 @@ CAP_SECONDS = 900
 SHORT_CAP_SECONDS = 60
 PROBE_SECONDS_BUDGET = 0.25
 PROBE_MEMORY_BUDGET_BYTES = MIB
+FLOOD_ROUNDS = 5
+FLOOD_SCALE = 8
+MAX_FLOOD_COST_GROWTH = 3
 FRAGMENT_INDEX_MEMORY_BUDGET_BYTES = 4 * MIB
 
 
@@ -66,6 +70,16 @@ def cheaply(
         probe(content, cap)
     assert time.perf_counter() - started < PROBE_SECONDS_BUDGET
     assert peak[0] < memory_budget_bytes
+
+
+def fastest_rejections(*floods: bytes) -> list[float]:
+    fastest = [math.inf] * len(floods)
+    for _ in range(FLOOD_ROUNDS):
+        for index, content in enumerate(floods):
+            started = time.perf_counter()
+            unsupported(content)
+            fastest[index] = min(fastest[index], time.perf_counter() - started)
+    return fastest
 
 
 def frames(count: int) -> float:
@@ -237,10 +251,11 @@ def test_version_1_track_header_id_is_read() -> None:
 
 def test_flood_of_fragments_is_rejected_at_the_fragment_box_budget() -> None:
     content = fragmented_movie(*([box(b"moof")] * (MAX_FRAGMENT_BOXES + 1)))
+    larger = fragmented_movie(*([box(b"moof")] * (FLOOD_SCALE * MAX_FRAGMENT_BOXES)))
 
-    started = time.perf_counter()
-    unsupported(content)
-    assert time.perf_counter() - started < PROBE_SECONDS_BUDGET
+    at_budget, past_budget = fastest_rejections(content, larger)
+
+    assert past_budget < at_budget * MAX_FLOOD_COST_GROWTH
     with peak_memory() as peak:
         unsupported(content)
     assert peak[0] < FRAGMENT_INDEX_MEMORY_BUDGET_BYTES

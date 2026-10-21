@@ -10,12 +10,18 @@ from fastapi import APIRouter, FastAPI, Request, Response
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deckly.application.documents import FetchRecording, GetDocument, UploadDocument
+from deckly.application.documents import FetchArticle, FetchRecording, GetDocument, UploadDocument
 from deckly.application.generations import CancelGeneration, CreateGeneration, GetGeneration
 from deckly.application.health import CheckHealth
 from deckly.application.ports import DocumentStorage, DocumentStore, RegenerationLimiter
 from deckly.application.regeneration import RegenerateNote
-from deckly.config import ProviderSettings, Settings, load_settings
+from deckly.config import MAX_DOCUMENT_SOURCE_CHARACTERS, ProviderSettings, Settings, load_settings
+from deckly.infrastructure.article_url.fetcher import (
+    MAX_UTF8_BYTES_PER_CHARACTER,
+    ArticleFetchLimits,
+    ArticleTextInspector,
+    build_article_fetcher,
+)
 from deckly.infrastructure.card_generator.note_types import NOTE_TYPE_HANDLERS
 from deckly.infrastructure.card_generator.regenerator import LlmNoteRegenerator
 from deckly.infrastructure.clock import utc_now
@@ -39,6 +45,7 @@ from deckly.infrastructure.observability.exposition import (
 )
 from deckly.infrastructure.observability.http import ObservedRequests
 from deckly.infrastructure.observability.metrics import (
+    ARTICLE_URL_GATE,
     DOCUMENT_UPLOAD_GATE,
     RECORDING_UPLOAD_GATE,
     RECORDING_URL_GATE,
@@ -59,9 +66,10 @@ from deckly.infrastructure.search.tavily_client import TavilySearchClient
 from deckly.infrastructure.storage.client import StorageClient
 from deckly.infrastructure.upload_gate import RejectingUploadGate
 from deckly.infrastructure.upload_limit import (
+    ARTICLE_URL_KEYS,
     FetchWindow,
-    RedisRecordingUrlLimiter,
     RedisUploadLimiter,
+    RedisUrlFetchLimiter,
     UploadWindow,
 )
 from deckly.transport import documents, generations, health, notes
@@ -69,6 +77,7 @@ from deckly.transport.dependencies import (
     CANCEL_GENERATION_STATE,
     CHECK_HEALTH_STATE,
     CREATE_GENERATION_STATE,
+    FETCH_ARTICLE_STATE,
     FETCH_RECORDING_STATE,
     GET_DOCUMENT_STATE,
     GET_GENERATION_STATE,
@@ -168,6 +177,7 @@ def wire_documents(app: FastAPI, settings: Settings, clients: DocumentClients) -
         ),
     )
     setattr(app.state, FETCH_RECORDING_STATE, fetch_recording(settings, clients, store, storage))
+    setattr(app.state, FETCH_ARTICLE_STATE, fetch_article(settings, clients, store, storage))
     setattr(app.state, GET_DOCUMENT_STATE, GetDocument(store=store))
     return store
 
@@ -192,7 +202,7 @@ def fetch_recording(
     return FetchRecording(
         upload=UploadDocument(
             gate=upload_gate(RECORDING_URL_GATE, limits.recording_url_max_concurrency, metrics),
-            limiter=RedisRecordingUrlLimiter(clients.redis, window, metrics),
+            limiter=RedisUrlFetchLimiter(clients.redis, window, metrics),
             inspector=ContentRecordingInspector(max_duration_seconds=limits.recording_max_duration_seconds),
             storage=storage,
             store=store,
@@ -202,6 +212,38 @@ def fetch_recording(
             read_timeout_seconds=limits.recording_url_timeout_seconds,
         ),
         fetcher=build_youtube_fetcher(fetch_limits, metrics),
+    )
+
+
+def fetch_article(
+    settings: Settings, clients: DocumentClients, store: DocumentStore, storage: DocumentStorage
+) -> FetchArticle:
+    limits = settings.limits
+    metrics = clients.observability.metrics
+    window = FetchWindow(
+        fetches_per_client=limits.article_url_fetches_per_window,
+        fetches_per_address=limits.article_url_fetches_per_address_per_window,
+        fetches_per_server=limits.article_url_server_fetches_per_window,
+        window_seconds=limits.article_url_window_seconds,
+        command_timeout_seconds=settings.redis.connect_timeout_seconds,
+        keys=ARTICLE_URL_KEYS,
+    )
+    fetch_limits = ArticleFetchLimits(
+        max_characters=MAX_DOCUMENT_SOURCE_CHARACTERS, timeout_seconds=limits.article_url_timeout_seconds
+    )
+    return FetchArticle(
+        upload=UploadDocument(
+            gate=upload_gate(ARTICLE_URL_GATE, limits.article_url_max_concurrency, metrics),
+            limiter=RedisUrlFetchLimiter(clients.redis, window, metrics),
+            inspector=ArticleTextInspector(),
+            storage=storage,
+            store=store,
+            clock=utc_now,
+            new_document_id=uuid4,
+            max_bytes=MAX_DOCUMENT_SOURCE_CHARACTERS * MAX_UTF8_BYTES_PER_CHARACTER,
+            read_timeout_seconds=limits.article_url_timeout_seconds,
+        ),
+        fetcher=build_article_fetcher(fetch_limits, metrics),
     )
 
 

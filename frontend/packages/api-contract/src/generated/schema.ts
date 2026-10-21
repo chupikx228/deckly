@@ -138,6 +138,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/documents/from-url": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Store the readable text of a web page
+         * @description Fetches one web page, extracts its readable article text (navigation, footers and other boilerplate are left out) and stores that text as a document: the same documentId, GET /documents/{documentId}, retention and Document body as an upload, with contentType text/plain and sourceUrl, the https address the text was read from after redirects. A generation from it cites web sources with that address. The link must be http or https on the standard port, name a public domain (IP addresses, credentials and local names such as localhost or .internal are 422 UNSUPPORTED_ARTICLE_URL before anything is fetched or counted), and only visible ASCII (an internationalised domain is sent in its xn-- form); an http link is fetched over https. The server refuses to connect to private, loopback, link-local, cloud metadata and other non-public addresses, on the first request and on every redirect; such a page, one whose name does not resolve, one that answers 4xx, and one that redirects to plain http, an address or more than five times are all 422 ARTICLE_UNAVAILABLE, with the same message whichever applied. The site's robots.txt is honoured for the product token Deckly; a page it disallows is 422 ARTICLE_BLOCKED_BY_ROBOTS. A response that is not HTML (a PDF, an image) is 415 UNSUPPORTED_DOCUMENT_TYPE. Pages that build their content with JavaScript in the browser are not supported: one whose HTML holds no readable article text is 422 ARTICLE_HAS_NO_TEXT. Long pages are cut rather than refused: the HTML at 2 MiB, 50,000 tags or 25,000 attributes, and the stored text at 200,000 characters. URL fetches have their own budget (429 RATE_LIMITED) and concurrency limit; a full one, a site that answers 5xx or 429, a robots.txt that cannot be read, a fetch that could not complete, or one that took longer than the fetch deadline (30 seconds by default) is 503 UPSTREAM_UNAVAILABLE with Retry-After.
+         */
+        post: operations["fetchArticle"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/documents/{documentId}": {
         parameters: {
             query?: never;
@@ -188,12 +208,12 @@ export interface components {
         /** @enum {string} */
         JobStage: "planning" | "retrieving_sources" | "parsing_sources" | "generating_cards" | "fetching_media" | "finalizing";
         /** @enum {string} */
-        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "DOCUMENT_UNREADABLE" | "DOCUMENT_ENCRYPTED" | "DOCUMENT_HAS_NO_TEXT" | "DOCUMENT_REJECTED" | "DOCUMENT_REGENERATION_UNSUPPORTED" | "DOCUMENT_NOT_SUPPORTED_FOR_GENERATION" | "UPSTREAM_UNAVAILABLE" | "DOCUMENT_NOT_FOUND" | "DOCUMENT_TOO_LARGE" | "UNSUPPORTED_DOCUMENT_TYPE" | "RECORDING_TOO_LONG" | "UNSUPPORTED_RECORDING_URL" | "RECORDING_UNAVAILABLE" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
+        ErrorCode: "VALIDATION_FAILED" | "TOPIC_REJECTED" | "RATE_LIMITED" | "JOB_NOT_FOUND" | "JOB_ALREADY_TERMINAL" | "IDEMPOTENCY_KEY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "NO_VALID_CONTENT" | "GENERATION_FAILED" | "DOCUMENT_UNREADABLE" | "DOCUMENT_ENCRYPTED" | "DOCUMENT_HAS_NO_TEXT" | "DOCUMENT_REJECTED" | "DOCUMENT_REGENERATION_UNSUPPORTED" | "DOCUMENT_NOT_SUPPORTED_FOR_GENERATION" | "UPSTREAM_UNAVAILABLE" | "DOCUMENT_NOT_FOUND" | "DOCUMENT_TOO_LARGE" | "UNSUPPORTED_DOCUMENT_TYPE" | "RECORDING_TOO_LONG" | "UNSUPPORTED_RECORDING_URL" | "RECORDING_UNAVAILABLE" | "UNSUPPORTED_ARTICLE_URL" | "ARTICLE_UNAVAILABLE" | "ARTICLE_BLOCKED_BY_ROBOTS" | "ARTICLE_HAS_NO_TEXT" | "ROUTE_NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
         /**
          * @description The type detected from the file's content.
          * @enum {string}
          */
-        DocumentContentType: "application/pdf" | "application/vnd.openxmlformats-officedocument.presentationml.presentation" | "audio/mpeg" | "audio/mp4" | "audio/wav" | "video/mp4" | "video/quicktime";
+        DocumentContentType: "application/pdf" | "application/vnd.openxmlformats-officedocument.presentationml.presentation" | "audio/mpeg" | "audio/mp4" | "audio/wav" | "video/mp4" | "video/quicktime" | "text/plain";
         DocumentUploadRequest: {
             /**
              * Format: binary
@@ -203,6 +223,10 @@ export interface components {
         };
         RecordingUrlRequest: {
             /** @description A link to one YouTube video, e.g. https://www.youtube.com/watch?v=jNQXAC9IVRw or https://youtu.be/jNQXAC9IVRw. Surrounding whitespace is ignored. */
+            url: string;
+        };
+        ArticleUrlRequest: {
+            /** @description A link to one web page, e.g. https://en.wikipedia.org/wiki/Spaced_repetition. Surrounding whitespace is ignored and the fragment is dropped. */
             url: string;
         };
         Document: {
@@ -215,6 +239,11 @@ export interface components {
             uploadedAt: string;
             /** @description Present only for a recording: its length in seconds as its container's metadata gives it, never shorter than what a decoder would play. */
             durationSeconds?: number;
+            /**
+             * Format: uri
+             * @description Present only for a page fetched with POST /documents/from-url: the https address its text was read from, after redirects. Generations from it cite it as a web source.
+             */
+            sourceUrl?: string;
         };
         /** @enum {string} */
         RejectionReason: "too_easy" | "too_hard" | "incorrect" | "duplicate" | "off_topic" | "other";
@@ -683,6 +712,38 @@ export interface operations {
             };
             400: components["responses"]["Problem"];
             413: components["responses"]["Problem"];
+            415: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+            429: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    fetchArticle: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Anonymous device identifier, used for rate limiting. Version 4 UUID in canonical form only: lowercase, hyphenated, no braces or urn:uuid: prefix. The nil UUID and other versions are rejected. */
+                "X-Client-Id": components["parameters"]["ClientId"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ArticleUrlRequest"];
+            };
+        };
+        responses: {
+            /** @description The page's text was fetched and stored */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Document"];
+                };
+            };
+            400: components["responses"]["Problem"];
             415: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
             429: components["responses"]["Problem"];

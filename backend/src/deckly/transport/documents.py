@@ -11,13 +11,15 @@ from starlette.datastructures import UploadFile
 from starlette.requests import ClientDisconnect
 from starlette.types import Message, Receive
 
-from deckly.application.documents import FetchRecording, GetDocument, UploadDocument
+from deckly.application.documents import FetchArticle, FetchRecording, GetDocument, UploadDocument
 from deckly.application.ports import DocumentUpload, Requester
+from deckly.domain.article_url import MAX_ARTICLE_URL_LENGTH
 from deckly.domain.document import Document, DocumentFormat
 from deckly.domain.exceptions import DocumentNotFoundError, DocumentTooLargeError, InvalidDocumentError
 from deckly.domain.recording_url import MAX_RECORDING_URL_LENGTH
 from deckly.transport.body import ResponseBody, UtcDateTime, is_none
 from deckly.transport.dependencies import (
+    fetch_article_use_case,
     fetch_recording_use_case,
     get_document_use_case,
     upload_document_use_case,
@@ -44,6 +46,7 @@ class DocumentBody(ResponseBody):
     content_type: DocumentFormat = Field(alias="contentType")
     uploaded_at: UtcDateTime = Field(alias="uploadedAt")
     duration_seconds: float | None = Field(default=None, alias="durationSeconds", exclude_if=is_none)
+    source_url: str | None = Field(default=None, alias="sourceUrl", exclude_if=is_none)
 
     @classmethod
     def from_document(cls, document: Document) -> Self:
@@ -54,6 +57,7 @@ class DocumentBody(ResponseBody):
             content_type=document.document_format,
             uploaded_at=document.uploaded_at,
             duration_seconds=document.duration_seconds,
+            source_url=document.source_url,
         )
 
 
@@ -61,6 +65,12 @@ class RecordingUrlRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     url: str = Field(min_length=1, max_length=MAX_RECORDING_URL_LENGTH)
+
+
+class ArticleUrlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    url: str = Field(min_length=1, max_length=MAX_ARTICLE_URL_LENGTH)
 
 
 def body_limit(max_bytes: int) -> int:
@@ -158,6 +168,17 @@ async def fetch_recording(
     client_id: Annotated[CanonicalUuid, Header(alias=CLIENT_ID_HEADER)],
     address: Annotated[str, Depends(address_of)],
     fetch: Annotated[FetchRecording, Depends(fetch_recording_use_case)],
+) -> DocumentBody:
+    requester = Requester(client_id=client_id, address=address)
+    return DocumentBody.from_document(await fetch(requester, body.url))
+
+
+@router.post("/documents/from-url", status_code=HTTPStatus.CREATED)
+async def fetch_article(
+    body: ArticleUrlRequest,
+    client_id: Annotated[CanonicalUuid, Header(alias=CLIENT_ID_HEADER)],
+    address: Annotated[str, Depends(address_of)],
+    fetch: Annotated[FetchArticle, Depends(fetch_article_use_case)],
 ) -> DocumentBody:
     requester = Requester(client_id=client_id, address=address)
     return DocumentBody.from_document(await fetch(requester, body.url))

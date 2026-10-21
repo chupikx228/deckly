@@ -279,8 +279,9 @@ soon as it picks it up; if it is never picked up, the queued threshold catches i
 ## Document uploads
 
 `POST /documents` (and `POST /recordings`, which runs the same use case with its own gate, size
-limit, read deadline and content probe, and `POST /recordings/from-url`, which runs it once more with
-a fetch from YouTube in place of the request body, see "Server-side fetches" below) stores the file in S3-compatible object storage (Cloudflare
+limit, read deadline and content probe, and `POST /recordings/from-url` and `POST /documents/from-url`,
+which run it again with a fetch from YouTube or from a web page in place of the request body, see
+"Server-side fetches" below) stores the file in S3-compatible object storage (Cloudflare
 R2, AWS S3 or any store that speaks SigV4, chosen by `DECKLY_PROVIDER_STORAGE_*`) and its metadata
 in the `documents` table. The order is fixed so that no object can exist without a row pointing at
 it:
@@ -371,18 +372,27 @@ The model and search providers _will_ be slow, rate-limited or down. Design for 
 
 ## Server-side fetches
 
-`POST /recordings/from-url` is the only endpoint where a client makes the server fetch something
-from the internet, so it is the service's SSRF surface. Its rules, for any similar endpoint later:
+`POST /recordings/from-url` and `POST /documents/from-url` are the endpoints where a client makes the
+server fetch something from the internet, so they are the service's SSRF surface. Their rules, for
+any similar endpoint later:
 
-- **Allowlist the input, then rebuild it.** The client's URL is parsed by a strict pattern in
-  `domain/recording_url.py` and reduced to a video id; the URL the server fetches is built from that
-  id. Untrusted text never reaches a command line or an outbound request as-is.
-- **Constrain the network, not only the input.** The downloader (yt-dlp, a subprocess) reaches the
-  network only through a per-fetch egress proxy in the API process
-  (`infrastructure/recording_url/egress.py`) that accepts `CONNECT` to port 443 of allowlisted hosts
-  only, resolves each host once, refuses unless every address is public, connects to the address it
-  checked (no DNS rebinding) and caps the bytes and tunnels of the whole fetch. Redirects open new
-  tunnels, so they pass the same checks.
+- **Allowlist the input, then rebuild it, where the feature allows it.** The recording URL is parsed
+  by a strict pattern in `domain/recording_url.py` and reduced to a video id; the URL the server
+  fetches is built from that id. An article URL cannot be allowlisted, so `domain/article_url.py`
+  parses it strictly (https on 443, a public domain name, no IP literal or numeric host form, no
+  credentials, no local or special-use name) and the network layer below carries the rest. Untrusted
+  text never reaches a command line or an outbound request as-is.
+- **Constrain the network, not only the input.** Every fetch reaches the network only through a
+  per-fetch egress proxy in the API process (`infrastructure/recording_url/egress.py`) that accepts
+  `CONNECT` to port 443 of hosts its policy allows (YouTube's allowlist, or any public domain name
+  for articles), resolves each host once as a fully qualified name, refuses unless every address is
+  public (and not a public-looking platform address such as Azure's WireServer), connects to the
+  address it checked (no DNS rebinding) and caps the bytes and tunnels of the whole fetch. Redirects
+  open new tunnels, so they pass the same checks. A refusal must not tell the client which check
+  failed: an internal address and a name that does not resolve get the same answer.
+- **Parse untrusted bytes away from the event loop.** HTML is extracted by trafilatura in its own
+  process (`infrastructure/article_url/extractor.py`, the only module allowed to import it), so a
+  hostile page can neither stall the API's event loop nor crash it, and it is killed at a deadline.
 - **A subprocess is isolated like ffmpeg in DEC-84:** an argument list, never a shell; no user
   configuration, plugins, cache or cookies; an empty `PATH`; a fresh working directory and `HOME`;
   its own process group, killed as a whole on the deadline or on cancellation.
@@ -390,6 +400,8 @@ from the internet, so it is the service's SSRF surface. Its rules, for any simil
   checked before the download; the downloaded bytes go through the same probe as an upload.
 - **Its own, tighter budget**, including a server-wide one: every fetch spends the server's
   bandwidth and its standing with the remote platform, whoever asked for it.
+- **Respect the site's stated wishes.** Article fetches read and honour `robots.txt` (RFC 9309) for
+  the product token `Deckly`, with an honest User-Agent.
 
 ## Rate limiting and abuse
 

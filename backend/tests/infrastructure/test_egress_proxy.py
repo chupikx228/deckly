@@ -9,8 +9,12 @@ from deckly.infrastructure.recording_url.egress import (
     ESTABLISHED,
     EgressProxy,
     EgressRefusal,
+    EgressSubject,
+    PublicHostPolicy,
     connect,
+    fully_qualified,
     public_address,
+    resolve,
 )
 from tests.fakes import fresh_metrics
 from tests.recording_url import (
@@ -77,6 +81,9 @@ def proxy_with(resolver: ScriptedResolver, connector: LoopbackConnector | None =
         "100::1",
         "2001:db8::1",
         "64:ff9b:1::a9fe:a9fe",
+        "168.63.129.16",
+        "::ffff:168.63.129.16",
+        "64:ff9b::a83f:8110",
         "not-an-address",
         "",
     ],
@@ -408,3 +415,143 @@ async def test_host_that_resolves_to_no_address_is_refused() -> None:
 
     assert status == REFUSED_STATUS
     assert session.refusals == [EgressRefusal.RESOLUTION]
+
+
+PUBLIC_POLICY = PublicHostPolicy()
+ARTICLE_HOST = "news.example.com"
+
+
+def article_proxy(resolver: ScriptedResolver, connector: LoopbackConnector) -> EgressProxy:
+    return EgressProxy(
+        PUBLIC_POLICY,
+        TEST_LIMITS,
+        fresh_metrics(),
+        resolver=resolver,
+        connector=connector,
+        subject=EgressSubject.ARTICLE_URL,
+    )
+
+
+@pytest.mark.parametrize("host", [ARTICLE_HOST, "en.wikipedia.org", "xn--d1acufc.xn--p1ai", "1.2.3.4.nip.io"])
+def test_public_host_policy_allows_any_public_domain_name(host: str) -> None:
+    assert PUBLIC_POLICY.allows(host)
+    assert PUBLIC_POLICY.port == 443
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.1",
+        "169.254.169.254",
+        "2130706433",
+        "0x7f.0.0.1",
+        "017700000001",
+        "127.1",
+        "localhost",
+        "api.localhost",
+        "metadata.google.internal",
+        "printer.local",
+        "kubernetes",
+        "example.com.",
+        "1.0.0.127.in-addr.arpa",
+    ],
+)
+def test_public_host_policy_refuses_addresses_numeric_forms_and_local_names(host: str) -> None:
+    assert not PUBLIC_POLICY.allows(host)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "2130706433:443",
+        "0x7f.1:443",
+        "127.0.0.1:443",
+        "localhost:443",
+        "metadata.google.internal:443",
+        "[::1]:443",
+    ],
+)
+async def test_article_proxy_refuses_numeric_and_local_targets_before_any_dns_lookup(target: str) -> None:
+    resolver = ScriptedResolver({})
+    connector = LoopbackConnector(port=1)
+    proxy = article_proxy(resolver, connector)
+    async with proxy.serve() as session:
+        status, streams = await tunnel(session.proxy_url, target)
+        await close(streams)
+
+    assert status == REFUSED_STATUS
+    assert session.refusals in ([EgressRefusal.HOST], [EgressRefusal.MALFORMED])
+    assert resolver.calls == []
+    assert connector.dialled == []
+
+
+async def test_article_proxy_only_tunnels_to_the_https_port() -> None:
+    resolver = resolving(ARTICLE_HOST, [PUBLIC_ADDRESS])
+    connector = LoopbackConnector(port=1)
+    async with article_proxy(resolver, connector).serve() as session:
+        status, streams = await tunnel(session.proxy_url, f"{ARTICLE_HOST}:8443")
+        await close(streams)
+
+    assert status == REFUSED_STATUS
+    assert session.refusals == [EgressRefusal.PORT]
+    assert resolver.calls == []
+
+
+@pytest.mark.parametrize("internal", ["127.0.0.1", "169.254.169.254", "168.63.129.16", "fd00:ec2::254"])
+async def test_article_proxy_never_dials_an_arbitrary_host_that_resolves_internally(internal: str) -> None:
+    async with listening() as service:
+        connector = LoopbackConnector(service.port)
+        async with article_proxy(resolving(ARTICLE_HOST, [internal]), connector).serve() as session:
+            status, streams = await tunnel(session.proxy_url, f"{ARTICLE_HOST}:443")
+            await close(streams)
+
+    assert status == REFUSED_STATUS
+    assert connector.dialled == []
+    assert service.connections == 0
+
+
+async def test_article_proxy_counts_and_logs_its_refusals_under_its_own_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    metrics = fresh_metrics()
+    proxy = EgressProxy(
+        PUBLIC_POLICY,
+        TEST_LIMITS,
+        metrics,
+        resolver=resolving(ARTICLE_HOST, ["10.0.0.1"]),
+        subject=EgressSubject.ARTICLE_URL,
+    )
+    async with proxy.serve() as session:
+        _, streams = await tunnel(session.proxy_url, f"{ARTICLE_HOST}:443")
+        await close(streams)
+
+    labels: dict[str, str] = {"reason": EgressRefusal.ADDRESS}
+    assert metrics.registry.get_sample_value("deckly_article_url_egress_refusals_total", labels) == 1
+    assert metrics.registry.get_sample_value("deckly_recording_url_egress_refusals_total", labels) is None
+    assert [record.message for record in caplog.records] == ["article_url_egress_refused"]
+
+
+@pytest.mark.parametrize(
+    ("host", "absolute"), [("example.com", "example.com."), ("example.com.", "example.com.")]
+)
+def test_names_are_resolved_as_fully_qualified_so_search_domains_never_apply(
+    host: str, absolute: str
+) -> None:
+    assert fully_qualified(host) == absolute
+
+
+async def test_resolver_asks_for_the_fully_qualified_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[str] = []
+    loop = asyncio.get_running_loop()
+
+    async def recording_getaddrinfo(
+        host: str, port: int, **options: int
+    ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        del options
+        asked.append(host)
+        return [(2, 1, 6, "", (PUBLIC_ADDRESS, port))]
+
+    monkeypatch.setattr(loop, "getaddrinfo", recording_getaddrinfo)
+
+    assert await resolve("kubernetes.default", 443) == [PUBLIC_ADDRESS]
+    assert asked == ["kubernetes.default."]

@@ -12,11 +12,15 @@ from deckly.config import Settings
 from deckly.infrastructure.observability.metrics import Metrics, RateLimit
 from deckly.infrastructure.rate_limit import window_index
 from deckly.infrastructure.upload_limit import (
+    ARTICLE_URL_ADDRESS_KEY_PREFIX,
+    ARTICLE_URL_CLIENT_KEY_PREFIX,
+    ARTICLE_URL_KEYS,
+    ARTICLE_URL_SERVER_KEY_PREFIX,
     RECORDING_URL_ADDRESS_KEY_PREFIX,
     RECORDING_URL_CLIENT_KEY_PREFIX,
     RECORDING_URL_SERVER_KEY_PREFIX,
     FetchWindow,
-    RedisRecordingUrlLimiter,
+    RedisUrlFetchLimiter,
 )
 from tests.domain.builders import T0
 from tests.fakes import fresh_metrics
@@ -48,6 +52,9 @@ async def pool(settings: Settings) -> AsyncIterator[ArqRedis]:
             RECORDING_URL_CLIENT_KEY_PREFIX,
             RECORDING_URL_ADDRESS_KEY_PREFIX,
             RECORDING_URL_SERVER_KEY_PREFIX,
+            ARTICLE_URL_CLIENT_KEY_PREFIX,
+            ARTICLE_URL_ADDRESS_KEY_PREFIX,
+            ARTICLE_URL_SERVER_KEY_PREFIX,
         ):
             for index in TEST_WINDOWS:
                 async for key in redis.scan_iter(match=f"{prefix}:*:{index}"):
@@ -65,7 +72,7 @@ def rejected_limit(metrics: Metrics, limit: RateLimit) -> float | None:
 
 async def test_client_gets_exactly_its_fetches_and_then_429_until_the_window_ends(pool: ArqRedis) -> None:
     metrics = fresh_metrics()
-    limiter = RedisRecordingUrlLimiter(pool, WINDOW, metrics)
+    limiter = RedisUrlFetchLimiter(pool, WINDOW, metrics)
     client = requester("198.51.100.10")
 
     for _ in range(WINDOW.fetches_per_client):
@@ -80,7 +87,7 @@ async def test_client_gets_exactly_its_fetches_and_then_429_until_the_window_end
 
 async def test_rotating_client_ids_from_one_address_hits_the_address_limit(pool: ArqRedis) -> None:
     metrics = fresh_metrics()
-    limiter = RedisRecordingUrlLimiter(pool, WINDOW, metrics)
+    limiter = RedisUrlFetchLimiter(pool, WINDOW, metrics)
 
     for _ in range(WINDOW.fetches_per_address):
         await limiter.acquire(requester("198.51.100.20"), WINDOW_START)
@@ -92,7 +99,7 @@ async def test_rotating_client_ids_from_one_address_hits_the_address_limit(pool:
 
 async def test_many_addresses_together_hit_the_server_wide_limit(pool: ArqRedis) -> None:
     metrics = fresh_metrics()
-    limiter = RedisRecordingUrlLimiter(pool, WINDOW, metrics)
+    limiter = RedisUrlFetchLimiter(pool, WINDOW, metrics)
 
     for number in range(WINDOW.fetches_per_server):
         await limiter.acquire(requester(f"203.0.113.{number + 1}"), WINDOW_START)
@@ -103,7 +110,7 @@ async def test_many_addresses_together_hit_the_server_wide_limit(pool: ArqRedis)
 
 
 async def test_recording_url_keys_expire_with_their_window(pool: ArqRedis) -> None:
-    limiter = RedisRecordingUrlLimiter(pool, WINDOW, fresh_metrics())
+    limiter = RedisUrlFetchLimiter(pool, WINDOW, fresh_metrics())
 
     await limiter.acquire(requester("198.51.100.30"), WINDOW_START)
 
@@ -114,7 +121,7 @@ async def test_recording_url_keys_expire_with_their_window(pool: ArqRedis) -> No
 
 
 async def test_fetch_budget_is_separate_from_the_upload_budget(pool: ArqRedis) -> None:
-    limiter = RedisRecordingUrlLimiter(pool, WINDOW, fresh_metrics())
+    limiter = RedisUrlFetchLimiter(pool, WINDOW, fresh_metrics())
 
     await limiter.acquire(requester("198.51.100.40"), WINDOW_START)
 
@@ -123,11 +130,52 @@ async def test_fetch_budget_is_separate_from_the_upload_budget(pool: ArqRedis) -
 
 async def test_unreachable_redis_is_503_not_an_unmetered_fetch() -> None:
     unreachable = ArqRedis(host="127.0.0.1", port=1, socket_connect_timeout=0.2)
-    limiter = RedisRecordingUrlLimiter(
-        unreachable, replace(WINDOW, command_timeout_seconds=0.5), fresh_metrics()
-    )
+    limiter = RedisUrlFetchLimiter(unreachable, replace(WINDOW, command_timeout_seconds=0.5), fresh_metrics())
 
     with pytest.raises(UpstreamUnavailableError):
         await limiter.acquire(requester("198.51.100.50"), WINDOW_START)
 
     await unreachable.aclose()
+
+
+ARTICLE_WINDOW = replace(WINDOW, keys=ARTICLE_URL_KEYS)
+
+
+async def test_article_fetches_count_under_their_own_keys_and_limits(pool: ArqRedis) -> None:
+    metrics = fresh_metrics()
+    limiter = RedisUrlFetchLimiter(pool, ARTICLE_WINDOW, metrics)
+    client = requester("198.51.100.60")
+
+    for _ in range(ARTICLE_WINDOW.fetches_per_client):
+        await limiter.acquire(client, WINDOW_START)
+    with pytest.raises(RateLimitedError):
+        await limiter.acquire(client, WINDOW_START)
+
+    assert rejected_limit(metrics, RateLimit.ARTICLE_URL_CLIENT) == 1
+    assert rejected_limit(metrics, RateLimit.RECORDING_URL_CLIENT) is None
+    keys = [key async for key in pool.scan_iter(match=f"deckly:article-url:*:{TEST_WINDOWS[0]}")]
+    assert len(keys) == 3
+    assert [key async for key in pool.scan_iter(match=f"deckly:recording-url:*:{TEST_WINDOWS[0]}")] == []
+
+
+async def test_article_fetches_do_not_spend_the_recording_url_budget(pool: ArqRedis) -> None:
+    articles = RedisUrlFetchLimiter(pool, ARTICLE_WINDOW, fresh_metrics())
+    recordings = RedisUrlFetchLimiter(pool, WINDOW, fresh_metrics())
+    client = requester("198.51.100.70")
+
+    for _ in range(ARTICLE_WINDOW.fetches_per_client):
+        await articles.acquire(client, WINDOW_START)
+    for _ in range(WINDOW.fetches_per_client):
+        await recordings.acquire(client, WINDOW_START)
+
+
+async def test_many_addresses_together_hit_the_article_server_wide_limit(pool: ArqRedis) -> None:
+    metrics = fresh_metrics()
+    limiter = RedisUrlFetchLimiter(pool, ARTICLE_WINDOW, metrics)
+
+    for number in range(ARTICLE_WINDOW.fetches_per_server):
+        await limiter.acquire(requester(f"203.0.113.{number + 101}"), WINDOW_START)
+    with pytest.raises(RateLimitedError):
+        await limiter.acquire(requester("192.0.2.201"), WINDOW_START)
+
+    assert rejected_limit(metrics, RateLimit.ARTICLE_URL_SERVER) == 1
