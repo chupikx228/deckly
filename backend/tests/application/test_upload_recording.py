@@ -14,6 +14,8 @@ from tests.recording_files import fixture, pcm_wave
 
 pytestmark = pytest.mark.anyio
 
+OVER_LIMIT_SECONDS = 5
+
 
 @pytest.mark.parametrize(
     ("name", "document_format"),
@@ -80,8 +82,11 @@ async def test_document_sent_as_a_recording_is_refused_and_nothing_is_stored() -
 
 async def test_recording_over_the_size_limit_is_refused_before_it_is_probed() -> None:
     harness = recording_harness(max_duration_seconds=1)
+    content = pcm_wave(seconds=OVER_LIMIT_SECONDS)
+    assert len(content) > MAX_TEST_DOCUMENT_BYTES
 
     with pytest.raises(DocumentTooLargeError):
-        await harness.send(pcm_wave(seconds=MAX_TEST_DOCUMENT_BYTES), filename="huge.wav")
+        await harness.send(content, filename="huge.wav")
 
     assert harness.store.rows == {}
+    assert harness.storage.objects == {}
