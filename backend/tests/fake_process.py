@@ -1,8 +1,12 @@
+import asyncio
 import json
 import stat
 import sys
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+import pytest
 
 FAKE_PROGRAM = """#!{python}
 import json, os, subprocess, sys, time
@@ -68,3 +72,27 @@ def fake_program(directory: Path, name: str, scenario: dict[str, object]) -> Fak
     )
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return FakeProgram(path=path, record=record)
+
+
+CHILD_PID_FILE = "child.pid"
+OVERRUN_DEADLINES_SECONDS = (0.5, 1.0, 2.0, 4.0)
+
+type Overrun = Callable[[float, Path], Awaitable[None]]
+
+
+def started_child(pid_file: Path) -> int | None:
+    written = pid_file.read_text() if pid_file.exists() else ""
+    return int(written) if written else None
+
+
+async def overrun_after_its_child_started(
+    directory: Path, overrun: Overrun, deadlines_seconds: Sequence[float] = OVERRUN_DEADLINES_SECONDS
+) -> tuple[Path, int]:
+    for number, deadline_seconds in enumerate(deadlines_seconds):
+        attempt = directory / f"overrun-{number}"
+        await asyncio.to_thread(attempt.mkdir)
+        await overrun(deadline_seconds, attempt)
+        child = await asyncio.to_thread(started_child, attempt / CHILD_PID_FILE)
+        if child is not None:
+            return attempt, child
+    pytest.fail(f"no deadline in {deadlines_seconds} left the program time to start its child")

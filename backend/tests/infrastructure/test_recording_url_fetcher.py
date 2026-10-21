@@ -23,6 +23,7 @@ from deckly.infrastructure.recording_url.fetcher import (
     filename_for,
 )
 from deckly.infrastructure.recording_url.ytdlp import Completed, YtDlpInvocation
+from tests.fake_process import CHILD_PID_FILE, overrun_after_its_child_started
 from tests.fake_ytdlp import (
     FAKE_DENO,
     TEST_MAX_BYTES,
@@ -39,6 +40,7 @@ pytestmark = pytest.mark.anyio
 
 RECORDING = FIXTURES / "tone-fragmented.m4a"
 RECORDING_BYTES = RECORDING.read_bytes()
+YT_DLP_OVERRUN_DEADLINES_SECONDS = (1.5, 3.0, 6.0)
 HARDENING_FLAGS = (
     "--ignore-config",
     "--no-plugin-dirs",
@@ -364,18 +366,27 @@ async def test_attempt_to_tunnel_anywhere_off_the_allowlist_fails_the_fetch(tmp_
 
 
 async def test_fetch_over_its_deadline_kills_yt_dlp_and_everything_it_started(tmp_path: Path) -> None:
-    pid_file = tmp_path / "child.pid"
-    fake = FakeYtDlp(tmp_path, {"child_pid_file": str(pid_file), "sleep": 60}, good_download())
-    metrics = fresh_metrics()
-    started = time.monotonic()
+    fakes: dict[Path, FakeYtDlp] = {}
 
-    with pytest.raises(UpstreamUnavailableError):
-        await fake_fetcher(fake, metrics=metrics, timeout_seconds=1.5).fetch(VIDEO)
+    async def overrun(deadline_seconds: float, attempt: Path) -> None:
+        fakes[attempt] = FakeYtDlp(
+            attempt, {"child_pid_file": str(attempt / CHILD_PID_FILE), "sleep": 60}, good_download()
+        )
+        metrics = fresh_metrics()
+        started = time.monotonic()
 
-    assert time.monotonic() - started < 10
-    assert outcome_count(metrics, FetchOutcome.TIMED_OUT) == 1
-    assert await asyncio.to_thread(wait_until_gone, wait_for_pid(pid_file))
-    assert is_gone(fake.invocations[0].cwd)
+        with pytest.raises(UpstreamUnavailableError):
+            await fake_fetcher(fakes[attempt], metrics=metrics, timeout_seconds=deadline_seconds).fetch(VIDEO)
+
+        assert time.monotonic() - started < 10
+        assert outcome_count(metrics, FetchOutcome.TIMED_OUT) == 1
+
+    attempt, child = await overrun_after_its_child_started(
+        tmp_path, overrun, YT_DLP_OVERRUN_DEADLINES_SECONDS
+    )
+
+    assert await asyncio.to_thread(wait_until_gone, child)
+    assert is_gone(fakes[attempt].invocations[0].cwd)
 
 
 async def test_cancelled_fetch_kills_yt_dlp_too(tmp_path: Path) -> None:

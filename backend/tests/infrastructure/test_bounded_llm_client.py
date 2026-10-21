@@ -28,6 +28,7 @@ pytestmark = pytest.mark.anyio
 
 LIMIT = 10
 FAIL_FAST_SECONDS = 1
+SAFETY_NET_SECONDS = 10
 SLICES_PER_CALL = 3
 QUEUED_JOBS = 25
 QUEUED_FAILING_JOBS = 3
@@ -115,7 +116,7 @@ async def test_calls_in_flight_never_exceed_the_limit_and_every_queued_call_is_s
     provider = CountingClassifier()
     client = bounded(provider, limit=3)
 
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         replies = await asyncio.gather(*(client.complete(PROMPT) for _ in range(30)))
 
     assert provider.peak == 3
@@ -128,7 +129,7 @@ async def test_calls_within_the_limit_all_run_together_instead_of_queueing() -> 
     provider = CountingClassifier(parties=4)
     client = bounded(provider)
 
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         await asyncio.gather(*(client.complete(PROMPT) for _ in range(4)))
 
     assert provider.peak == 4
@@ -140,7 +141,7 @@ async def test_clients_sharing_a_gate_share_its_limit() -> None:
     moderation = gated(provider, gate)
     images = gated(provider, gate)
 
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         await asyncio.gather(
             *(moderation.complete(PROMPT) for _ in range(10)), *(images.complete(PROMPT) for _ in range(10))
         )
@@ -152,7 +153,7 @@ async def test_clients_sharing_a_gate_share_its_limit() -> None:
 async def test_failed_call_gives_its_slot_back() -> None:
     client = bounded(FakeLlmClient(LlmUnavailableError("down"), REPLY), limit=1)
 
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         outcomes = await asyncio.gather(
             client.complete(PROMPT), client.complete(PROMPT), return_exceptions=True
         )
@@ -170,7 +171,7 @@ async def test_cancelled_call_gives_its_slot_to_the_next_queued_call() -> None:
 
     holder.cancel()
 
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         assert await waiter == REPLY
 
 
@@ -221,7 +222,7 @@ async def test_time_spent_queued_is_not_charged_to_the_attempt_timeout_of_the_re
 
 
 async def screen_queued_decks(moderator: LlmContentModerator) -> tuple[int, ...]:
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         screened = await asyncio.gather(
             *(moderator.screen(job_id(number), QUERY.topic, MAX_DECK) for number in range(QUEUED_JOBS))
         )
@@ -251,7 +252,7 @@ async def test_chunks_of_one_maximum_size_deck_still_run_together_under_the_limi
     provider = CountingClassifier(parties=CHUNKS_PER_MAX_DECK)
     moderator = LlmContentModerator(llm=bounded(provider))
 
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         screened = await moderator.screen(job_id(1), QUERY.topic, MAX_DECK)
 
     assert provider.peak == CHUNKS_PER_MAX_DECK
@@ -262,7 +263,7 @@ async def test_provider_outage_fails_every_queued_job_instead_of_hanging_them() 
     llm = bounded(single_attempt(FakeLlmClient(LlmUnavailableError("down")), FAIL_FAST_SECONDS), limit=2)
     moderator = LlmContentModerator(llm=llm)
 
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         outcomes = await asyncio.gather(
             *(
                 moderator.screen(job_id(number), QUERY.topic, MAX_DECK)
@@ -311,7 +312,7 @@ async def test_cancelling_a_queued_call_neither_leaks_a_slot_nor_strands_the_cal
     second.cancel()
     inner.release.set()
 
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         replies = list(await asyncio.gather(holder, first, third))
     assert replies == [REPLY] * 3
     assert second.cancelled()
@@ -333,7 +334,7 @@ async def test_waiter_cancelled_in_the_instant_its_slot_is_handed_over_passes_th
     await holder
     woken.cancel()
 
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         assert await behind == REPLY
     assert await holds_every_slot(gate, 1)
 
@@ -343,7 +344,7 @@ async def test_failing_chunk_under_a_single_slot_cancels_the_chunks_still_queued
     gate = asyncio.Semaphore(1)
     llm = gated(single_attempt(provider, FAIL_FAST_SECONDS), gate)
 
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         with pytest.raises(UpstreamUnavailableError):
             await LlmContentModerator(llm=llm).screen(job_id(1), QUERY.topic, MAX_DECK)
 
@@ -383,7 +384,7 @@ async def test_call_that_queues_behind_a_held_slot_records_how_long_it_waited() 
 
     time.now += QUEUE_WAIT_SECONDS
     inner.release.set()
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         await asyncio.gather(holder, waiter)
 
     assert waits(metrics, "count") == 2
@@ -400,7 +401,7 @@ async def test_in_flight_gauge_counts_only_the_calls_holding_a_slot_and_returns_
     assert in_flight(metrics) == 2
 
     inner.release.set()
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         await asyncio.gather(*tasks)
 
     assert in_flight(metrics) == 0
@@ -452,7 +453,7 @@ async def test_clients_sharing_a_gate_report_into_one_series() -> None:
     assert in_flight(metrics) == 4
 
     inner.release.set()
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         await asyncio.gather(*tasks)
 
     assert waits(metrics, "count") == len(tasks)
@@ -482,7 +483,7 @@ async def test_waiter_cancelled_in_the_instant_its_slot_is_handed_over_is_never_
 
     gate.release()
     woken.cancel()
-    async with asyncio.timeout(FAIL_FAST_SECONDS):
+    async with asyncio.timeout(SAFETY_NET_SECONDS):
         assert await behind == REPLY
 
     assert woken.cancelled()

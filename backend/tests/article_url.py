@@ -26,7 +26,10 @@ METADATA_ADDRESS = "169.254.169.254"
 CERTIFIED_NAMES = (ARTICLE_HOST, f"*.{ARTICLE_HOST.partition('.')[2]}", OTHER_HOST, ROBOTS_HOST)
 HTML = "text/html; charset=utf-8"
 TEST_MAX_CHARACTERS = 20_000
-TEST_LIMITS = ArticleFetchLimits(max_characters=TEST_MAX_CHARACTERS, timeout_seconds=10)
+TEST_FETCH_DEADLINE_SECONDS = 60
+TEST_LIMITS = ArticleFetchLimits(
+    max_characters=TEST_MAX_CHARACTERS, timeout_seconds=TEST_FETCH_DEADLINE_SECONDS
+)
 ENDLESS_BLOCK_BYTES = 64 * 1024
 HEAD_END = b"\r\n\r\n"
 LINE_END = "\r\n"

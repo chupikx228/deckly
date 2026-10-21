@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import re
-import time
 import unicodedata
 from collections.abc import Callable
 from dataclasses import replace
@@ -66,6 +65,7 @@ from tests.fakes import (
     sequential_job_ids,
 )
 from tests.logs import captured_json_logs
+from tests.timing import LINEAR_COST_SCALE, MAX_LINEAR_COST_GROWTH, cpu_costs
 from tests.transport.openapi import spec_errors
 
 pytestmark = pytest.mark.anyio
@@ -292,16 +292,26 @@ async def test_unusable_reply_yields_no_notes_without_raising_or_retrying(text: 
     assert len(llm.prompts) == 1
 
 
-async def test_adversarially_nested_reply_is_abandoned_in_linear_time() -> None:
+def generating_from_nested_reply(size: int) -> Callable[[], GenerationResult]:
     unit = '{"noteType": "basic", "fields": {"front": '
-    text = '{"notes": [' + unit * (1_000_000 // len(unit))
-    llm = FakeLlmClient(LlmReply(text=text, stop=LlmStop.TRUNCATED))
-    started = time.perf_counter()
+    text = '{"notes": [' + unit * (size // len(unit))
 
-    result = await generate(llm, request(NoteType.BASIC))
+    def run() -> GenerationResult:
+        llm = FakeLlmClient(LlmReply(text=text, stop=LlmStop.TRUNCATED))
+        return asyncio.run(generate(llm, request(NoteType.BASIC)))
 
-    assert time.perf_counter() - started < 1.0
-    assert result.notes == ()
+    return run
+
+
+def test_adversarially_nested_reply_is_abandoned_in_linear_time() -> None:
+    whole = generating_from_nested_reply(1_000_000)
+
+    smaller_reply, whole_reply = cpu_costs(
+        generating_from_nested_reply(1_000_000 // LINEAR_COST_SCALE), whole
+    )
+
+    assert whole_reply < smaller_reply * MAX_LINEAR_COST_GROWTH
+    assert whole().notes == ()
 
 
 async def test_reply_cut_off_mid_note_keeps_every_complete_note_before_the_cut() -> None:

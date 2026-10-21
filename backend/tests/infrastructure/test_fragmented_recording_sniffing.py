@@ -1,5 +1,4 @@
-import math
-import time
+from collections.abc import Callable
 
 import pytest
 
@@ -39,14 +38,12 @@ from tests.recording_files import (
     track_header,
     track_run,
 )
+from tests.timing import COST_SCALE, MAX_FLAT_COST_GROWTH, MAX_STOPPED_WALK_SHARE, cpu_costs
 
 CAP_SECONDS = 900
 SHORT_CAP_SECONDS = 60
-PROBE_SECONDS_BUDGET = 0.25
+WHOLE_WALK_CAP_SECONDS = 3 * 3600
 PROBE_MEMORY_BUDGET_BYTES = MIB
-FLOOD_ROUNDS = 5
-FLOOD_SCALE = 8
-MAX_FLOOD_COST_GROWTH = 3
 FRAGMENT_INDEX_MEMORY_BUDGET_BYTES = 4 * MIB
 
 
@@ -59,27 +56,33 @@ def unsupported(content: bytes, cap: int = CAP_SECONDS) -> None:
         probe(content, cap)
 
 
+def rejected(check: type[Exception], content: bytes, cap: int = CAP_SECONDS) -> Callable[[], None]:
+    def run() -> None:
+        with pytest.raises(check):
+            probe(content, cap)
+
+    return run
+
+
 def cheaply(
     check: type[Exception],
     content: bytes,
     cap: int = CAP_SECONDS,
     memory_budget_bytes: int = PROBE_MEMORY_BUDGET_BYTES,
 ) -> None:
-    started = time.perf_counter()
-    with peak_memory() as peak, pytest.raises(check):
-        probe(content, cap)
-    assert time.perf_counter() - started < PROBE_SECONDS_BUDGET
+    with peak_memory() as peak:
+        rejected(check, content, cap)()
     assert peak[0] < memory_budget_bytes
 
 
-def fastest_rejections(*floods: bytes) -> list[float]:
-    fastest = [math.inf] * len(floods)
-    for _ in range(FLOOD_ROUNDS):
-        for index, content in enumerate(floods):
-            started = time.perf_counter()
-            unsupported(content)
-            fastest[index] = min(fastest[index], time.perf_counter() - started)
-    return fastest
+def stops_at_the_short_cap(content: bytes) -> None:
+    stopped, walked_whole = cpu_costs(
+        rejected(RecordingTooLongError, content, SHORT_CAP_SECONDS),
+        lambda: probe(content, WHOLE_WALK_CAP_SECONDS),
+    )
+
+    assert stopped < walked_whole * MAX_STOPPED_WALK_SHARE
+    cheaply(RecordingTooLongError, content, SHORT_CAP_SECONDS)
 
 
 def frames(count: int) -> float:
@@ -182,7 +185,7 @@ def test_fragments_hiding_hours_behind_a_short_movie_header_are_too_long() -> No
         header_seconds=10,
     )
 
-    cheaply(RecordingTooLongError, content, SHORT_CAP_SECONDS)
+    stops_at_the_short_cap(content)
 
 
 def test_fragment_walk_stops_as_soon_as_it_passes_the_cap() -> None:
@@ -191,7 +194,7 @@ def test_fragment_walk_stops_as_soon_as_it_passes_the_cap() -> None:
         *(fragment(frame_run(second), sequence=index) for index in range(1, MAX_FRAGMENT_BOXES // 8))
     )
 
-    cheaply(RecordingTooLongError, content, SHORT_CAP_SECONDS)
+    stops_at_the_short_cap(content)
 
 
 def test_movie_extends_header_longer_than_the_fragments_is_the_duration() -> None:
@@ -251,11 +254,13 @@ def test_version_1_track_header_id_is_read() -> None:
 
 def test_flood_of_fragments_is_rejected_at_the_fragment_box_budget() -> None:
     content = fragmented_movie(*([box(b"moof")] * (MAX_FRAGMENT_BOXES + 1)))
-    larger = fragmented_movie(*([box(b"moof")] * (FLOOD_SCALE * MAX_FRAGMENT_BOXES)))
+    larger = fragmented_movie(*([box(b"moof")] * (COST_SCALE * MAX_FRAGMENT_BOXES)))
 
-    at_budget, past_budget = fastest_rejections(content, larger)
+    at_budget, past_budget = cpu_costs(
+        rejected(UnsupportedDocumentError, content), rejected(UnsupportedDocumentError, larger)
+    )
 
-    assert past_budget < at_budget * MAX_FLOOD_COST_GROWTH
+    assert past_budget < at_budget * MAX_FLAT_COST_GROWTH
     with peak_memory() as peak:
         unsupported(content)
     assert peak[0] < FRAGMENT_INDEX_MEMORY_BUDGET_BYTES
@@ -263,7 +268,15 @@ def test_flood_of_fragments_is_rejected_at_the_fragment_box_budget() -> None:
 
 def test_track_runs_past_the_entry_budget_are_rejected_quickly() -> None:
     content = fragmented_movie(fragment(TrackRun(count=MAX_TIME_TO_SAMPLE_ENTRIES + 1, sizes=False).encode()))
+    larger = fragmented_movie(
+        fragment(TrackRun(count=0, sizes=False, declared=COST_SCALE * MAX_TIME_TO_SAMPLE_ENTRIES).encode())
+    )
 
+    at_budget, past_budget = cpu_costs(
+        rejected(UnsupportedDocumentError, content), rejected(UnsupportedDocumentError, larger)
+    )
+
+    assert past_budget < at_budget * MAX_FLAT_COST_GROWTH
     cheaply(UnsupportedDocumentError, content)
 
 

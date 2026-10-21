@@ -1,6 +1,6 @@
 import os
 import struct
-import time
+from collections.abc import Callable
 
 import pytest
 
@@ -57,13 +57,13 @@ from tests.recording_files import (
     uniform_time_to_sample,
     wave,
 )
+from tests.timing import COST_SCALE, MAX_FLAT_COST_GROWTH, cpu_costs
 
 pytestmark = pytest.mark.anyio
 
 CAP_SECONDS = 900
 SHORT_CAP_SECONDS = 60
 TEN_HOURS_SECONDS = 10 * 60 * 60
-PROBE_SECONDS_BUDGET = 0.25
 PROBE_MEMORY_BUDGET_BYTES = MIB
 
 
@@ -81,12 +81,29 @@ def too_long(content: bytes, cap: int = CAP_SECONDS) -> None:
         probe(content, cap)
 
 
-def cheaply_too_long(content: bytes, cap: int = CAP_SECONDS) -> None:
-    started = time.perf_counter()
+def cheaply_too_long(claiming: Callable[[int], bytes]) -> None:
+    content = claiming(TEN_HOURS_SECONDS)
+    longer = claiming(COST_SCALE * TEN_HOURS_SECONDS)
+
+    claimed, claimed_longer = cpu_costs(lambda: too_long(content), lambda: too_long(longer))
+
+    assert claimed_longer < claimed * MAX_FLAT_COST_GROWTH
     with peak_memory() as peak:
-        too_long(content, cap)
-    assert time.perf_counter() - started < PROBE_SECONDS_BUDGET
+        too_long(content)
     assert peak[0] < PROBE_MEMORY_BUDGET_BYTES
+
+
+def movie_header_claiming(seconds: int) -> bytes:
+    return isobmff(movie(track(), header=movie_header(seconds * 1000)))
+
+
+def sample_table_claiming(seconds: int) -> bytes:
+    lying = track(media_duration=2 * SOUND_TIMESCALE, stts=time_to_sample(frames_for(seconds)))
+    return isobmff(movie(lying, seconds=2))
+
+
+def shortest_frames(size: int) -> bytes:
+    return shortest_frame() * (size // len(shortest_frame()))
 
 
 @pytest.mark.parametrize(
@@ -209,10 +226,8 @@ def test_brand_that_is_no_accepted_recording_is_rejected(brand: bytes, compatibl
 
 
 def test_movie_header_claiming_ten_hours_in_a_tiny_file_is_too_long_without_reading_samples() -> None:
-    content = isobmff(movie(track(), header=movie_header(TEN_HOURS_SECONDS * 1000)))
-
-    assert len(content) < 1024
-    cheaply_too_long(content)
+    assert len(movie_header_claiming(TEN_HOURS_SECONDS)) < 1024
+    cheaply_too_long(movie_header_claiming)
 
 
 def test_version_1_movie_header_with_a_64_bit_duration_is_read() -> None:
@@ -226,9 +241,7 @@ def test_media_header_longer_than_the_cap_is_too_long_even_when_the_movie_header
 
 
 def test_sample_table_that_plays_for_hours_behind_short_headers_is_too_long() -> None:
-    lying = track(media_duration=2 * SOUND_TIMESCALE, stts=time_to_sample(frames_for(TEN_HOURS_SECONDS)))
-
-    cheaply_too_long(isobmff(movie(lying, seconds=2)))
+    cheaply_too_long(sample_table_claiming)
 
 
 def test_sample_table_spread_over_many_entries_stops_as_soon_as_it_passes_the_cap() -> None:
@@ -255,10 +268,11 @@ def test_sample_table_declaring_more_entries_than_it_holds_is_rejected() -> None
 
 def test_sample_table_with_more_entries_than_the_budget_is_rejected_quickly() -> None:
     content = isobmff(movie(track(stts=uniform_time_to_sample(MAX_TIME_TO_SAMPLE_ENTRIES + 1, 0))))
+    larger = isobmff(movie(track(stts=uniform_time_to_sample(COST_SCALE * MAX_TIME_TO_SAMPLE_ENTRIES, 0))))
 
-    started = time.perf_counter()
-    unsupported(content)
-    assert time.perf_counter() - started < PROBE_SECONDS_BUDGET
+    at_budget, past_budget = cpu_costs(lambda: unsupported(content), lambda: unsupported(larger))
+
+    assert past_budget < at_budget * MAX_FLAT_COST_GROWTH
 
 
 def test_entry_budget_is_shared_by_every_track() -> None:
@@ -273,10 +287,11 @@ def test_entry_budget_is_shared_by_every_track() -> None:
 
 def test_flood_of_tiny_boxes_is_rejected_at_the_box_budget() -> None:
     content = isobmff(box(b"free") * (MAX_BOXES + 1), movie(track()))
+    larger = isobmff(box(b"free") * (COST_SCALE * MAX_BOXES), movie(track()))
 
-    started = time.perf_counter()
-    unsupported(content)
-    assert time.perf_counter() - started < PROBE_SECONDS_BUDGET
+    at_budget, past_budget = cpu_costs(lambda: unsupported(content), lambda: unsupported(larger))
+
+    assert past_budget < at_budget * MAX_FLAT_COST_GROWTH
 
 
 def test_more_tracks_than_the_limit_are_rejected() -> None:
@@ -531,11 +546,12 @@ def test_low_bitrate_mp3_just_within_the_cap_is_accepted() -> None:
 
 
 def test_mp3_walk_stops_at_the_cap_whatever_the_size_of_the_file() -> None:
-    content = shortest_frame() * (48 * MIB // len(shortest_frame()))
+    content = shortest_frames(48 * MIB)
+    smaller = shortest_frames(48 * MIB // COST_SCALE)
 
-    started = time.perf_counter()
-    too_long(content)
-    assert time.perf_counter() - started < PROBE_SECONDS_BUDGET
+    smaller_file, whole_file = cpu_costs(lambda: too_long(smaller), lambda: too_long(content))
+
+    assert whole_file < smaller_file * MAX_FLAT_COST_GROWTH
 
 
 def test_wave_in_extensible_format_is_recognised() -> None:
