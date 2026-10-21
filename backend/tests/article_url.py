@@ -27,6 +27,7 @@ CERTIFIED_NAMES = (ARTICLE_HOST, f"*.{ARTICLE_HOST.partition('.')[2]}", OTHER_HO
 HTML = "text/html; charset=utf-8"
 TEST_MAX_CHARACTERS = 20_000
 TEST_LIMITS = ArticleFetchLimits(max_characters=TEST_MAX_CHARACTERS, timeout_seconds=10)
+ENDLESS_BLOCK_BYTES = 64 * 1024
 HEAD_END = b"\r\n\r\n"
 LINE_END = "\r\n"
 HOST_HEADER = "host"
@@ -270,10 +271,11 @@ class Site:
             await writer.drain()
             return
         framed = reply.declared_length is None
+        block = reply.endless * (ENDLESS_BLOCK_BYTES // len(reply.endless))
         writer.write(chunked(reply.body) if framed else reply.body)
         while not writer.transport.is_closing():
-            writer.write(chunked(reply.endless) if framed else reply.endless)
-            self.sent_bytes += len(reply.endless)
+            writer.write(chunked(block) if framed else block)
+            self.sent_bytes += len(block)
             await writer.drain()
             await asyncio.sleep(0)
 
