@@ -1,6 +1,6 @@
 import io
 import json
-import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -22,6 +22,7 @@ from tests.article_url import (
     article_bytes,
     article_page,
 )
+from tests.timing import LINEAR_COST_SCALE, MAX_LINEAR_COST_GROWTH, cpu_costs
 
 MAX_CHARACTERS = 10_000
 
@@ -99,14 +100,23 @@ def test_boolean_attributes_count_towards_the_attribute_cap() -> None:
     assert markup_end(tag * 3, MAX_PAGE_NODES, 250) == 2 * len(tag)
 
 
+def scanning(content: bytes) -> Callable[[], int]:
+    return lambda: markup_end(content, MAX_PAGE_NODES, MAX_PAGE_ATTRIBUTES)
+
+
+def tag_filled_with(filler: bytes, size: int) -> bytes:
+    return b"<a" + filler * (size // len(filler)) + b">"
+
+
 def test_markup_without_a_closing_bracket_is_scanned_in_linear_time() -> None:
     content = b"<a" * (1024 * 1024)
-    started = time.perf_counter()
 
-    end = markup_end(content, MAX_PAGE_NODES, MAX_PAGE_ATTRIBUTES)
+    smaller_page, whole_page = cpu_costs(
+        scanning(content[: len(content) // LINEAR_COST_SCALE]), scanning(content)
+    )
 
-    assert time.perf_counter() - started < 2
-    assert end == 2 * MAX_PAGE_NODES
+    assert whole_page < smaller_page * MAX_LINEAR_COST_GROWTH
+    assert scanning(content)() == 2 * MAX_PAGE_NODES
 
 
 def test_many_attributes_are_cut_before_the_html_parser_sees_them() -> None:
@@ -147,12 +157,12 @@ def test_character_limit_must_be_a_positive_number(value: str) -> None:
 
 @pytest.mark.parametrize("filler", [b" ", b"/", b" /", b" =", b' a="', b" a= "])
 def test_tag_filled_with_whitespace_or_dangling_attributes_is_counted_in_linear_time(filler: bytes) -> None:
-    content = b"<a" + filler * (2 * 1024 * 1024 // len(filler)) + b">"
-    started = time.perf_counter()
+    content = tag_filled_with(filler, 128 * 1024)
+    smaller = tag_filled_with(filler, 128 * 1024 // LINEAR_COST_SCALE)
 
-    markup_end(content, MAX_PAGE_NODES, MAX_PAGE_ATTRIBUTES)
+    smaller_tag, whole_tag = cpu_costs(scanning(smaller), scanning(content))
 
-    assert time.perf_counter() - started < 1
+    assert whole_tag < smaller_tag * MAX_LINEAR_COST_GROWTH
 
 
 def test_markup_with_exactly_the_node_cap_is_kept_whole() -> None:

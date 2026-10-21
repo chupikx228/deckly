@@ -1,4 +1,4 @@
-import time
+from collections.abc import Callable
 from dataclasses import replace
 from http import HTTPStatus
 from uuid import UUID
@@ -20,6 +20,7 @@ from deckly.transport.generations import CLIENT_ID_HEADER, IDEMPOTENCY_KEY_HEADE
 from deckly.transport.problem import PROBLEM_JSON_MEDIA_TYPE
 from tests.domain.builders import unregister
 from tests.fakes import DOCUMENT_ID, QUOTA_LIMIT, QUOTA_RETRY_AFTER_SECONDS, UPLOADED_DOCUMENT, Harness
+from tests.timing import LINEAR_COST_SCALE, MAX_LINEAR_COST_GROWTH, cpu_costs
 from tests.transport.openapi import declared_responses, spec_errors
 
 ENDPOINT = f"{API_PREFIX}/generations"
@@ -205,12 +206,11 @@ SERVER_ONLY_REJECT: dict[str, dict[str, object]] = {
 }
 
 ADVERSARIAL_LANGUAGE_TAGS = {
-    "many variants then garbage": "de" + "-12345" * 20_000 + "!",
-    "many extensions then garbage": "en" + "-a-bb" * 20_000 + "!",
-    "many private use subtags then garbage": "x" + "-a" * 40_000 + "!",
-    "many extlang-sized subtags": "zh" + "-abc" * 40_000,
+    "many variants then garbage": ("de", "-12345", 20_000, "!"),
+    "many extensions then garbage": ("en", "-a-bb", 20_000, "!"),
+    "many private use subtags then garbage": ("x", "-a", 40_000, "!"),
+    "many extlang-sized subtags": ("zh", "-abc", 40_000, ""),
 }
-MAX_VALIDATION_SECONDS = 1.0
 
 
 UNPARSEABLE_BODIES: dict[str, str | bytes] = {
@@ -242,15 +242,26 @@ def test_rules_beyond_the_schema_are_validation_failed(payload: dict[str, object
     assert_validation_failed(post(build_client(Harness()), payload))
 
 
-@pytest.mark.parametrize("language", ADVERSARIAL_LANGUAGE_TAGS.values(), ids=ADVERSARIAL_LANGUAGE_TAGS.keys())
-def test_pathological_language_tag_is_rejected_quickly(language: str) -> None:
+@pytest.mark.parametrize(
+    ("primary", "subtag", "repeats", "tail"),
+    ADVERSARIAL_LANGUAGE_TAGS.values(),
+    ids=ADVERSARIAL_LANGUAGE_TAGS.keys(),
+)
+def test_pathological_language_tag_is_rejected_quickly(
+    primary: str, subtag: str, repeats: int, tail: str
+) -> None:
     client = build_client(Harness())
 
-    started = time.perf_counter()
-    response = post(client, with_(language=language))
+    def posting(count: int) -> Callable[[], httpx2.Response]:
+        payload = with_(language=primary + subtag * count + tail)
+        return lambda: post(client, payload)
 
-    assert time.perf_counter() - started < MAX_VALIDATION_SECONDS
-    assert_validation_failed(response)
+    whole = posting(repeats)
+
+    shorter_tag, whole_tag = cpu_costs(posting(repeats // LINEAR_COST_SCALE), whole)
+
+    assert whole_tag < shorter_tag * MAX_LINEAR_COST_GROWTH
+    assert_validation_failed(whole())
 
 
 @pytest.mark.parametrize("content", UNPARSEABLE_BODIES.values(), ids=UNPARSEABLE_BODIES.keys())

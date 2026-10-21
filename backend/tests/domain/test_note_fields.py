@@ -1,5 +1,5 @@
 import math
-import time
+from collections.abc import Callable
 from dataclasses import replace
 from typing import cast
 from uuid import UUID
@@ -29,6 +29,7 @@ from deckly.domain.notes.note import Note
 from deckly.domain.notes.note_type import NoteType
 from deckly.domain.notes.registry import NOTE_FIELDS_BY_TYPE, fields_type_for
 from tests.domain.builders import DOCUMENT_SOURCE, SOURCES, client_id, note_of, unregister
+from tests.timing import LINEAR_COST_SCALE, MAX_LINEAR_COST_GROWTH, cpu_costs
 
 FRONT_BACK_TYPES: list[type[FrontBackFields]] = [BasicFields, BasicReversedFields, BasicTypeInFields]
 BLANKS = [
@@ -183,13 +184,22 @@ def test_cloze_rejects_missing_malformed_or_gapped_markers(text: str) -> None:
         ClozeFields(text=text)
 
 
+def rejecting_unterminated_markers(count: int) -> Callable[[], None]:
+    text = "{{c1::Paris}}" + "{{c1::" * count
+
+    def run() -> None:
+        with pytest.raises(InvalidClozeError):
+            ClozeFields(text=text)
+
+    return run
+
+
 def test_cloze_rejects_many_unterminated_markers_in_linear_time() -> None:
-    started = time.perf_counter()
+    fewer, many = cpu_costs(
+        rejecting_unterminated_markers(50_000 // LINEAR_COST_SCALE), rejecting_unterminated_markers(50_000)
+    )
 
-    with pytest.raises(InvalidClozeError):
-        ClozeFields(text="{{c1::Paris}}" + "{{c1::" * 50_000)
-
-    assert time.perf_counter() - started < 1.0
+    assert many < fewer * MAX_LINEAR_COST_GROWTH
 
 
 def test_cloze_rejects_blank_text() -> None:

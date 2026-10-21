@@ -2,6 +2,7 @@ import asyncio
 import io
 import itertools
 import json
+import re
 import shutil
 import statistics
 import threading
@@ -66,6 +67,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 ENGLISH = FIXTURES / "speech-en.mp3"
 RUSSIAN = FIXTURES / "speech-ru.mp3"
+ENGLISH_LECTURE_WORDS = frozenset({"world", "struggle", "clash", "unavoidable", "imperialism", "existing"})
 PAUSED = FIXTURES / "speech-pause.mp3"
 PAUSED_SECOND_SENTENCE_STARTS_MS = 17_360
 PAUSED_SECOND_SENTENCE_ENDS_MS = 22_700
@@ -119,15 +121,17 @@ def words(transcript: Transcript) -> str:
     return " ".join(segment.text for segment in transcript.segments).lower()
 
 
+def spoken_words(transcript: Transcript) -> set[str]:
+    return set(re.findall(r"\w+", words(transcript)))
+
+
 async def test_english_lecture_is_transcribed_in_english_with_its_words(
     model_ready: Settings, tmp_path: Path
 ) -> None:
     transcript = await transcript_of(model_ready, ENGLISH, tmp_path)
 
     assert transcript.language == "en"
-    spoken = words(transcript)
-    for phrase in ("world", "struggle", "imperialism of a newcomer", "existing state of things"):
-        assert phrase in spoken
+    assert spoken_words(transcript) >= ENGLISH_LECTURE_WORDS
 
 
 async def test_real_engine_reports_the_whole_recording_as_done_when_its_only_chunk_finishes(

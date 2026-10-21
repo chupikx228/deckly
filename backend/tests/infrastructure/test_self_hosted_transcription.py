@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import time
 from itertools import pairwise
 from pathlib import Path
@@ -19,7 +20,7 @@ from deckly.infrastructure.transcription.self_hosted import (
     EngineInvocation,
     SelfHostedTranscriptionClient,
 )
-from tests.fake_process import FakeProgram, fake_program
+from tests.fake_process import CHILD_PID_FILE, FakeProgram, fake_program, overrun_after_its_child_started
 from tests.infrastructure.test_recording_url_fetcher import (
     is_gone,
     same_directory,
@@ -142,16 +143,25 @@ async def test_engine_that_writes_without_end_is_stopped_at_the_output_cap(tmp_p
 async def test_engine_over_its_deadline_is_unavailable_and_killed_with_everything_it_started(
     tmp_path: Path,
 ) -> None:
-    pid_file = tmp_path / "child.pid"
-    program = fake_program(tmp_path, "engine", {"sleep": 60, "child_pid_file": str(pid_file)})
-    started = time.monotonic()
+    programs: dict[Path, FakeProgram] = {}
 
-    with pytest.raises(TranscriptionUnavailableError, match=r"did not finish within 0\.5 seconds"):
-        await client(program, deadline_seconds=0.5).transcribe(AUDIO)
+    async def overrun(deadline_seconds: float, attempt: Path) -> None:
+        scenario = {"sleep": 60, "child_pid_file": str(attempt / CHILD_PID_FILE)}
+        programs[attempt] = fake_program(attempt, "engine", scenario)
+        started = time.monotonic()
 
-    assert time.monotonic() - started < DEADLINE_SECONDS
-    assert await asyncio.to_thread(wait_until_gone, wait_for_pid(pid_file))
-    [invocation] = program.invocations
+        with pytest.raises(
+            TranscriptionUnavailableError,
+            match=f"did not finish within {re.escape(str(deadline_seconds))} seconds",
+        ):
+            await client(programs[attempt], deadline_seconds=deadline_seconds).transcribe(AUDIO)
+
+        assert time.monotonic() - started < DEADLINE_SECONDS
+
+    attempt, child = await overrun_after_its_child_started(tmp_path, overrun)
+
+    assert await asyncio.to_thread(wait_until_gone, child)
+    [invocation] = programs[attempt].invocations
     assert await asyncio.to_thread(is_gone, invocation.cwd)
 
 

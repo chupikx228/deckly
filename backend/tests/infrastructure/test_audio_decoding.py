@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from deckly.application.exceptions import DocumentHasNoTextError, UnreadableDocu
 from deckly.domain.document import DocumentFormat
 from deckly.infrastructure.transcription.client import BYTES_PER_SECOND, SAMPLE_RATE
 from deckly.infrastructure.transcription.decoding import FfmpegAudioDecoder
-from tests.fake_process import FakeProgram, fake_program
+from tests.fake_process import CHILD_PID_FILE, FakeProgram, fake_program, overrun_after_its_child_started
 from tests.infrastructure.test_recording_url_fetcher import wait_for_pid, wait_until_gone
 
 pytestmark = pytest.mark.anyio
@@ -131,17 +132,23 @@ async def test_trailing_half_sample_is_not_counted(tmp_path: Path) -> None:
 async def test_decode_over_its_deadline_is_unreadable_and_kills_ffmpeg_and_its_children(
     tmp_path: Path,
 ) -> None:
-    pid_file = tmp_path / "child.pid"
-    program = fake_program(tmp_path, "ffmpeg", {"sleep": 60, "child_pid_file": str(pid_file)})
-    started = time.monotonic()
+    async def overrun(deadline_seconds: float, attempt: Path) -> None:
+        scenario = {"sleep": 60, "child_pid_file": str(attempt / CHILD_PID_FILE)}
+        program = fake_program(attempt, "ffmpeg", scenario)
+        started = time.monotonic()
 
-    with pytest.raises(UnreadableDocumentError, match=r"longer than 0\.5 seconds"):
-        await decoder(program, deadline_seconds=0.5).decode(
-            recording(tmp_path), DocumentFormat.MP3, tmp_path / "audio.pcm"
-        )
+        with pytest.raises(
+            UnreadableDocumentError, match=f"longer than {re.escape(str(deadline_seconds))} seconds"
+        ):
+            await decoder(program, deadline_seconds=deadline_seconds).decode(
+                recording(attempt), DocumentFormat.MP3, attempt / "audio.pcm"
+            )
 
-    assert time.monotonic() - started < DEADLINE_SECONDS
-    assert await asyncio.to_thread(wait_until_gone, wait_for_pid(pid_file))
+        assert time.monotonic() - started < DEADLINE_SECONDS
+
+    _, child = await overrun_after_its_child_started(tmp_path, overrun)
+
+    assert await asyncio.to_thread(wait_until_gone, child)
 
 
 async def test_cancelled_decode_kills_ffmpeg_and_its_children(tmp_path: Path) -> None:
