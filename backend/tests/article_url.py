@@ -271,10 +271,11 @@ class Site:
             return
         framed = reply.declared_length is None
         writer.write(chunked(reply.body) if framed else reply.body)
-        while True:
+        while not writer.transport.is_closing():
             writer.write(chunked(reply.endless) if framed else reply.endless)
             self.sent_bytes += len(reply.endless)
             await writer.drain()
+            await asyncio.sleep(0)
 
 
 def ignore_loop_errors(loop: asyncio.AbstractEventLoop, context: dict[str, object]) -> None:

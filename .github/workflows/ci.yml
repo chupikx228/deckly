@@ -129,6 +129,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v10.2.0
         with:
+          python-version: '3.12.13'
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
 
