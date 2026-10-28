@@ -7,6 +7,7 @@ export {
   ERROR_CODE,
   REJECTION_REASON,
   MEDIA_KIND,
+  HEALTH_STATUS,
   TERMINAL_JOB_STATUSES,
   isTerminalJobStatus,
   type NoteType,
@@ -16,6 +17,7 @@ export {
   type ErrorCode,
   type RejectionReason,
   type MediaKind,
+  type HealthStatus,
 } from './enums';
 
 export {
@@ -26,6 +28,7 @@ export {
   errorCodeSchema,
   rejectionReasonSchema,
   mediaKindSchema,
+  healthStatusSchema,
   problemSchema,
   sourceSchema,
   attributionSchema,

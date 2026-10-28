@@ -18,6 +18,12 @@
     "INTERNAL_ERROR": "Something went wrong on our side."
   },
   "generation": {
-    "timeout": "This is taking longer than expected. You can keep waiting or try again."
+    "timeout": "This is taking longer than expected. You can keep waiting or cancel the generation.",
+    "unavailableTitle": "Generation unavailable",
+    "longWaitTitle": "Still working on it"
+  },
+  "service": {
+    "unavailable": "The generation service cannot be reached. Check your connection before generating.",
+    "degraded": "The generation service is running slowly. Generation may take longer than usual."
   }
 }

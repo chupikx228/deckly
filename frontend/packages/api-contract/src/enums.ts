@@ -95,3 +95,10 @@ export const MEDIA_KIND = {
 } as const;
 
 export type MediaKind = (typeof MEDIA_KIND)[keyof typeof MEDIA_KIND];
+
+export const HEALTH_STATUS = {
+  OK: 'ok',
+  DEGRADED: 'degraded',
+} as const;
+
+export type HealthStatus = (typeof HEALTH_STATUS)[keyof typeof HEALTH_STATUS];

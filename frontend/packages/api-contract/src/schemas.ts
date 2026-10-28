@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   DIFFICULTY,
   ERROR_CODE,
+  HEALTH_STATUS,
   JOB_STAGE,
   JOB_STATUS,
   MEDIA_KIND,
@@ -18,6 +19,7 @@ export const jobStageSchema = z.enum(JOB_STAGE);
 export const errorCodeSchema = z.enum(ERROR_CODE);
 export const rejectionReasonSchema = z.enum(REJECTION_REASON);
 export const mediaKindSchema = z.enum(MEDIA_KIND);
+export const healthStatusSchema = z.enum(HEALTH_STATUS);
 
 export const problemSchema = z.object({
   type: z.string(),
@@ -136,7 +138,7 @@ export const generationJobCreatedSchema = z.object({
 });
 
 export const healthSchema = z.object({
-  status: z.enum(['ok', 'degraded']),
+  status: healthStatusSchema,
   version: z.string(),
   quota: quotaSchema.optional(),
 });

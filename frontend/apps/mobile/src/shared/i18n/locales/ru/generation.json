@@ -65,5 +65,8 @@
   },
   "status": {
     "cancelled": "Генерация отменена"
+  },
+  "timeout": {
+    "keepWaiting": "Подождать ещё"
   }
 }
