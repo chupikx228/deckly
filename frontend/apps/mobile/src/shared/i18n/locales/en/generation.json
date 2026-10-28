@@ -61,5 +61,8 @@
   },
   "status": {
     "cancelled": "Generation cancelled"
+  },
+  "timeout": {
+    "keepWaiting": "Keep waiting"
   }
 }

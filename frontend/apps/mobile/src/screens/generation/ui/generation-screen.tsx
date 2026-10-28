@@ -1,15 +1,24 @@
 import { JOB_STATUS } from '@deckly/api-contract';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ActivityIndicator, View } from 'react-native';
 
-import { isGenerationTimedOut, useGenerationJob } from '@/entities/generation';
+import {
+  getJobErrorMessageKey,
+  getRequestErrorMessageKey,
+  getRequestErrorTitleKey,
+  isFailureWorthReporting,
+  useGenerationJob,
+  useLongWait,
+} from '@/entities/generation';
 import { useCancelGeneration } from '@/features/generate-deck';
+import { describeError } from '@/shared/api';
 import { ROUTE_PARAM, routes } from '@/shared/config';
 import { useLocale } from '@/shared/lib';
 import { EmptyState, Screen } from '@/shared/ui';
 
+import { GenerationLongWait } from './generation-long-wait';
 import { GenerationPreview } from './generation-preview';
 import { GenerationProgress } from './generation-progress';
 
@@ -23,8 +32,10 @@ export const GenerationScreen = () => {
   const params = useLocalSearchParams<{ jobId: string }>();
   const jobId = params[ROUTE_PARAM.JOB_ID];
 
-  const { data: job, isError } = useGenerationJob(jobId);
+  const { data: job, error } = useGenerationJob(jobId);
   const cancel = useCancelGeneration(jobId);
+  const { isLongWait, dismiss: handleKeepWaiting } = useLongWait(job);
+  const hasRequestedCloseRef = useRef(false);
 
   const handleClose = useCallback(() => {
     router.back();
@@ -41,12 +52,23 @@ export const GenerationScreen = () => {
     cancel.mutate();
   }, [cancel]);
 
-  if (isError) {
+  const handleCancelAndClose = useCallback(() => {
+    if (hasRequestedCloseRef.current) {
+      return;
+    }
+
+    hasRequestedCloseRef.current = true;
+    cancel.mutate(undefined, { onSettled: handleClose });
+  }, [cancel, handleClose]);
+
+  const failure = error === null ? null : describeError(error);
+
+  if (failure !== null && isFailureWorthReporting(failure, job)) {
     return (
       <Screen>
         <EmptyState
-          title={tErrors('generic.title')}
-          description={tErrors('generic.description')}
+          title={tErrors(getRequestErrorTitleKey(failure))}
+          description={tErrors(getRequestErrorMessageKey(failure))}
           actionLabel={tCommon('actions.close')}
           onAction={handleClose}
         />
@@ -80,7 +102,7 @@ export const GenerationScreen = () => {
       <Screen>
         <EmptyState
           title={tErrors('generic.title')}
-          description={tErrors('code.GENERATION_FAILED')}
+          description={tErrors(getJobErrorMessageKey(job.error))}
           actionLabel={tCommon('actions.close')}
           onAction={handleClose}
         />
@@ -88,20 +110,17 @@ export const GenerationScreen = () => {
     );
   }
 
-  if (job.status !== JOB_STATUS.SUCCEEDED) {
-    if (isGenerationTimedOut(job)) {
-      return (
-        <Screen>
-          <EmptyState
-            title={tErrors('generic.title')}
-            description={tErrors('generation.timeout')}
-            actionLabel={tCommon('actions.close')}
-            onAction={handleClose}
-          />
-        </Screen>
-      );
-    }
+  if (isLongWait) {
+    return (
+      <GenerationLongWait
+        isCancelling={cancel.isPending}
+        onCancel={handleCancelAndClose}
+        onKeepWaiting={handleKeepWaiting}
+      />
+    );
+  }
 
+  if (job.status !== JOB_STATUS.SUCCEEDED) {
     return (
       <GenerationProgress
         job={job}

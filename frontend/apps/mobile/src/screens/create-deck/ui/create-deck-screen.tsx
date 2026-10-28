@@ -24,6 +24,7 @@ import {
   type GeneratableType,
 } from '../model/wizard-options';
 import { NoteTypePicker } from './note-type-picker';
+import { ServiceBanner } from './service-banner';
 
 const MIN_TOPIC_LENGTH = 3;
 
@@ -103,6 +104,8 @@ export const CreateDeckScreen = () => {
   return (
     <Screen scrollable>
       <Text variant="display">{t('wizard.title')}</Text>
+
+      <ServiceBanner />
 
       <TextField
         placeholder={t('wizard.topicPlaceholder')}

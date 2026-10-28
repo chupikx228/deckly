@@ -11,10 +11,12 @@ export type { GenerationTransport } from './transport';
 export {
   ApiError,
   NetworkError,
+  describeError,
   isApiError,
   isNetworkError,
   isRetryableError,
   toApiError,
+  type ErrorDescriptor,
 } from './errors';
 
 export { getClientId } from './client-id';
