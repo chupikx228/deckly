@@ -48,6 +48,20 @@ describe('toApiError', () => {
     expect(toApiError(418, null).code).toBe(ERROR_CODE.VALIDATION_FAILED);
   });
 
+  it('reads a bodyless 405 as a method the endpoint does not accept', () => {
+    expect(toApiError(405, null).code).toBe(ERROR_CODE.METHOD_NOT_ALLOWED);
+  });
+
+  it('reads a proxy 413 as an oversized upload rather than a form error', () => {
+    expect(toApiError(413, '<html>413 Request Entity Too Large</html>').code).toBe(
+      ERROR_CODE.DOCUMENT_TOO_LARGE,
+    );
+  });
+
+  it('reads a bodyless 415 as an unsupported file type', () => {
+    expect(toApiError(415, null).code).toBe(ERROR_CODE.UNSUPPORTED_DOCUMENT_TYPE);
+  });
+
   it('keeps a partial problem body from being read as valid', () => {
     expect(toApiError(404, { title: 'Not found' }).code).toBe(ERROR_CODE.JOB_NOT_FOUND);
   });

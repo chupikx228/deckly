@@ -23,9 +23,7 @@ export const deriveCardOrdinals = (note: TypedNote): number[] => {
       return [FORWARD_ORDINAL, REVERSE_ORDINAL];
 
     case NOTE_TYPE.BASIC_OPTIONAL_REVERSED:
-      return note.fields.addReverse.trim().length > 0
-        ? [FORWARD_ORDINAL, REVERSE_ORDINAL]
-        : [FORWARD_ORDINAL];
+      return note.fields.addReverse ? [FORWARD_ORDINAL, REVERSE_ORDINAL] : [FORWARD_ORDINAL];
 
     case NOTE_TYPE.CLOZE:
       return getClozeIndices(note.fields.text);

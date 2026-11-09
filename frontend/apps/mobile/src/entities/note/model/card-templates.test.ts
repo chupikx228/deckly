@@ -29,7 +29,7 @@ describe('deriveCardOrdinals', () => {
     expect(deriveCardOrdinals(cloze)).toEqual([1, 2]);
   });
 
-  it('adds the reverse card only when the extra field is filled', () => {
+  it('adds the reverse card only when addReverse is true', () => {
     const without = parseTypedNote(NOTE_TYPE.BASIC_OPTIONAL_REVERSED, {
       front: 'dog',
       back: 'собака',
@@ -37,7 +37,7 @@ describe('deriveCardOrdinals', () => {
     const with_ = parseTypedNote(NOTE_TYPE.BASIC_OPTIONAL_REVERSED, {
       front: 'dog',
       back: 'собака',
-      addReverse: 'y',
+      addReverse: true,
     });
 
     expect(deriveCardOrdinals(without)).toEqual([FORWARD_ORDINAL]);

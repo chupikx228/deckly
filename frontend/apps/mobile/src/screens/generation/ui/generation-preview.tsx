@@ -1,4 +1,4 @@
-import type { GeneratedDeck, GeneratedNote } from '@deckly/api-contract';
+import type { GeneratedDeck, GeneratedNote, RejectionReason } from '@deckly/api-contract';
 import { FlashList } from '@shopify/flash-list';
 import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -43,7 +43,11 @@ export const GenerationPreview = ({
   }, []);
 
   const handleRegenerate = useCallback(
-    (clientId: string) => {
+    (clientId: string, reason: RejectionReason) => {
+      if (regeneratingId !== null) {
+        return;
+      }
+
       const target = notes.find((note) => note.clientId === clientId);
 
       if (target === undefined) {
@@ -58,6 +62,7 @@ export const GenerationPreview = ({
           language,
           noteType: target.noteType,
           rejectedNote: { fields: target.fields },
+          reason,
         },
         {
           onSuccess: (replacement) => {
@@ -73,7 +78,7 @@ export const GenerationPreview = ({
         },
       );
     },
-    [language, notes, regenerate, topic],
+    [language, notes, regenerate, regeneratingId, topic],
   );
 
   const handleSave = useCallback(() => {

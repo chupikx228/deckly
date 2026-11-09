@@ -154,16 +154,18 @@ export const generationRequestSchema = z.object({
   instructions: z.string().max(500).optional(),
 });
 
-export const regenerateNoteRequestSchema = z.object({
-  topic: z.string().min(3).max(200),
-  documentId: z.string().uuid().optional(),
-  language: z.string().min(2),
-  noteType: noteTypeSchema,
-  rejectedNote: z.object({
-    fields: z.record(z.string(), z.unknown()),
-  }),
-  reason: rejectionReasonSchema.optional(),
-});
+export const regenerateNoteRequestSchema = z
+  .object({
+    topic: z.string().min(3).max(200).optional(),
+    documentId: z.uuid().optional(),
+    language: z.string().min(2),
+    noteType: noteTypeSchema,
+    rejectedNote: z.object({
+      fields: z.record(z.string(), z.unknown()),
+    }),
+    reason: rejectionReasonSchema,
+  })
+  .refine((request) => (request.topic === undefined) !== (request.documentId === undefined));
 
 export type Problem = z.infer<typeof problemSchema>;
 export type Quota = z.infer<typeof quotaSchema>;

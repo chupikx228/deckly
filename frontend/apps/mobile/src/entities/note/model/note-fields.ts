@@ -12,7 +12,7 @@ export const basicFieldsSchema = z.object({
 export const optionalReversedFieldsSchema = z.object({
   front: nonEmpty,
   back: nonEmpty,
-  addReverse: z.string().default(''),
+  addReverse: z.boolean().default(false),
 });
 
 export const clozeFieldsSchema = z.object({

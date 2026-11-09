@@ -1,11 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
-import { JOB_STAGE, JOB_STATUS, NOTE_TYPE, SOURCE_KIND, isTerminalJobStatus } from './enums';
+import {
+  JOB_STAGE,
+  JOB_STATUS,
+  NOTE_TYPE,
+  REJECTION_REASON,
+  SOURCE_KIND,
+  isTerminalJobStatus,
+} from './enums';
 import {
   generationJobSchema,
   generationRequestSchema,
   mediaSchema,
   problemSchema,
+  regenerateNoteRequestSchema,
 } from './schemas';
 
 const runningJob = {
@@ -208,5 +216,50 @@ describe('isTerminalJobStatus', () => {
 
   it('treats an absent status as non-terminal', () => {
     expect(isTerminalJobStatus(undefined)).toBe(false);
+  });
+});
+
+describe('regenerateNoteRequestSchema', () => {
+  const base = {
+    language: 'ru',
+    noteType: NOTE_TYPE.BASIC,
+    rejectedNote: { fields: { front: 'dog', back: 'собака' } },
+    reason: REJECTION_REASON.INCORRECT,
+  };
+
+  const documentId = 'b1a2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+
+  it('accepts a request sourced from a topic', () => {
+    expect(regenerateNoteRequestSchema.safeParse({ ...base, topic: 'Road signs' }).success).toBe(
+      true,
+    );
+  });
+
+  it('accepts a request sourced from a document', () => {
+    expect(regenerateNoteRequestSchema.safeParse({ ...base, documentId }).success).toBe(true);
+  });
+
+  it('rejects a request carrying both a topic and a documentId', () => {
+    expect(
+      regenerateNoteRequestSchema.safeParse({ ...base, topic: 'Road signs', documentId }).success,
+    ).toBe(false);
+  });
+
+  it('rejects a request carrying neither a topic nor a documentId', () => {
+    expect(regenerateNoteRequestSchema.safeParse(base).success).toBe(false);
+  });
+
+  it('rejects a request without a rejection reason', () => {
+    const { reason: _reason, ...withoutReason } = base;
+
+    expect(
+      regenerateNoteRequestSchema.safeParse({ ...withoutReason, topic: 'Road signs' }).success,
+    ).toBe(false);
+  });
+
+  it('rejects a topic sent as null rather than omitted', () => {
+    expect(
+      regenerateNoteRequestSchema.safeParse({ ...base, topic: null, documentId }).success,
+    ).toBe(false);
   });
 });
