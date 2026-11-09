@@ -18,6 +18,13 @@ export const SOURCE_KIND = {
 
 export type SourceKind = (typeof SOURCE_KIND)[keyof typeof SOURCE_KIND];
 
+export const DOCUMENT_UNIT = {
+  PAGE: 'page',
+  SLIDE: 'slide',
+} as const;
+
+export type DocumentUnit = (typeof DOCUMENT_UNIT)[keyof typeof DOCUMENT_UNIT];
+
 export const DIFFICULTY = {
   BEGINNER: 'beginner',
   INTERMEDIATE: 'intermediate',
