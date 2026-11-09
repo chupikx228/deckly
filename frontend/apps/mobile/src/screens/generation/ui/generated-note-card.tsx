@@ -74,7 +74,7 @@ export const GeneratedNoteCard = memo(
             </Text>
           </View>
 
-          {firstSource === undefined ? null : <SourceCitation source={firstSource} />}
+          <SourceCitation source={firstSource} />
 
           {isPickingReason ? (
             <ReasonPicker onPick={handlePickReason} onCancel={handleCancelReason} />

@@ -6,11 +6,19 @@ import { Text } from '@/shared/ui';
 import { DOCUMENT_UNIT_CITATION_KEY, formatTimestamp } from '../model/source-citation';
 
 export interface SourceCitationProps {
-  source: Source;
+  source: Source | undefined;
 }
 
 export const SourceCitation = ({ source }: SourceCitationProps) => {
   const { t } = useTranslation('generation');
+
+  if (source === undefined) {
+    return (
+      <Text variant="caption" className="text-warning">
+        {t('source.missing')}
+      </Text>
+    );
+  }
 
   if (source.kind === SOURCE_KIND.DOCUMENT) {
     return (

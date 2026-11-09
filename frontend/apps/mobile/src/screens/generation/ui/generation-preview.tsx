@@ -1,9 +1,10 @@
 import type { GeneratedDeck, GeneratedNote, RejectionReason } from '@deckly/api-contract';
 import { FlashList } from '@shopify/flash-list';
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { View } from 'react-native';
 
+import { countNoteCards } from '@/entities/note';
 import { importGeneratedDeck, useRegenerateNote } from '@/features/generate-deck';
 import type { Locale } from '@/shared/config';
 import { BackHeader, Button, EmptyState, Screen, Text } from '@/shared/ui';
@@ -37,6 +38,11 @@ export const GenerationPreview = ({
   const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
 
   const regenerate = useRegenerateNote();
+
+  const unreadableCount = useMemo(
+    () => notes.filter((note) => countNoteCards(note.noteType, note.fields) === 0).length,
+    [notes],
+  );
 
   const handleDiscard = useCallback((clientId: string) => {
     setNotes((current) => current.filter((note) => note.clientId !== clientId));
@@ -119,6 +125,12 @@ export const GenerationPreview = ({
       <View className="gap-1 py-3">
         <Text variant="title">{t('preview.title')}</Text>
         <Text variant="caption">{t('preview.noteCount', { count: notes.length })}</Text>
+
+        {unreadableCount === 0 ? null : (
+          <Text variant="caption" className="text-warning">
+            {t('preview.skipped', { count: unreadableCount })}
+          </Text>
+        )}
       </View>
 
       <FlashList

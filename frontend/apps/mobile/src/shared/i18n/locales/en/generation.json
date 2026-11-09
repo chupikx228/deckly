@@ -42,8 +42,8 @@
     "regenerate": "Regenerate",
     "discard": "Discard",
     "save": "Save deck",
-    "skipped_one": "{{count}} card was skipped as unreadable",
-    "skipped_other": "{{count}} cards were skipped as unreadable",
+    "skipped_one": "{{count}} card can't be saved — it could not be read",
+    "skipped_other": "{{count}} cards can't be saved — they could not be read",
     "empty": "Nothing usable was generated. Try a more specific topic."
   },
   "rejection": {
@@ -70,6 +70,7 @@
     "web": "{{title}}",
     "documentPage": "{{title}} · page {{number}}",
     "documentSlide": "{{title}} · slide {{number}}",
-    "transcript": "{{title}} · {{from}}–{{to}}"
+    "transcript": "{{title}} · {{from}}–{{to}}",
+    "missing": "No source"
   }
 }

@@ -11,6 +11,7 @@ export {
 } from './model/note-fields';
 
 export {
+  countNoteCards,
   deriveCardOrdinals,
   getCardFaces,
   FORWARD_ORDINAL,
