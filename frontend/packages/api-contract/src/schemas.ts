@@ -149,16 +149,18 @@ export const healthSchema = z.object({
   quota: quotaSchema.optional(),
 });
 
-export const generationRequestSchema = z.object({
-  topic: z.string().min(3).max(200),
-  documentId: z.string().uuid().optional(),
-  language: z.string().min(2),
-  cardCount: z.number().int().min(5).max(200),
-  difficulty: difficultySchema.optional(),
-  noteTypes: z.array(noteTypeSchema).min(1).optional(),
-  includeImages: z.boolean().optional(),
-  instructions: z.string().max(500).optional(),
-});
+export const generationRequestSchema = z
+  .object({
+    topic: z.string().min(3).max(200).optional(),
+    documentId: z.uuid().optional(),
+    language: z.string().min(2),
+    cardCount: z.number().int().min(5).max(200),
+    difficulty: difficultySchema.optional(),
+    noteTypes: z.array(noteTypeSchema).min(1).optional(),
+    includeImages: z.boolean().optional(),
+    instructions: z.string().max(500).optional(),
+  })
+  .refine((request) => (request.topic === undefined) !== (request.documentId === undefined));
 
 export const regenerateNoteRequestSchema = z
   .object({

@@ -90,6 +90,11 @@ type SupportedMockType = keyof typeof BUILDERS;
 
 const isSupported = (value: string): value is SupportedMockType => value in BUILDERS;
 
+export const MOCK_DOCUMENT_SUBJECT = 'Uploaded document';
+
+export const resolveSubject = (request: GenerationRequest): string =>
+  request.topic ?? MOCK_DOCUMENT_SUBJECT;
+
 export const createMockNotes = (request: GenerationRequest): GeneratedNote[] => {
   const requested = (request.noteTypes ?? [NOTE_TYPE.BASIC]).filter(isSupported);
   const types = requested.length > 0 ? requested : [NOTE_TYPE.BASIC];
@@ -97,6 +102,6 @@ export const createMockNotes = (request: GenerationRequest): GeneratedNote[] => 
   return Array.from({ length: request.cardCount }, (_unused, index) => {
     const type = types[index % types.length] ?? NOTE_TYPE.BASIC;
 
-    return BUILDERS[type](request.topic, index + 1);
+    return BUILDERS[type](resolveSubject(request), index + 1);
   });
 };

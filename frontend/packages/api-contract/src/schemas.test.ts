@@ -250,6 +250,25 @@ describe('isTerminalJobStatus', () => {
   });
 });
 
+describe('generationRequestSchema sources', () => {
+  const base = { language: 'ru', cardCount: 30 };
+  const documentId = 'b1a2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+
+  it('accepts a generation from a document with no topic', () => {
+    expect(generationRequestSchema.safeParse({ ...base, documentId }).success).toBe(true);
+  });
+
+  it('rejects a generation carrying both a topic and a documentId', () => {
+    expect(
+      generationRequestSchema.safeParse({ ...base, topic: 'Road signs', documentId }).success,
+    ).toBe(false);
+  });
+
+  it('rejects a generation carrying neither a topic nor a documentId', () => {
+    expect(generationRequestSchema.safeParse(base).success).toBe(false);
+  });
+});
+
 describe('regenerateNoteRequestSchema', () => {
   const base = {
     language: 'ru',
