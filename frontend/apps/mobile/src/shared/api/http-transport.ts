@@ -3,6 +3,7 @@ import {
   generationJobCreatedSchema,
   generationJobSchema,
   healthSchema,
+  regenerateNoteRequestSchema,
 } from '@deckly/api-contract';
 import type { z } from 'zod';
 
@@ -100,7 +101,11 @@ export const httpTransport: GenerationTransport = {
   cancelGeneration: (jobId) => requestEmpty(`/generations/${jobId}/cancel`, { method: 'POST' }),
 
   regenerateNote: (request) =>
-    requestJson('/notes/regenerate', { method: 'POST', body: request }, generatedNoteSchema),
+    requestJson(
+      '/notes/regenerate',
+      { method: 'POST', body: regenerateNoteRequestSchema.parse(request) },
+      generatedNoteSchema,
+    ),
 
   getHealth: () => requestJson('/health', { method: 'GET' }, healthSchema),
 };
