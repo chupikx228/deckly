@@ -13,7 +13,7 @@ import { createId } from '@/shared/lib';
 
 import { ApiError } from '../errors';
 import type { GenerationTransport } from '../transport';
-import { createMockNotes } from './mock-notes';
+import { createMockNotes, resolveSubject } from './mock-notes';
 
 export const MOCK_STAGE_DURATION_MS = 1_400;
 export const MOCK_FAILURE_TOPIC_MARKER = 'fail';
@@ -71,7 +71,7 @@ const resolveStatus = (job: MockJob, elapsed: number): JobStatus => {
     return JOB_STATUS.RUNNING;
   }
 
-  return shouldFail(job.request.topic) ? JOB_STATUS.FAILED : JOB_STATUS.SUCCEEDED;
+  return shouldFail(resolveSubject(job.request)) ? JOB_STATUS.FAILED : JOB_STATUS.SUCCEEDED;
 };
 
 const toJob = (job: MockJob, now: number): GenerationJob => {
@@ -93,8 +93,8 @@ const toJob = (job: MockJob, now: number): GenerationJob => {
       status === JOB_STATUS.SUCCEEDED
         ? {
             deck: {
-              title: job.request.topic,
-              description: `Generated from "${job.request.topic}"`,
+              title: resolveSubject(job.request),
+              description: `Generated from "${resolveSubject(job.request)}"`,
               tags: [],
             },
             notes: job.notes,

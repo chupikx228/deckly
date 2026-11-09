@@ -2,6 +2,7 @@ import {
   generatedNoteSchema,
   generationJobCreatedSchema,
   generationJobSchema,
+  generationRequestSchema,
   healthSchema,
   regenerateNoteRequestSchema,
 } from '@deckly/api-contract';
@@ -91,7 +92,7 @@ export const httpTransport: GenerationTransport = {
   createGeneration: (request, idempotencyKey) =>
     requestJson(
       '/generations',
-      { method: 'POST', body: request, idempotencyKey },
+      { method: 'POST', body: generationRequestSchema.parse(request), idempotencyKey },
       generationJobCreatedSchema,
     ),
 
