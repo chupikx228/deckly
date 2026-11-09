@@ -172,10 +172,12 @@ describe('note sources', () => {
     expect(parsed.result?.notes[0]?.sources).toEqual([transcriptSource]);
   });
 
-  it('rejects a transcript source that ends before it starts', () => {
+  it('drops a transcript source that ends before it starts, keeping the rest', () => {
     const backwards = { ...transcriptSource, startMs: 5000, endMs: 5000 };
 
-    expect(() => generationJobSchema.parse(noteWithSources([backwards]))).toThrow();
+    const parsed = generationJobSchema.parse(noteWithSources([backwards, transcriptSource]));
+
+    expect(parsed.result?.notes[0]?.sources).toEqual([transcriptSource]);
   });
 
   it('ignores a source whose kind it does not know and keeps the rest', () => {
@@ -195,10 +197,20 @@ describe('note sources', () => {
     expect(() => generationJobSchema.parse(noteWithSources([source]))).toThrow();
   });
 
-  it('still rejects a malformed source of a known kind', () => {
+  it('drops a malformed source of a known kind rather than failing the whole result', () => {
     const { documentId: _documentId, ...incomplete } = transcriptSource;
 
-    expect(() => generationJobSchema.parse(noteWithSources([incomplete]))).toThrow();
+    const parsed = generationJobSchema.parse(noteWithSources([incomplete, transcriptSource]));
+
+    expect(parsed.result?.notes[0]?.sources).toEqual([transcriptSource]);
+  });
+
+  it('keeps a note whose every source was unusable rather than failing the result', () => {
+    const { documentId: _documentId, ...incomplete } = transcriptSource;
+
+    const parsed = generationJobSchema.parse(noteWithSources([incomplete]));
+
+    expect(parsed.result?.notes[0]?.sources).toEqual([]);
   });
 
   it.each([

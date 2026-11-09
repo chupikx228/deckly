@@ -64,26 +64,20 @@ export const sourceSchema = z.discriminatedUnion('kind', [
 ]);
 
 const kindedSchema = z.object({ kind: z.string() });
-const sourceKindSchema = z.enum(SOURCE_KIND);
 
-const titledSchema = z.object({ title: z.string() });
+const isSourceShaped = (source: unknown): boolean => kindedSchema.safeParse(source).success;
 
-const isUnknownSourceKind = (source: unknown): boolean => {
-  const kinded = kindedSchema.safeParse(source);
-  return kinded.success && !sourceKindSchema.safeParse(kinded.data.kind).success;
+const isUsableSource = (source: unknown): boolean => {
+  const parsed = sourceSchema.safeParse(source);
+
+  return parsed.success && parsed.data.title.trim().length > 0;
 };
-
-const hasBlankTitle = (source: unknown): boolean => {
-  const titled = titledSchema.safeParse(source);
-  return titled.success && titled.data.title.trim().length === 0;
-};
-
-const isDroppableSource = (source: unknown): boolean =>
-  isUnknownSourceKind(source) || hasBlankTitle(source);
 
 export const sourceListSchema = z.preprocess(
   (sources) =>
-    Array.isArray(sources) ? sources.filter((source) => !isDroppableSource(source)) : sources,
+    Array.isArray(sources)
+      ? sources.filter((source) => !isSourceShaped(source) || isUsableSource(source))
+      : sources,
   z.array(sourceSchema),
 );
 

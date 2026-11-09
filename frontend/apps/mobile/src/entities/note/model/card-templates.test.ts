@@ -5,6 +5,7 @@ import { NOTE_TYPE } from '@/shared/config';
 import {
   FORWARD_ORDINAL,
   REVERSE_ORDINAL,
+  countNoteCards,
   deriveCardOrdinals,
   getCardFaces,
 } from './card-templates';
@@ -93,5 +94,27 @@ describe('getCardFaces', () => {
 
   it('returns no hint when the extra field is blank', () => {
     expect(getCardFaces(cloze, 1).hint).toBeNull();
+  });
+});
+
+describe('countNoteCards', () => {
+  it('counts one card for a basic note', () => {
+    expect(countNoteCards(NOTE_TYPE.BASIC, { front: 'dog', back: 'собака' })).toBe(1);
+  });
+
+  it('counts both directions of a reversed note', () => {
+    expect(countNoteCards(NOTE_TYPE.BASIC_REVERSED, { front: 'dog', back: 'собака' })).toBe(2);
+  });
+
+  it('counts one card per cloze deletion', () => {
+    expect(countNoteCards(NOTE_TYPE.CLOZE, { text: '{{c1::a}} and {{c2::b}}' })).toBe(2);
+  });
+
+  it('counts nothing for fields that do not match the note type', () => {
+    expect(countNoteCards(NOTE_TYPE.BASIC, { front: 'dog' })).toBe(0);
+  });
+
+  it('counts nothing for cloze text without a deletion', () => {
+    expect(countNoteCards(NOTE_TYPE.CLOZE, { text: 'no markers here' })).toBe(0);
   });
 });

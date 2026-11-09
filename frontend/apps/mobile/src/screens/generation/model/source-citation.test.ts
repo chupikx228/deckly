@@ -55,6 +55,13 @@ describe('citation copy', () => {
   it.each([
     ['en', enGeneration],
     ['ru', ruGeneration],
+  ])('has copy for a note with no source in %s', (_locale, bundle) => {
+    expect(typeof resolveKey(bundle, 'source.missing')).toBe('string');
+  });
+
+  it.each([
+    ['en', enGeneration],
+    ['ru', ruGeneration],
   ])('resolves every citation key against the %s bundle', (_locale, bundle) => {
     for (const key of CITATION_KEYS) {
       expect(typeof resolveKey(bundle, key)).toBe('string');

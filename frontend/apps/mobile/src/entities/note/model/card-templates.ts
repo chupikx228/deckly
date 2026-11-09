@@ -1,7 +1,7 @@
-import { NOTE_TYPE } from '@/shared/config';
+import { NOTE_TYPE, type NoteType } from '@/shared/config';
 
 import { getClozeIndices, renderClozeAnswer, renderClozeQuestion } from './cloze';
-import type { TypedNote } from './note-fields';
+import { safeParseTypedNote, type TypedNote } from './note-fields';
 
 export const FORWARD_ORDINAL = 0;
 export const REVERSE_ORDINAL = 1;
@@ -58,4 +58,10 @@ export const getCardFaces = (note: TypedNote, templateOrdinal: number): CardFace
     case NOTE_TYPE.IMAGE_OCCLUSION:
       return { question: '', answer: '', hint: withHint(note.fields.extra) };
   }
+};
+
+export const countNoteCards = (noteType: NoteType, fields: unknown): number => {
+  const typed = safeParseTypedNote(noteType, fields);
+
+  return typed === null ? 0 : deriveCardOrdinals(typed).length;
 };
