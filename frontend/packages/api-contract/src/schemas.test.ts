@@ -200,6 +200,25 @@ describe('note sources', () => {
 
     expect(() => generationJobSchema.parse(noteWithSources([incomplete]))).toThrow();
   });
+
+  it.each([
+    ['empty', ''],
+    ['only whitespace', '   '],
+  ])('drops a source whose title is %s and keeps the rest', (_label, title) => {
+    const untitled = { ...transcriptSource, title };
+
+    const parsed = generationJobSchema.parse(noteWithSources([untitled, transcriptSource]));
+
+    expect(parsed.result?.notes[0]?.sources).toEqual([transcriptSource]);
+  });
+
+  it('leaves a note with no sources rather than failing when none are usable', () => {
+    const untitled = { ...transcriptSource, title: ' ' };
+
+    const parsed = generationJobSchema.parse(noteWithSources([untitled]));
+
+    expect(parsed.result?.notes[0]?.sources).toEqual([]);
+  });
 });
 
 describe('isTerminalJobStatus', () => {

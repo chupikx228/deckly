@@ -69,5 +69,11 @@
   },
   "timeout": {
     "keepWaiting": "Подождать ещё"
+  },
+  "source": {
+    "web": "{{title}}",
+    "documentPage": "{{title}} · стр. {{number}}",
+    "documentSlide": "{{title}} · слайд {{number}}",
+    "transcript": "{{title}} · {{from}}–{{to}}"
   }
 }

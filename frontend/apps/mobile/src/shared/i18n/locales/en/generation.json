@@ -65,5 +65,11 @@
   },
   "timeout": {
     "keepWaiting": "Keep waiting"
+  },
+  "source": {
+    "web": "{{title}}",
+    "documentPage": "{{title}} · page {{number}}",
+    "documentSlide": "{{title}} · slide {{number}}",
+    "transcript": "{{title}} · {{from}}–{{to}}"
   }
 }

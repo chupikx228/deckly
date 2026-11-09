@@ -8,6 +8,8 @@ export {
   REJECTION_REASON,
   MEDIA_KIND,
   HEALTH_STATUS,
+  DOCUMENT_UNIT,
+  SOURCE_KIND,
   TERMINAL_JOB_STATUSES,
   isTerminalJobStatus,
   type NoteType,
@@ -18,6 +20,8 @@ export {
   type RejectionReason,
   type MediaKind,
   type HealthStatus,
+  type DocumentUnit,
+  type SourceKind,
 } from './enums';
 
 export {
@@ -29,6 +33,7 @@ export {
   rejectionReasonSchema,
   mediaKindSchema,
   healthStatusSchema,
+  documentUnitSchema,
   problemSchema,
   sourceSchema,
   attributionSchema,

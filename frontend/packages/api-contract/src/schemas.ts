@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import {
   DIFFICULTY,
+  DOCUMENT_UNIT,
   ERROR_CODE,
   HEALTH_STATUS,
   JOB_STAGE,
@@ -20,6 +21,7 @@ export const errorCodeSchema = z.enum(ERROR_CODE);
 export const rejectionReasonSchema = z.enum(REJECTION_REASON);
 export const mediaKindSchema = z.enum(MEDIA_KIND);
 export const healthStatusSchema = z.enum(HEALTH_STATUS);
+export const documentUnitSchema = z.enum(DOCUMENT_UNIT);
 
 export const problemSchema = z.object({
   type: z.string(),
@@ -41,7 +43,7 @@ export const documentSourceSchema = z.object({
   kind: z.literal(SOURCE_KIND.DOCUMENT),
   title: z.string(),
   documentId: z.uuid(),
-  unit: z.enum(['page', 'slide']),
+  unit: documentUnitSchema,
   number: z.number().int().min(1),
 });
 
@@ -64,14 +66,24 @@ export const sourceSchema = z.discriminatedUnion('kind', [
 const kindedSchema = z.object({ kind: z.string() });
 const sourceKindSchema = z.enum(SOURCE_KIND);
 
+const titledSchema = z.object({ title: z.string() });
+
 const isUnknownSourceKind = (source: unknown): boolean => {
   const kinded = kindedSchema.safeParse(source);
   return kinded.success && !sourceKindSchema.safeParse(kinded.data.kind).success;
 };
 
+const hasBlankTitle = (source: unknown): boolean => {
+  const titled = titledSchema.safeParse(source);
+  return titled.success && titled.data.title.trim().length === 0;
+};
+
+const isDroppableSource = (source: unknown): boolean =>
+  isUnknownSourceKind(source) || hasBlankTitle(source);
+
 export const sourceListSchema = z.preprocess(
   (sources) =>
-    Array.isArray(sources) ? sources.filter((source) => !isUnknownSourceKind(source)) : sources,
+    Array.isArray(sources) ? sources.filter((source) => !isDroppableSource(source)) : sources,
   z.array(sourceSchema),
 );
 

@@ -12,6 +12,7 @@ import {
 import { Button, Card, Text } from '@/shared/ui';
 
 import { ReasonPicker } from './reason-picker';
+import { SourceCitation } from './source-citation';
 
 export interface GeneratedNoteCardProps {
   note: GeneratedNote;
@@ -60,6 +61,7 @@ export const GeneratedNoteCard = memo(
     }
 
     const [firstOrdinal] = deriveCardOrdinals(typed);
+    const [firstSource] = note.sources;
     const faces = getCardFaces(typed, firstOrdinal ?? FORWARD_ORDINAL);
 
     return (
@@ -72,11 +74,7 @@ export const GeneratedNoteCard = memo(
             </Text>
           </View>
 
-          {note.sources.length > 0 ? (
-            <Text variant="caption" numberOfLines={1}>
-              {`${t('preview.sources')}: ${note.sources[0]?.title ?? ''}`}
-            </Text>
-          ) : null}
+          {firstSource === undefined ? null : <SourceCitation source={firstSource} />}
 
           {isPickingReason ? (
             <ReasonPicker onPick={handlePickReason} onCancel={handleCancelReason} />

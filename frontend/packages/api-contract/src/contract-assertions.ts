@@ -2,6 +2,7 @@ import type { z } from 'zod';
 
 import type {
   Difficulty,
+  DocumentUnit,
   ErrorCode,
   HealthStatus,
   JobStage,
@@ -21,10 +22,13 @@ import type {
   generationResultSchema,
   healthSchema,
   mediaSchema,
+  documentSourceSchema,
   problemSchema,
   quotaSchema,
   regenerateNoteRequestSchema,
   sourceSchema,
+  transcriptSourceSchema,
+  webSourceSchema,
 } from './schemas';
 
 type MissingKeys<Actual, Expected> = Exclude<keyof Expected, keyof Actual>;
@@ -57,6 +61,13 @@ type Wire<Name extends keyof components['schemas']> = components['schemas'][Name
 export type AssertProblem = Expect<SameShape<z.infer<typeof problemSchema>, Wire<'Problem'>>>;
 export type AssertQuota = Expect<SameShape<z.infer<typeof quotaSchema>, Wire<'Quota'>>>;
 export type AssertSource = Expect<SameShape<z.infer<typeof sourceSchema>, Wire<'Source'>>>;
+export type AssertWebSource = Expect<SameShape<z.infer<typeof webSourceSchema>, Wire<'WebSource'>>>;
+export type AssertDocumentSource = Expect<
+  SameShape<z.infer<typeof documentSourceSchema>, Wire<'DocumentSource'>>
+>;
+export type AssertTranscriptSource = Expect<
+  SameShape<z.infer<typeof transcriptSourceSchema>, Wire<'TranscriptSource'>>
+>;
 export type AssertAttribution = Expect<
   SameShape<z.infer<typeof attributionSchema>, Wire<'Attribution'>>
 >;
@@ -94,3 +105,6 @@ export type AssertRejectionReasonMembers = Expect<
 >;
 export type AssertMediaKindMembers = Expect<SameMembers<MediaKind, Wire<'Media'>['kind']>>;
 export type AssertHealthStatusMembers = Expect<SameMembers<HealthStatus, Wire<'Health'>['status']>>;
+export type AssertDocumentUnitMembers = Expect<
+  SameMembers<DocumentUnit, Wire<'DocumentSource'>['unit']>
+>;
