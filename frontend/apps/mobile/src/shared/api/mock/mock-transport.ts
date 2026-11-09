@@ -39,6 +39,22 @@ const notFound = (): ApiError =>
     code: ERROR_CODE.JOB_NOT_FOUND,
   });
 
+const validationFailed = (title: string): ApiError =>
+  new ApiError({
+    type: 'about:blank',
+    title,
+    status: 400,
+    code: ERROR_CODE.VALIDATION_FAILED,
+  });
+
+const documentRegenerationUnsupported = (): ApiError =>
+  new ApiError({
+    type: 'about:blank',
+    title: 'Document regeneration unsupported',
+    status: 422,
+    code: ERROR_CODE.DOCUMENT_REGENERATION_UNSUPPORTED,
+  });
+
 const shouldFail = (topic: string): boolean =>
   topic.toLowerCase().includes(MOCK_FAILURE_TOPIC_MARKER);
 
@@ -147,8 +163,16 @@ export const mockTransport: GenerationTransport = {
     return Promise.resolve();
   },
 
-  regenerateNote: (request) =>
-    Promise.resolve(
+  regenerateNote: (request) => {
+    if ((request.topic === undefined) === (request.documentId === undefined)) {
+      return Promise.reject(validationFailed('Exactly one of topic and documentId is required'));
+    }
+
+    if (request.topic === undefined) {
+      return Promise.reject(documentRegenerationUnsupported());
+    }
+
+    return Promise.resolve(
       createMockNotes({
         topic: request.topic,
         language: request.language,
@@ -162,7 +186,8 @@ export const mockTransport: GenerationTransport = {
         sources: [],
         tags: [],
       },
-    ),
+    );
+  },
 
   getHealth: () => Promise.resolve({ status: 'ok', version: 'mock' }),
 };

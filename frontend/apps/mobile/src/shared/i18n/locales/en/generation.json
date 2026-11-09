@@ -52,7 +52,8 @@
     "incorrect": "Incorrect",
     "duplicate": "Duplicate",
     "off_topic": "Off topic",
-    "other": "Something else"
+    "other": "Something else",
+    "prompt": "Why regenerate this card?"
   },
   "cancel": {
     "action": "Cancel generation",

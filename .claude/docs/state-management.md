@@ -58,25 +58,46 @@ Key structure is hierarchical so that a broad invalidation cascades:
 Set once on the `QueryClient` in `src/app/providers`:
 
 - `staleTime` 60 seconds for anything but job polling.
-- `retry` 2 with exponential backoff; never retry a 4xx.
+- `retry` 2 with exponential backoff. The job poll overrides this with a predicate, because
+  _what_ is worth retrying is a separate question from _how many times_.
 - `refetchOnWindowFocus` false — it is not a web app.
 
 ### Polling a generation job
 
-Generation takes 30–120 seconds, so it is an asynchronous job. Poll with a dynamic interval
-and stop as soon as the job reaches a terminal state:
+Generation takes 30–120 seconds, so it is an asynchronous job. Poll with a dynamic interval,
+and stop both when the job reaches a terminal state and when an error arrives that retrying
+cannot fix:
 
 ```ts
 useQuery({
   queryKey: queryKeys.generation.job(jobId),
-  queryFn: () => fetchGenerationJob(jobId),
-  refetchInterval: (query) =>
-    isTerminalJobStatus(query.state.data?.status) ? false : POLL_INTERVAL_MS,
+  queryFn: () => generationApi.getGeneration(jobId),
+  refetchInterval: (query) => {
+    if (isTerminalJobStatus(query.state.data?.status)) {
+      return false;
+    }
+
+    if (query.state.error !== null && !isRetryableError(query.state.error)) {
+      return false;
+    }
+
+    return GENERATION.POLL_INTERVAL_MS;
+  },
+  retry: (failureCount, error) =>
+    isRetryableError(error) && failureCount < GENERATION.MAX_POLL_RETRIES,
 });
 ```
 
-Never poll forever. A job that has not progressed past the deadline surfaces a translated
-timeout error with a retry action.
+`isRetryableError` in `shared/api` is the single place that decides what is worth retrying: a
+transport failure, a 5xx and rate limiting are, a 404 is not. Rate limiting counts as retryable
+on purpose — a throttled poll must not kill a generation that is still running on the server.
+
+Never poll forever, and never let the server's own clock be the only thing that tells you a job
+is stuck. The elapsed-time check compares `updatedAt` to `createdAt`, and both freeze when the
+worker dies, so it catches a job that is slow but never one that is gone. `useLongWait` in
+`entities/generation` adds a wall-clock timer that fires either way, and the screen it drives
+offers cancelling the job server-side or waiting on — not a bare dismiss, which would leave the
+job running and still consuming the user's quota.
 
 ### Mutations
 

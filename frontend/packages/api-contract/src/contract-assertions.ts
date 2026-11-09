@@ -1,5 +1,15 @@
 import type { z } from 'zod';
 
+import type {
+  Difficulty,
+  ErrorCode,
+  HealthStatus,
+  JobStage,
+  JobStatus,
+  MediaKind,
+  NoteType,
+  RejectionReason,
+} from './enums';
 import type { components } from './generated/schema';
 import type {
   attributionSchema,
@@ -30,6 +40,16 @@ type SameShape<Actual, Expected> = [
   : {
       missingFromZodSchema: MissingKeys<Actual, Expected>;
       absentFromOpenApi: ExtraKeys<Actual, Expected>;
+    };
+
+type SameMembers<Actual, Expected> = [
+  Exclude<Expected, Actual>,
+  Exclude<Actual, Expected>,
+] extends [never, never]
+  ? true
+  : {
+      missingFromConstant: Exclude<Expected, Actual>;
+      absentFromOpenApi: Exclude<Actual, Expected>;
     };
 
 type Wire<Name extends keyof components['schemas']> = components['schemas'][Name];
@@ -63,3 +83,14 @@ export type AssertGenerationRequest = Expect<
 export type AssertRegenerateNoteRequest = Expect<
   SameShape<z.input<typeof regenerateNoteRequestSchema>, Wire<'RegenerateNoteRequest'>>
 >;
+
+export type AssertNoteTypeMembers = Expect<SameMembers<NoteType, Wire<'NoteType'>>>;
+export type AssertDifficultyMembers = Expect<SameMembers<Difficulty, Wire<'Difficulty'>>>;
+export type AssertJobStatusMembers = Expect<SameMembers<JobStatus, Wire<'JobStatus'>>>;
+export type AssertJobStageMembers = Expect<SameMembers<JobStage, Wire<'JobStage'>>>;
+export type AssertErrorCodeMembers = Expect<SameMembers<ErrorCode, Wire<'ErrorCode'>>>;
+export type AssertRejectionReasonMembers = Expect<
+  SameMembers<RejectionReason, Wire<'RejectionReason'>>
+>;
+export type AssertMediaKindMembers = Expect<SameMembers<MediaKind, Wire<'Media'>['kind']>>;
+export type AssertHealthStatusMembers = Expect<SameMembers<HealthStatus, Wire<'Health'>['status']>>;
