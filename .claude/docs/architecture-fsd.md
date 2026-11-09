@@ -109,13 +109,15 @@ Enforced by `eslint-plugin-boundaries`. Violations fail the build.
 
 ## Path aliases
 
-Configured in `tsconfig.json` and the Babel module resolver.
+Configured in `tsconfig.json`. There is no Babel module-resolver plugin — do not add one.
 
 ```
-@/app/*        @/screens/*    @/widgets/*
+@/app          @/app/*        @/screens/*    @/widgets/*
 @/features/*   @/entities/*   @/shared/*
-@srs           @api-contract
 ```
+
+The workspace packages are not aliases. They are imported by their package name,
+`@deckly/srs` and `@deckly/api-contract`.
 
 Never use relative paths that climb out of a slice (`../../../entities/deck`). Use the alias.
 

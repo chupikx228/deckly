@@ -52,8 +52,9 @@ Do not revisit these without an explicit instruction from the user.
 .
 ├── CLAUDE.md
 ├── .claude/
-│   ├── docs/                  Architecture and style guides
-│   └── backend/               API contract for the Python backend
+│   ├── docs/                  Frontend architecture and style guides
+│   ├── backend/               API contract, engineering guide, testing policy
+│   └── skills/                Task-specific skills
 ├── frontend/                  pnpm workspace — all JS/TS tooling and code
 │   ├── apps/
 │   │   └── mobile/            Expo application
@@ -99,18 +100,28 @@ Metro resolution in this monorepo depends on two settings that must not be remov
 `nodeLinker: hoisted` in `pnpm-workspace.yaml`, and the `watchFolders` / `nodeModulesPaths`
 entries in `frontend/apps/mobile/metro.config.js`.
 
-## Generation backend, mocked
+## Generation backend
 
-The Python backend does not exist yet, so `shared/api` picks its transport at startup:
+The Python backend is live: FastAPI, with its own [`backend/README.md`](backend/README.md) and
+[`.claude/backend/engineering-guide.md`](.claude/backend/engineering-guide.md). It is ahead of
+the mobile app — generation from a topic, an uploaded document, a recording and an article URL
+all work server-side, while the app still offers only a topic.
+
+`shared/api` picks its transport at startup:
 
 ```
 EXPO_PUBLIC_API_MOCK=false   # talk to the real backend at EXPO_PUBLIC_API_URL
 ```
 
-Anything else (including unset) uses the in-memory mock in `shared/api/mock`, which
-implements the same four endpoints, walks through the real stage sequence over about eight
-seconds, and honours idempotency keys and cancellation. A topic containing the word `fail`
-makes the job fail, which is how the error path is exercised.
+Anything else (including unset) uses the in-memory mock in `shared/api/mock`. The mock covers
+the five calls on `GenerationTransport` — create, poll, cancel, regenerate a note, health — and
+nothing more. The spec defines ten endpoints: document and recording upload have no mock at all,
+so feature work that consumes them has to run against a real backend.
+
+The mock walks through the real stage sequence over about eight seconds and honours idempotency
+keys and cancellation. A topic containing the word `fail` makes the job fail, which is how the
+error path is exercised. `getHealth` always answers `ok`, so the degraded-service banner cannot
+be exercised against the mock either.
 
 Both transports satisfy the same `GenerationTransport` interface and both parse responses
 with the Zod schemas from `@deckly/api-contract`, so swapping them cannot change the shape
@@ -132,8 +143,12 @@ suggestions.
 - [`.claude/docs/data-model.md`](.claude/docs/data-model.md) — note/card model, note types,
   review log, FSRS state
 - [`.claude/backend/api-contract.md`](.claude/backend/api-contract.md) — endpoint contract
-  the Python backend must implement
+  the Python backend implements
 - [`.claude/backend/openapi.yaml`](.claude/backend/openapi.yaml) — the machine-readable spec
+- [`.claude/backend/engineering-guide.md`](.claude/backend/engineering-guide.md) — backend
+  architecture, layering and conventions
+- [`.claude/backend/testing.md`](.claude/backend/testing.md) — backend testing policy,
+  including the untrusted model-output suite
 
 ## Hard rules
 
@@ -142,7 +157,9 @@ These override any default behaviour.
 1. **No comments in source code.** The code and its names carry the meaning. Markdown docs
    are the place for explanation.
 2. **TypeScript only.** No `.js` or `.jsx` files anywhere, including config files where a
-   TypeScript equivalent exists.
+   TypeScript equivalent exists. Toolchain configs that have no TypeScript form
+   (`babel.config.js`, `metro.config.js`, `eslint.config.js`) and generated output
+   (`drizzle/migrations.js`) are the exception. Leave them as they are.
 3. **No `any`.** No non-null assertions (`!`). No `as` casts except immediately after a Zod
    parse at a system boundary.
 4. **No magic strings.** Query keys, routes, screen ids, storage keys and locale codes come
