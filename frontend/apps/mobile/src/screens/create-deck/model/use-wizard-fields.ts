@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 
 import { DIFFICULTY, GENERATION, NOTE_TYPE, type Difficulty, type Locale } from '@/shared/config';
 import { useLocale } from '@/shared/lib';
+import { useSettingsStore } from '@/shared/model';
 
 import { GENERATION_SOURCE, type GeneratableType, type GenerationSource } from './wizard-options';
 
@@ -26,13 +27,14 @@ export interface WizardFields {
 
 export const useWizardFields = (): WizardFields => {
   const locale = useLocale();
+  const defaultContentLanguage = useSettingsStore((state) => state.contentLanguage);
 
   const [source, setSource] = useState<GenerationSource>(GENERATION_SOURCE.TOPIC);
   const [topic, setTopic] = useState('');
   const [cardCount, setCardCount] = useState<string>(String(GENERATION.DEFAULT_CARD_COUNT));
   const [difficulty, setDifficulty] = useState<Difficulty>(DIFFICULTY.INTERMEDIATE);
   const [noteTypes, setNoteTypes] = useState<readonly GeneratableType[]>([NOTE_TYPE.BASIC]);
-  const [contentLanguage, setContentLanguage] = useState<Locale>(locale);
+  const [contentLanguage, setContentLanguage] = useState<Locale>(defaultContentLanguage ?? locale);
   const [instructions, setInstructions] = useState('');
   const [articleUrl, setArticleUrl] = useState('');
 

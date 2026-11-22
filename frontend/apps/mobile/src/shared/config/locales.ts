@@ -9,6 +9,11 @@ export const DEFAULT_LOCALE: Locale = LOCALE.EN;
 
 export const SUPPORTED_LOCALES: readonly Locale[] = [LOCALE.EN, LOCALE.RU];
 
+export const LOCALE_LABEL: Readonly<Record<Locale, string>> = {
+  [LOCALE.EN]: 'English',
+  [LOCALE.RU]: 'Русский',
+};
+
 export const I18N_NAMESPACE = {
   COMMON: 'common',
   NAVIGATION: 'navigation',
