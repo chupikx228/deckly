@@ -1,18 +1,20 @@
 import {
+  documentSchema,
   generatedNoteSchema,
   generationJobCreatedSchema,
   generationJobSchema,
   generationRequestSchema,
   healthSchema,
   regenerateNoteRequestSchema,
+  type Document,
 } from '@deckly/api-contract';
 import type { z } from 'zod';
 
-import { API } from '@/shared/config';
+import { API, UPLOAD } from '@/shared/config';
 
 import { getClientId } from './client-id';
 import { NetworkError, toApiError } from './errors';
-import type { GenerationTransport } from './transport';
+import type { DocumentUpload, GenerationTransport, UploadProgressHandler } from './transport';
 
 interface RequestOptions {
   readonly method: 'GET' | 'POST';
@@ -88,7 +90,68 @@ const requestEmpty = async (path: string, options: RequestOptions): Promise<void
   }
 };
 
+const parseText = (text: string): unknown => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
+
+const postDocument = (file: DocumentUpload, onProgress: UploadProgressHandler): Promise<Document> =>
+  new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    const form = new FormData();
+
+    form.append('file', { uri: file.uri, name: file.name, type: file.mimeType });
+
+    request.open('POST', `${API.BASE_URL}/documents`);
+    request.setRequestHeader('Accept', 'application/json');
+    request.setRequestHeader('X-Client-Id', getClientId());
+    request.timeout = UPLOAD.TIMEOUT_MS;
+
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        onProgress(event.loaded / event.total);
+      }
+    };
+
+    request.onload = () => {
+      const body = parseText(request.responseText);
+
+      if (request.status < 200 || request.status >= 300) {
+        reject(toApiError(request.status, body));
+        return;
+      }
+
+      const parsed = documentSchema.safeParse(body);
+
+      if (!parsed.success) {
+        reject(parsed.error);
+        return;
+      }
+
+      resolve(parsed.data);
+    };
+
+    request.onerror = () => {
+      reject(new NetworkError(new Error('Upload failed')));
+    };
+
+    request.ontimeout = () => {
+      reject(new NetworkError(new Error('Upload timed out')));
+    };
+
+    request.onabort = () => {
+      reject(new NetworkError(new Error('Upload aborted')));
+    };
+
+    request.send(form);
+  });
+
 export const httpTransport: GenerationTransport = {
+  uploadDocument: postDocument,
+
   createGeneration: (request, idempotencyKey) =>
     requestJson(
       '/generations',

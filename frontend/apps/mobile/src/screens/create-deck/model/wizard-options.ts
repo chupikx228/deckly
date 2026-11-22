@@ -1,5 +1,22 @@
 import { DIFFICULTY, LOCALE, NOTE_TYPE, type Difficulty, type Locale } from '@/shared/config';
 
+export const GENERATION_SOURCE = {
+  TOPIC: 'topic',
+  DOCUMENT: 'document',
+} as const;
+
+export type GenerationSource = (typeof GENERATION_SOURCE)[keyof typeof GENERATION_SOURCE];
+
+export const GENERATION_SOURCE_OPTIONS = [
+  GENERATION_SOURCE.TOPIC,
+  GENERATION_SOURCE.DOCUMENT,
+] as const;
+
+export const GENERATION_SOURCE_LABEL_KEY = {
+  [GENERATION_SOURCE.TOPIC]: 'wizard.sourceTopic',
+  [GENERATION_SOURCE.DOCUMENT]: 'wizard.sourceDocument',
+} as const satisfies Record<GenerationSource, string>;
+
 export const CARD_COUNT_OPTIONS = [10, 20, 30, 50] as const;
 
 export type CardCountOption = (typeof CARD_COUNT_OPTIONS)[number];

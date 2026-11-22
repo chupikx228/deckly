@@ -1,4 +1,5 @@
 import type {
+  Document,
   GeneratedNote,
   GenerationJob,
   GenerationJobCreated,
@@ -7,7 +8,17 @@ import type {
   RegenerateNoteRequest,
 } from '@deckly/api-contract';
 
+export interface DocumentUpload {
+  readonly uri: string;
+  readonly name: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+}
+
+export type UploadProgressHandler = (ratio: number) => void;
+
 export interface GenerationTransport {
+  uploadDocument(file: DocumentUpload, onProgress: UploadProgressHandler): Promise<Document>;
   createGeneration(
     request: GenerationRequest,
     idempotencyKey: string,

@@ -8,6 +8,7 @@ export type QueryKeyRoot = (typeof QUERY_KEY)[keyof typeof QUERY_KEY];
 export const MUTATION_KEY = {
   CREATE_GENERATION: 'create-generation',
   CANCEL_GENERATION: 'cancel-generation',
+  UPLOAD_DOCUMENT: 'upload-document',
   REGENERATE_NOTE: 'regenerate-note',
 } as const;
 
@@ -31,6 +32,8 @@ export const mutationKeys = {
     [MUTATION_KEY.CREATE_GENERATION] as const,
   cancelGeneration: (jobId: string): readonly [typeof MUTATION_KEY.CANCEL_GENERATION, string] =>
     [MUTATION_KEY.CANCEL_GENERATION, jobId] as const,
+  uploadDocument: (): readonly [typeof MUTATION_KEY.UPLOAD_DOCUMENT] =>
+    [MUTATION_KEY.UPLOAD_DOCUMENT] as const,
   regenerateNote: (clientId: string): readonly [typeof MUTATION_KEY.REGENERATE_NOTE, string] =>
     [MUTATION_KEY.REGENERATE_NOTE, clientId] as const,
 } as const;

@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import {
   DIFFICULTY,
+  DOCUMENT_CONTENT_TYPE,
   DOCUMENT_UNIT,
   ERROR_CODE,
   HEALTH_STATUS,
@@ -22,6 +23,7 @@ export const rejectionReasonSchema = z.enum(REJECTION_REASON);
 export const mediaKindSchema = z.enum(MEDIA_KIND);
 export const healthStatusSchema = z.enum(HEALTH_STATUS);
 export const documentUnitSchema = z.enum(DOCUMENT_UNIT);
+export const documentContentTypeSchema = z.enum(DOCUMENT_CONTENT_TYPE);
 
 export const problemSchema = z.object({
   type: z.string(),
@@ -143,6 +145,16 @@ export const generationJobCreatedSchema = z.object({
   quota: quotaSchema.optional(),
 });
 
+export const documentSchema = z.object({
+  documentId: z.uuid(),
+  filename: z.string().min(1).max(255),
+  sizeBytes: z.number().int().min(1),
+  contentType: documentContentTypeSchema,
+  uploadedAt: z.iso.datetime(),
+  durationSeconds: z.number().positive().optional(),
+  sourceUrl: z.url().max(2048).optional(),
+});
+
 export const healthSchema = z.object({
   status: healthStatusSchema,
   version: z.string(),
@@ -185,6 +197,7 @@ export type GeneratedDeck = z.infer<typeof generatedDeckSchema>;
 export type GenerationResult = z.infer<typeof generationResultSchema>;
 export type GenerationJob = z.infer<typeof generationJobSchema>;
 export type GenerationJobCreated = z.infer<typeof generationJobCreatedSchema>;
+export type Document = z.infer<typeof documentSchema>;
 export type Health = z.infer<typeof healthSchema>;
 export type GenerationRequest = z.input<typeof generationRequestSchema>;
 export type RegenerateNoteRequest = z.input<typeof regenerateNoteRequestSchema>;

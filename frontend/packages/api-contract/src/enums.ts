@@ -25,6 +25,25 @@ export const DOCUMENT_UNIT = {
 
 export type DocumentUnit = (typeof DOCUMENT_UNIT)[keyof typeof DOCUMENT_UNIT];
 
+export const DOCUMENT_CONTENT_TYPE = {
+  PDF: 'application/pdf',
+  PPTX: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  MP3: 'audio/mpeg',
+  M4A: 'audio/mp4',
+  WAV: 'audio/wav',
+  MP4: 'video/mp4',
+  MOV: 'video/quicktime',
+  TXT: 'text/plain',
+} as const;
+
+export type DocumentContentType =
+  (typeof DOCUMENT_CONTENT_TYPE)[keyof typeof DOCUMENT_CONTENT_TYPE];
+
+export const GENERATABLE_DOCUMENT_TYPES: readonly DocumentContentType[] = [
+  DOCUMENT_CONTENT_TYPE.PDF,
+  DOCUMENT_CONTENT_TYPE.PPTX,
+];
+
 export const DIFFICULTY = {
   BEGINNER: 'beginner',
   INTERMEDIATE: 'intermediate',

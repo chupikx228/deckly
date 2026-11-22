@@ -1,5 +1,7 @@
 export {
   useCreateGeneration,
+  useUploadDocument,
+  type UploadDocumentInput,
   useCancelGeneration,
   useRegenerateNote,
 } from './api/generation-mutations';

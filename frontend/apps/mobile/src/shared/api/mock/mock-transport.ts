@@ -1,19 +1,24 @@
 import {
+  DOCUMENT_CONTENT_TYPE,
   ERROR_CODE,
+  GENERATABLE_DOCUMENT_TYPES,
   JOB_STAGE_ORDER,
   JOB_STATUS,
   NOTE_TYPE,
   type GeneratedNote,
   type GenerationJob,
+  type Document,
+  type DocumentContentType,
   type GenerationRequest,
   type JobStatus,
 } from '@deckly/api-contract';
 
+import { UPLOAD } from '@/shared/config';
 import { createId } from '@/shared/lib';
 
 import { ApiError } from '../errors';
-import type { GenerationTransport } from '../transport';
-import { createMockNotes, resolveSubject } from './mock-notes';
+import type { DocumentUpload, GenerationTransport, UploadProgressHandler } from '../transport';
+import { createMockNotes } from './mock-notes';
 
 export const MOCK_STAGE_DURATION_MS = 1_400;
 export const MOCK_FAILURE_TOPIC_MARKER = 'fail';
@@ -29,6 +34,21 @@ interface MockJob {
 }
 
 const jobs = new Map<string, MockJob>();
+const documents = new Map<string, Document>();
+
+const MOCK_DOCUMENT_SUBJECT = 'Uploaded document';
+const MOCK_UPLOAD_STEPS = 5;
+const MOCK_UPLOAD_STEP_MS = 160;
+
+const resolveSubject = (request: GenerationRequest): string => {
+  if (request.topic !== undefined) {
+    return request.topic;
+  }
+
+  const uploaded = request.documentId === undefined ? undefined : documents.get(request.documentId);
+
+  return uploaded?.filename ?? MOCK_DOCUMENT_SUBJECT;
+};
 const idempotencyKeys = new Map<string, string>();
 
 const notFound = (): ApiError =>
@@ -37,6 +57,56 @@ const notFound = (): ApiError =>
     title: 'Job not found',
     status: 404,
     code: ERROR_CODE.JOB_NOT_FOUND,
+  });
+
+const documentTooLarge = (): ApiError =>
+  new ApiError({
+    type: 'about:blank',
+    title: 'Document too large',
+    status: 413,
+    code: ERROR_CODE.DOCUMENT_TOO_LARGE,
+  });
+
+const unsupportedDocumentType = (): ApiError =>
+  new ApiError({
+    type: 'about:blank',
+    title: 'Unsupported document type',
+    status: 415,
+    code: ERROR_CODE.UNSUPPORTED_DOCUMENT_TYPE,
+  });
+
+const EXTENSION_CONTENT_TYPE: Readonly<Record<string, DocumentContentType>> = {
+  pdf: DOCUMENT_CONTENT_TYPE.PDF,
+  pptx: DOCUMENT_CONTENT_TYPE.PPTX,
+};
+
+const toContentType = (file: DocumentUpload): DocumentContentType | undefined => {
+  const declared = GENERATABLE_DOCUMENT_TYPES.find((type) => type === file.mimeType);
+
+  if (declared !== undefined) {
+    return declared;
+  }
+
+  return EXTENSION_CONTENT_TYPE[file.name.split('.').pop()?.toLowerCase() ?? ''];
+};
+
+const simulateUpload = (onProgress: UploadProgressHandler): Promise<void> =>
+  new Promise((resolve) => {
+    let step = 0;
+
+    const tick = (): void => {
+      step += 1;
+      onProgress(step / MOCK_UPLOAD_STEPS);
+
+      if (step >= MOCK_UPLOAD_STEPS) {
+        resolve();
+        return;
+      }
+
+      setTimeout(tick, MOCK_UPLOAD_STEP_MS);
+    };
+
+    setTimeout(tick, MOCK_UPLOAD_STEP_MS);
   });
 
 const validationFailed = (title: string): ApiError =>
@@ -123,6 +193,32 @@ const readJob = (jobId: string): MockJob => {
 };
 
 export const mockTransport: GenerationTransport = {
+  uploadDocument: async (file: DocumentUpload, onProgress: UploadProgressHandler) => {
+    if (file.sizeBytes > UPLOAD.MAX_BYTES) {
+      throw documentTooLarge();
+    }
+
+    const contentType = toContentType(file);
+
+    if (contentType === undefined) {
+      throw unsupportedDocumentType();
+    }
+
+    await simulateUpload(onProgress);
+
+    const uploaded: Document = {
+      documentId: createId(),
+      filename: file.name,
+      sizeBytes: file.sizeBytes,
+      contentType,
+      uploadedAt: new Date().toISOString(),
+    };
+
+    documents.set(uploaded.documentId, uploaded);
+
+    return uploaded;
+  },
+
   createGeneration: (request, idempotencyKey) => {
     const existing = idempotencyKeys.get(idempotencyKey);
 
@@ -143,7 +239,7 @@ export const mockTransport: GenerationTransport = {
       jobId,
       request,
       createdAt,
-      notes: createMockNotes(request),
+      notes: createMockNotes(request, resolveSubject(request)),
       isCancelled: false,
     });
     idempotencyKeys.set(idempotencyKey, jobId);
@@ -173,12 +269,15 @@ export const mockTransport: GenerationTransport = {
     }
 
     return Promise.resolve(
-      createMockNotes({
-        topic: request.topic,
-        language: request.language,
-        cardCount: 5,
-        noteTypes: [request.noteType],
-      })[0] ?? {
+      createMockNotes(
+        {
+          topic: request.topic,
+          language: request.language,
+          cardCount: 5,
+          noteTypes: [request.noteType],
+        },
+        request.topic,
+      )[0] ?? {
         clientId: createId(),
         noteType: NOTE_TYPE.BASIC,
         fields: { front: request.topic, back: 'Regenerated answer' },

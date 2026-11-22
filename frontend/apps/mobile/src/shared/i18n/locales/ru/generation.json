@@ -9,7 +9,12 @@
     "includeImages": "Добавлять картинки",
     "instructionsPlaceholder": "На чём сделать акцент?",
     "submit": "Сгенерировать",
-    "instructionsLabel": "Дополнительные указания"
+    "instructionsLabel": "Дополнительные указания",
+    "sourceTopic": "Тема",
+    "sourceDocument": "Документ",
+    "chooseFile": "Выбрать PDF или слайды",
+    "replaceFile": "Выбрать другой файл",
+    "uploading": "Загрузка… {{percent}}%"
   },
   "difficulty": {
     "beginner": "Начальный",

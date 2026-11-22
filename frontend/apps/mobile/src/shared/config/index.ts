@@ -1,4 +1,4 @@
-export { API, GENERATION, QUERY_DEFAULTS, STUDY_DEFAULTS } from './api';
+export { API, GENERATION, UPLOAD, QUERY_DEFAULTS, STUDY_DEFAULTS } from './api';
 
 export { TAB_BAR_TINT } from './colors';
 
