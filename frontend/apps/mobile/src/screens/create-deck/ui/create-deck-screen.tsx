@@ -3,6 +3,8 @@ import { useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { View } from 'react-native';
 
+import { ERROR_CODE } from '@deckly/api-contract';
+
 import { getRequestErrorMessageKey } from '@/entities/generation';
 import { describeError } from '@/shared/api';
 import { routes } from '@/shared/config';
@@ -21,6 +23,7 @@ import {
 } from '../model/wizard-options';
 import { NoteTypePicker } from './note-type-picker';
 import { ServiceBanner } from './service-banner';
+import { SourceField } from './source-field';
 
 export const CreateDeckScreen = () => {
   const { t } = useTranslation('generation');
@@ -54,6 +57,11 @@ export const CreateDeckScreen = () => {
     [],
   );
 
+  const failure = form.error === null ? null : describeError(form.error);
+  const isFileLink =
+    failure?.code === ERROR_CODE.UNSUPPORTED_DOCUMENT_TYPE &&
+    form.source === GENERATION_SOURCE.ARTICLE;
+
   const handleSubmit = useCallback(() => {
     form.submit((jobId) => {
       router.push(routes.generation(jobId));
@@ -68,28 +76,7 @@ export const CreateDeckScreen = () => {
 
       <SegmentedControl options={sourceOptions} value={form.source} onChange={form.setSource} />
 
-      {form.source === GENERATION_SOURCE.DOCUMENT ? (
-        <View className="gap-2">
-          {form.file === null ? null : (
-            <Text variant="label" numberOfLines={1}>
-              {form.file.name}
-            </Text>
-          )}
-
-          <Button
-            label={form.file === null ? t('wizard.chooseFile') : t('wizard.replaceFile')}
-            variant="secondary"
-            onPress={form.pickFile}
-          />
-        </View>
-      ) : (
-        <TextField
-          placeholder={t('wizard.topicPlaceholder')}
-          value={form.topic}
-          multiline
-          onChangeText={form.setTopic}
-        />
-      )}
+      <SourceField form={form} />
 
       <View className="gap-2">
         <Text variant="overline">{t('wizard.cardCount')}</Text>
@@ -135,9 +122,11 @@ export const CreateDeckScreen = () => {
         <Text variant="caption">{t('wizard.uploading', { percent: form.uploadPercent })}</Text>
       ) : null}
 
-      {form.error === null ? null : (
+      {failure === null ? null : (
         <Text variant="caption" className="text-danger">
-          {tErrors(getRequestErrorMessageKey(describeError(form.error)))}
+          {isFileLink
+            ? tErrors('article.looksLikeFile')
+            : tErrors(getRequestErrorMessageKey(failure))}
         </Text>
       )}
 

@@ -25,6 +25,8 @@ export const DOCUMENT_UNIT = {
 
 export type DocumentUnit = (typeof DOCUMENT_UNIT)[keyof typeof DOCUMENT_UNIT];
 
+export const ARTICLE_URL_MAX_LENGTH = 2048;
+
 export const DOCUMENT_CONTENT_TYPE = {
   PDF: 'application/pdf',
   PPTX: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',

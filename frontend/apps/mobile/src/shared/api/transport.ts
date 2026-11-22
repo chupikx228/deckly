@@ -19,6 +19,7 @@ export type UploadProgressHandler = (ratio: number) => void;
 
 export interface GenerationTransport {
   uploadDocument(file: DocumentUpload, onProgress: UploadProgressHandler): Promise<Document>;
+  fetchArticle(url: string): Promise<Document>;
   createGeneration(
     request: GenerationRequest,
     idempotencyKey: string,

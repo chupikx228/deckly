@@ -1,7 +1,7 @@
 import { ERROR_CODE, type GenerationRequest } from '@deckly/api-contract';
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 
-import { useCreateGeneration, useUploadDocument } from '@/features/generate-deck';
+import { useCreateGeneration, useFetchArticle, useUploadDocument } from '@/features/generate-deck';
 import { ApiError, type DocumentUpload } from '@/shared/api';
 import { UPLOAD } from '@/shared/config';
 
@@ -22,6 +22,7 @@ export interface SubmitInput {
   readonly base: GenerationRequestBase;
   readonly topic: string | null;
   readonly file: DocumentUpload | null;
+  readonly articleUrl: string | null;
 }
 
 export interface GenerationSubmit {
@@ -38,9 +39,11 @@ export const useGenerationSubmit = (): GenerationSubmit => {
   const [refusal, setRefusal] = useState<Error | null>(null);
 
   const uploadDocument = useUploadDocument();
+  const fetchArticle = useFetchArticle();
   const createGeneration = useCreateGeneration();
 
-  const isSubmitting = uploadDocument.isPending || createGeneration.isPending;
+  const isSubmitting =
+    uploadDocument.isPending || fetchArticle.isPending || createGeneration.isPending;
 
   const submit = useCallback(
     (input: SubmitInput, onCreated: (jobId: string) => void) => {
@@ -60,6 +63,16 @@ export const useGenerationSubmit = (): GenerationSubmit => {
 
       if (input.topic !== null) {
         start({ ...input.base, topic: input.topic });
+        return;
+      }
+
+      if (input.articleUrl !== null) {
+        fetchArticle.mutate(input.articleUrl, {
+          onSuccess: (article) => {
+            start({ ...input.base, documentId: article.documentId });
+          },
+        });
+
         return;
       }
 
@@ -83,21 +96,35 @@ export const useGenerationSubmit = (): GenerationSubmit => {
         },
       );
     },
-    [createGeneration, isSubmitting, uploadDocument],
+    [createGeneration, fetchArticle, isSubmitting, uploadDocument],
   );
 
   const reset = useCallback(() => {
     setRefusal(null);
     uploadDocument.reset();
+    fetchArticle.reset();
     createGeneration.reset();
-  }, [createGeneration, uploadDocument]);
+  }, [createGeneration, fetchArticle, uploadDocument]);
 
-  return {
-    isUploading: uploadDocument.isPending,
-    isSubmitting,
-    uploadPercent: Math.round(uploadRatio * PERCENT),
-    error: refusal ?? uploadDocument.error ?? createGeneration.error,
-    submit,
-    reset,
-  };
+  return useMemo(
+    () => ({
+      isUploading: uploadDocument.isPending,
+      isSubmitting,
+      uploadPercent: Math.round(uploadRatio * PERCENT),
+      error: refusal ?? uploadDocument.error ?? fetchArticle.error ?? createGeneration.error,
+      submit,
+      reset,
+    }),
+    [
+      createGeneration.error,
+      fetchArticle.error,
+      isSubmitting,
+      refusal,
+      reset,
+      submit,
+      uploadDocument.error,
+      uploadDocument.isPending,
+      uploadRatio,
+    ],
+  );
 };

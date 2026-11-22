@@ -1,6 +1,7 @@
 export {
   useCreateGeneration,
   useUploadDocument,
+  useFetchArticle,
   type UploadDocumentInput,
   useCancelGeneration,
   useRegenerateNote,

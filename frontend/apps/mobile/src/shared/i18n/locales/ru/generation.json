@@ -14,7 +14,9 @@
     "sourceDocument": "Документ",
     "chooseFile": "Выбрать PDF или слайды",
     "replaceFile": "Выбрать другой файл",
-    "uploading": "Загрузка… {{percent}}%"
+    "uploading": "Загрузка… {{percent}}%",
+    "sourceArticle": "Ссылка",
+    "urlPlaceholder": "https://ru.wikipedia.org/wiki/..."
   },
   "difficulty": {
     "beginner": "Начальный",

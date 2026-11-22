@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import {
+  ARTICLE_URL_MAX_LENGTH,
   DIFFICULTY,
   DOCUMENT_CONTENT_TYPE,
   DOCUMENT_UNIT,
@@ -145,6 +146,10 @@ export const generationJobCreatedSchema = z.object({
   quota: quotaSchema.optional(),
 });
 
+export const articleUrlRequestSchema = z.object({
+  url: z.string().min(1).max(ARTICLE_URL_MAX_LENGTH),
+});
+
 export const documentSchema = z.object({
   documentId: z.uuid(),
   filename: z.string().min(1).max(255),
@@ -197,6 +202,7 @@ export type GeneratedDeck = z.infer<typeof generatedDeckSchema>;
 export type GenerationResult = z.infer<typeof generationResultSchema>;
 export type GenerationJob = z.infer<typeof generationJobSchema>;
 export type GenerationJobCreated = z.infer<typeof generationJobCreatedSchema>;
+export type ArticleUrlRequest = z.input<typeof articleUrlRequestSchema>;
 export type Document = z.infer<typeof documentSchema>;
 export type Health = z.infer<typeof healthSchema>;
 export type GenerationRequest = z.input<typeof generationRequestSchema>;

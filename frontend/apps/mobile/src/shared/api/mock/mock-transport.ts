@@ -67,6 +67,14 @@ const documentTooLarge = (): ApiError =>
     code: ERROR_CODE.DOCUMENT_TOO_LARGE,
   });
 
+const unsupportedArticleUrl = (): ApiError =>
+  new ApiError({
+    type: 'about:blank',
+    title: 'Unsupported article URL',
+    status: 422,
+    code: ERROR_CODE.UNSUPPORTED_ARTICLE_URL,
+  });
+
 const unsupportedDocumentType = (): ApiError =>
   new ApiError({
     type: 'about:blank',
@@ -88,6 +96,22 @@ const toContentType = (file: DocumentUpload): DocumentContentType | undefined =>
   }
 
   return EXTENSION_CONTENT_TYPE[file.name.split('.').pop()?.toLowerCase() ?? ''];
+};
+
+const MOCK_ARTICLE_MS = 900;
+const MOCK_ARTICLE_SIZE = 48_000;
+
+const ARTICLE_URL = /^https?:\/\/[^\s/?#@]+\.[^\s/?#@]+(?:[/?#]\S*)?$/i;
+
+const wait = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+const toArticleFilename = (url: string): string => {
+  const withoutScheme = url.replace(/^https?:\/\//i, '');
+
+  return withoutScheme.split('/')[0] ?? withoutScheme;
 };
 
 const simulateUpload = (onProgress: UploadProgressHandler): Promise<void> =>
@@ -249,6 +273,33 @@ export const mockTransport: GenerationTransport = {
       status: JOB_STATUS.QUEUED,
       createdAt: new Date(createdAt).toISOString(),
     });
+  },
+
+  fetchArticle: async (url: string) => {
+    const trimmed = url.trim();
+
+    if (!ARTICLE_URL.test(trimmed)) {
+      throw unsupportedArticleUrl();
+    }
+
+    if (/\.pdf(?:[?#]|$)/i.test(trimmed)) {
+      throw unsupportedDocumentType();
+    }
+
+    await wait(MOCK_ARTICLE_MS);
+
+    const article: Document = {
+      documentId: createId(),
+      filename: toArticleFilename(trimmed),
+      sizeBytes: MOCK_ARTICLE_SIZE,
+      contentType: DOCUMENT_CONTENT_TYPE.TXT,
+      uploadedAt: new Date().toISOString(),
+      sourceUrl: trimmed,
+    };
+
+    documents.set(article.documentId, article);
+
+    return article;
   },
 
   getGeneration: (jobId) => Promise.resolve(toJob(readJob(jobId), Date.now())),
