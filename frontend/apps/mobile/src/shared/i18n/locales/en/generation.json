@@ -9,7 +9,12 @@
     "includeImages": "Include images",
     "instructionsPlaceholder": "Anything specific to focus on?",
     "submit": "Generate",
-    "instructionsLabel": "Extra instructions"
+    "instructionsLabel": "Extra instructions",
+    "sourceTopic": "Topic",
+    "sourceDocument": "Document",
+    "chooseFile": "Choose a PDF or slides",
+    "replaceFile": "Choose another file",
+    "uploading": "Uploading… {{percent}}%"
   },
   "difficulty": {
     "beginner": "Beginner",

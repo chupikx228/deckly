@@ -6,7 +6,7 @@ import type { GenerationTransport } from './transport';
 
 export const generationApi: GenerationTransport = API.USE_MOCK ? mockTransport : httpTransport;
 
-export type { GenerationTransport } from './transport';
+export type { GenerationTransport, DocumentUpload, UploadProgressHandler } from './transport';
 
 export {
   ApiError,

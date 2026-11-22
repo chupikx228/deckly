@@ -9,6 +9,8 @@ export {
   MEDIA_KIND,
   HEALTH_STATUS,
   DOCUMENT_UNIT,
+  DOCUMENT_CONTENT_TYPE,
+  GENERATABLE_DOCUMENT_TYPES,
   SOURCE_KIND,
   TERMINAL_JOB_STATUSES,
   isTerminalJobStatus,
@@ -21,6 +23,7 @@ export {
   type MediaKind,
   type HealthStatus,
   type DocumentUnit,
+  type DocumentContentType,
   type SourceKind,
 } from './enums';
 
@@ -34,6 +37,8 @@ export {
   mediaKindSchema,
   healthStatusSchema,
   documentUnitSchema,
+  documentContentTypeSchema,
+  documentSchema,
   problemSchema,
   sourceSchema,
   attributionSchema,
@@ -55,6 +60,7 @@ export {
   type GenerationResult,
   type GenerationJob,
   type GenerationJobCreated,
+  type Document,
   type Health,
   type GenerationRequest,
   type RegenerateNoteRequest,

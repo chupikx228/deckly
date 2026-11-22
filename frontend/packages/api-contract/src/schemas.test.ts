@@ -11,6 +11,7 @@ import {
 import {
   generationJobSchema,
   generationRequestSchema,
+  documentSchema,
   mediaSchema,
   problemSchema,
   regenerateNoteRequestSchema,
@@ -247,6 +248,42 @@ describe('isTerminalJobStatus', () => {
 
   it('treats an absent status as non-terminal', () => {
     expect(isTerminalJobStatus(undefined)).toBe(false);
+  });
+});
+
+describe('documentSchema', () => {
+  const uploaded = {
+    documentId: 'b1a2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
+    filename: 'lecture-3.pdf',
+    sizeBytes: 182_400,
+    contentType: 'application/pdf',
+    uploadedAt: '2026-11-11T10:30:00Z',
+  };
+
+  it('accepts an upload without the recording and article extras', () => {
+    expect(documentSchema.safeParse(uploaded).success).toBe(true);
+  });
+
+  it('rejects an empty file', () => {
+    expect(documentSchema.safeParse({ ...uploaded, sizeBytes: 0 }).success).toBe(false);
+  });
+
+  it('rejects a document whose name was stripped to nothing', () => {
+    expect(documentSchema.safeParse({ ...uploaded, filename: '' }).success).toBe(false);
+  });
+
+  it('rejects a filename of 256 characters', () => {
+    const filename = `${'a'.repeat(252)}.pdf`;
+
+    expect(documentSchema.safeParse({ ...uploaded, filename }).success).toBe(false);
+  });
+
+  it('rejects a content type the service does not accept', () => {
+    expect(documentSchema.safeParse({ ...uploaded, contentType: 'image/png' }).success).toBe(false);
+  });
+
+  it('rejects a recording whose duration is zero', () => {
+    expect(documentSchema.safeParse({ ...uploaded, durationSeconds: 0 }).success).toBe(false);
   });
 });
 

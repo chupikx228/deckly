@@ -2,6 +2,7 @@ import type { z } from 'zod';
 
 import type {
   Difficulty,
+  DocumentContentType,
   DocumentUnit,
   ErrorCode,
   HealthStatus,
@@ -22,6 +23,7 @@ import type {
   generationResultSchema,
   healthSchema,
   mediaSchema,
+  documentSchema,
   documentSourceSchema,
   problemSchema,
   quotaSchema,
@@ -87,6 +89,7 @@ export type AssertGenerationJob = Expect<
 export type AssertGenerationJobCreated = Expect<
   SameShape<z.infer<typeof generationJobCreatedSchema>, Wire<'GenerationJobCreated'>>
 >;
+export type AssertDocument = Expect<SameShape<z.infer<typeof documentSchema>, Wire<'Document'>>>;
 export type AssertHealth = Expect<SameShape<z.infer<typeof healthSchema>, Wire<'Health'>>>;
 export type AssertGenerationRequest = Expect<
   SameShape<z.input<typeof generationRequestSchema>, Wire<'GenerationRequest'>>
@@ -107,4 +110,7 @@ export type AssertMediaKindMembers = Expect<SameMembers<MediaKind, Wire<'Media'>
 export type AssertHealthStatusMembers = Expect<SameMembers<HealthStatus, Wire<'Health'>['status']>>;
 export type AssertDocumentUnitMembers = Expect<
   SameMembers<DocumentUnit, Wire<'DocumentSource'>['unit']>
+>;
+export type AssertDocumentContentTypeMembers = Expect<
+  SameMembers<DocumentContentType, Wire<'DocumentContentType'>>
 >;

@@ -14,6 +14,11 @@ export const GENERATION = {
   MAX_CARD_COUNT: 200,
 } as const;
 
+export const UPLOAD = {
+  MAX_BYTES: 25 * 1024 * 1024,
+  TIMEOUT_MS: 120_000,
+} as const;
+
 export const QUERY_DEFAULTS = {
   STALE_TIME_MS: 60_000,
   RETRY_COUNT: 2,

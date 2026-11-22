@@ -1,50 +1,42 @@
 import { useRouter } from 'expo-router';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { View } from 'react-native';
 
-import { useCreateGeneration } from '@/features/generate-deck';
-import {
-  DIFFICULTY,
-  GENERATION,
-  NOTE_TYPE,
-  routes,
-  type Difficulty,
-  type Locale,
-} from '@/shared/config';
-import { useLocale } from '@/shared/lib';
+import { getRequestErrorMessageKey } from '@/entities/generation';
+import { describeError } from '@/shared/api';
+import { routes } from '@/shared/config';
 import { Button, Screen, SegmentedControl, Text, TextField } from '@/shared/ui';
 
+import { useGenerationForm } from '../model/use-generation-form';
 import {
   CARD_COUNT_OPTIONS,
   CONTENT_LANGUAGE_LABEL,
   CONTENT_LANGUAGE_OPTIONS,
   DIFFICULTY_LABEL_KEY,
   DIFFICULTY_OPTIONS,
-  type GeneratableType,
+  GENERATION_SOURCE,
+  GENERATION_SOURCE_LABEL_KEY,
+  GENERATION_SOURCE_OPTIONS,
 } from '../model/wizard-options';
 import { NoteTypePicker } from './note-type-picker';
 import { ServiceBanner } from './service-banner';
-
-const MIN_TOPIC_LENGTH = 3;
 
 export const CreateDeckScreen = () => {
   const { t } = useTranslation('generation');
   const { t: tErrors } = useTranslation('errors');
   const router = useRouter();
-  const locale = useLocale();
 
-  const [topic, setTopic] = useState('');
-  const [cardCount, setCardCount] = useState<string>(String(GENERATION.DEFAULT_CARD_COUNT));
-  const [difficulty, setDifficulty] = useState<Difficulty>(DIFFICULTY.INTERMEDIATE);
-  const [noteTypes, setNoteTypes] = useState<readonly GeneratableType[]>([NOTE_TYPE.BASIC]);
-  const [contentLanguage, setContentLanguage] = useState<Locale>(locale);
-  const [instructions, setInstructions] = useState('');
+  const form = useGenerationForm();
 
-  const createGeneration = useCreateGeneration();
-
-  const canSubmit =
-    topic.trim().length >= MIN_TOPIC_LENGTH && noteTypes.length > 0 && !createGeneration.isPending;
+  const sourceOptions = useMemo(
+    () =>
+      GENERATION_SOURCE_OPTIONS.map((value) => ({
+        value,
+        label: t(GENERATION_SOURCE_LABEL_KEY[value]),
+      })),
+    [t],
+  );
 
   const countOptions = useMemo(
     () => CARD_COUNT_OPTIONS.map((count) => ({ value: String(count), label: String(count) })),
@@ -62,44 +54,11 @@ export const CreateDeckScreen = () => {
     [],
   );
 
-  const handleToggleType = useCallback((type: GeneratableType) => {
-    setNoteTypes((current) =>
-      current.includes(type) ? current.filter((item) => item !== type) : [...current, type],
-    );
-  }, []);
-
   const handleSubmit = useCallback(() => {
-    if (!canSubmit) {
-      return;
-    }
-
-    createGeneration.mutate(
-      {
-        topic: topic.trim(),
-        language: contentLanguage,
-        cardCount: Number(cardCount),
-        difficulty,
-        noteTypes: [...noteTypes],
-        includeImages: false,
-        ...(instructions.trim().length > 0 ? { instructions: instructions.trim() } : {}),
-      },
-      {
-        onSuccess: (job) => {
-          router.push(routes.generation(job.jobId));
-        },
-      },
-    );
-  }, [
-    canSubmit,
-    cardCount,
-    contentLanguage,
-    createGeneration,
-    difficulty,
-    instructions,
-    noteTypes,
-    router,
-    topic,
-  ]);
+    form.submit((jobId) => {
+      router.push(routes.generation(jobId));
+    });
+  }, [form, router]);
 
   return (
     <Screen scrollable>
@@ -107,55 +66,85 @@ export const CreateDeckScreen = () => {
 
       <ServiceBanner />
 
-      <TextField
-        placeholder={t('wizard.topicPlaceholder')}
-        value={topic}
-        multiline
-        onChangeText={setTopic}
-      />
+      <SegmentedControl options={sourceOptions} value={form.source} onChange={form.setSource} />
+
+      {form.source === GENERATION_SOURCE.DOCUMENT ? (
+        <View className="gap-2">
+          {form.file === null ? null : (
+            <Text variant="label" numberOfLines={1}>
+              {form.file.name}
+            </Text>
+          )}
+
+          <Button
+            label={form.file === null ? t('wizard.chooseFile') : t('wizard.replaceFile')}
+            variant="secondary"
+            onPress={form.pickFile}
+          />
+        </View>
+      ) : (
+        <TextField
+          placeholder={t('wizard.topicPlaceholder')}
+          value={form.topic}
+          multiline
+          onChangeText={form.setTopic}
+        />
+      )}
 
       <View className="gap-2">
         <Text variant="overline">{t('wizard.cardCount')}</Text>
-        <SegmentedControl options={countOptions} value={cardCount} onChange={setCardCount} />
+        <SegmentedControl
+          options={countOptions}
+          value={form.cardCount}
+          onChange={form.setCardCount}
+        />
       </View>
 
       <View className="gap-2">
         <Text variant="overline">{t('wizard.difficulty')}</Text>
-        <SegmentedControl options={difficultyOptions} value={difficulty} onChange={setDifficulty} />
+        <SegmentedControl
+          options={difficultyOptions}
+          value={form.difficulty}
+          onChange={form.setDifficulty}
+        />
       </View>
 
       <View className="gap-2">
         <Text variant="overline">{t('wizard.noteTypes')}</Text>
-        <NoteTypePicker selected={noteTypes} onToggle={handleToggleType} />
+        <NoteTypePicker selected={form.noteTypes} onToggle={form.toggleNoteType} />
       </View>
 
       <View className="gap-2">
         <Text variant="overline">{t('wizard.contentLanguage')}</Text>
         <SegmentedControl
           options={languageOptions}
-          value={contentLanguage}
-          onChange={setContentLanguage}
+          value={form.contentLanguage}
+          onChange={form.setContentLanguage}
         />
       </View>
 
       <TextField
         label={t('wizard.instructionsLabel')}
         placeholder={t('wizard.instructionsPlaceholder')}
-        value={instructions}
+        value={form.instructions}
         multiline
-        onChangeText={setInstructions}
+        onChangeText={form.setInstructions}
       />
 
-      {createGeneration.isError ? (
-        <Text variant="caption" className="text-danger">
-          {tErrors('generic.description')}
-        </Text>
+      {form.isUploading ? (
+        <Text variant="caption">{t('wizard.uploading', { percent: form.uploadPercent })}</Text>
       ) : null}
+
+      {form.error === null ? null : (
+        <Text variant="caption" className="text-danger">
+          {tErrors(getRequestErrorMessageKey(describeError(form.error)))}
+        </Text>
+      )}
 
       <Button
         label={t('wizard.submit')}
-        disabled={!canSubmit}
-        isLoading={createGeneration.isPending}
+        disabled={!form.canSubmit}
+        isLoading={form.isSubmitting}
         onPress={handleSubmit}
       />
     </Screen>
