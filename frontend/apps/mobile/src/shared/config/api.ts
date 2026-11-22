@@ -16,6 +16,7 @@ export const GENERATION = {
 
 export const UPLOAD = {
   MAX_BYTES: 25 * 1024 * 1024,
+  MAX_RECORDING_BYTES: 48 * 1024 * 1024,
   TIMEOUT_MS: 120_000,
 } as const;
 

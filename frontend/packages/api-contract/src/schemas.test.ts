@@ -12,6 +12,7 @@ import {
   generationJobSchema,
   generationRequestSchema,
   articleUrlRequestSchema,
+  recordingUrlRequestSchema,
   documentSchema,
   mediaSchema,
   problemSchema,
@@ -266,6 +267,25 @@ describe('articleUrlRequestSchema', () => {
 
     expect(url).toHaveLength(2049);
     expect(articleUrlRequestSchema.safeParse({ url }).success).toBe(false);
+  });
+});
+
+describe('recordingUrlRequestSchema', () => {
+  it('accepts a video link', () => {
+    expect(
+      recordingUrlRequestSchema.safeParse({ url: 'https://youtu.be/jNQXAC9IVRw' }).success,
+    ).toBe(true);
+  });
+
+  it('rejects an empty link', () => {
+    expect(recordingUrlRequestSchema.safeParse({ url: '' }).success).toBe(false);
+  });
+
+  it('rejects a link of 2049 characters', () => {
+    const url = `https://www.youtube.com/watch?v=${'a'.repeat(2049 - 32)}`;
+
+    expect(url).toHaveLength(2049);
+    expect(recordingUrlRequestSchema.safeParse({ url }).success).toBe(false);
   });
 });
 

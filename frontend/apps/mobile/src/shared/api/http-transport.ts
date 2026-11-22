@@ -6,6 +6,7 @@ import {
   generationJobSchema,
   generationRequestSchema,
   healthSchema,
+  recordingUrlRequestSchema,
   regenerateNoteRequestSchema,
   type Document,
 } from '@deckly/api-contract';
@@ -99,14 +100,18 @@ const parseText = (text: string): unknown => {
   }
 };
 
-const postDocument = (file: DocumentUpload, onProgress: UploadProgressHandler): Promise<Document> =>
+const postFile = (
+  path: string,
+  file: DocumentUpload,
+  onProgress: UploadProgressHandler,
+): Promise<Document> =>
   new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     const form = new FormData();
 
     form.append('file', { uri: file.uri, name: file.name, type: file.mimeType });
 
-    request.open('POST', `${API.BASE_URL}/documents`);
+    request.open('POST', `${API.BASE_URL}${path}`);
     request.setRequestHeader('Accept', 'application/json');
     request.setRequestHeader('X-Client-Id', getClientId());
     request.timeout = UPLOAD.TIMEOUT_MS;
@@ -151,12 +156,21 @@ const postDocument = (file: DocumentUpload, onProgress: UploadProgressHandler): 
   });
 
 export const httpTransport: GenerationTransport = {
-  uploadDocument: postDocument,
+  uploadDocument: (file, onProgress) => postFile('/documents', file, onProgress),
+
+  uploadRecording: (file, onProgress) => postFile('/recordings', file, onProgress),
 
   fetchArticle: (url) =>
     requestJson(
       '/documents/from-url',
       { method: 'POST', body: articleUrlRequestSchema.parse({ url }) },
+      documentSchema,
+    ),
+
+  fetchRecording: (url) =>
+    requestJson(
+      '/recordings/from-url',
+      { method: 'POST', body: recordingUrlRequestSchema.parse({ url }) },
       documentSchema,
     ),
 

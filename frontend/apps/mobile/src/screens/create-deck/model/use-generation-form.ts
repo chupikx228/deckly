@@ -1,8 +1,13 @@
+import {
+  GENERATABLE_DOCUMENT_TYPES,
+  GENERATABLE_RECORDING_TYPES,
+  type DocumentContentType,
+} from '@deckly/api-contract';
 import { useCallback } from 'react';
 
 import type { DocumentUpload } from '@/shared/api';
 
-import { hasUsableSource } from './source-rules';
+import { hasUsableSource, resolveSubmitRoute } from './source-rules';
 import { useDocumentPick } from './use-document-pick';
 import { useGenerationSubmit, type GenerationRequestBase } from './use-generation-submit';
 import { useWizardFields, type WizardFields } from './use-wizard-fields';
@@ -17,6 +22,9 @@ const toRequestBase = (fields: WizardFields): GenerationRequestBase => ({
   ...(fields.instructions.trim().length > 0 ? { instructions: fields.instructions.trim() } : {}),
 });
 
+const pickableTypes = (source: GenerationSource): readonly DocumentContentType[] =>
+  source === GENERATION_SOURCE.RECORDING ? GENERATABLE_RECORDING_TYPES : GENERATABLE_DOCUMENT_TYPES;
+
 export interface GenerationForm extends WizardFields {
   readonly file: DocumentUpload | null;
   readonly uploadPercent: number;
@@ -30,24 +38,25 @@ export interface GenerationForm extends WizardFields {
 
 export const useGenerationForm = (): GenerationForm => {
   const fields = useWizardFields();
-  const { file, pickFile } = useDocumentPick();
+  const { file, pickFile, clearFile } = useDocumentPick();
   const submission = useGenerationSubmit();
 
-  const { setSource } = fields;
+  const { setSource, source } = fields;
   const { reset } = submission;
 
   const changeSource = useCallback(
     (value: GenerationSource) => {
       reset();
+      clearFile();
       setSource(value);
     },
-    [reset, setSource],
+    [clearFile, reset, setSource],
   );
 
   const choosePickedFile = useCallback(() => {
     reset();
-    pickFile();
-  }, [pickFile, reset]);
+    pickFile(pickableTypes(source));
+  }, [pickFile, reset, source]);
 
   const canSubmit =
     hasUsableSource(fields, file) && fields.noteTypes.length > 0 && !submission.isSubmitting;
@@ -58,15 +67,13 @@ export const useGenerationForm = (): GenerationForm => {
         return;
       }
 
-      submission.submit(
-        {
-          base: toRequestBase(fields),
-          topic: fields.source === GENERATION_SOURCE.TOPIC ? fields.topic.trim() : null,
-          articleUrl: fields.source === GENERATION_SOURCE.ARTICLE ? fields.articleUrl.trim() : null,
-          file,
-        },
-        onCreated,
-      );
+      const route = resolveSubmitRoute(fields, file);
+
+      if (route === null) {
+        return;
+      }
+
+      submission.submit({ base: toRequestBase(fields), route }, onCreated);
     },
     [canSubmit, fields, file, submission],
   );

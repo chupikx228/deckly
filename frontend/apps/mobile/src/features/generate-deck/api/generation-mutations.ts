@@ -23,10 +23,23 @@ export const useUploadDocument = () =>
       generationApi.uploadDocument(file, onProgress),
   });
 
+export const useUploadRecording = () =>
+  useMutation({
+    mutationKey: mutationKeys.uploadRecording(),
+    mutationFn: ({ file, onProgress }: UploadDocumentInput) =>
+      generationApi.uploadRecording(file, onProgress),
+  });
+
 export const useFetchArticle = () =>
   useMutation({
     mutationKey: mutationKeys.fetchArticle(),
     mutationFn: (url: string) => generationApi.fetchArticle(url),
+  });
+
+export const useFetchRecording = () =>
+  useMutation({
+    mutationKey: mutationKeys.fetchRecording(),
+    mutationFn: (url: string) => generationApi.fetchRecording(url),
   });
 
 export const useCancelGeneration = (jobId: string) => {
