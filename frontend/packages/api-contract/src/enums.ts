@@ -27,6 +27,8 @@ export type DocumentUnit = (typeof DOCUMENT_UNIT)[keyof typeof DOCUMENT_UNIT];
 
 export const ARTICLE_URL_MAX_LENGTH = 2048;
 
+export const RECORDING_URL_MAX_LENGTH = 2048;
+
 export const DOCUMENT_CONTENT_TYPE = {
   PDF: 'application/pdf',
   PPTX: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -44,6 +46,14 @@ export type DocumentContentType =
 export const GENERATABLE_DOCUMENT_TYPES: readonly DocumentContentType[] = [
   DOCUMENT_CONTENT_TYPE.PDF,
   DOCUMENT_CONTENT_TYPE.PPTX,
+];
+
+export const GENERATABLE_RECORDING_TYPES: readonly DocumentContentType[] = [
+  DOCUMENT_CONTENT_TYPE.MP3,
+  DOCUMENT_CONTENT_TYPE.M4A,
+  DOCUMENT_CONTENT_TYPE.WAV,
+  DOCUMENT_CONTENT_TYPE.MP4,
+  DOCUMENT_CONTENT_TYPE.MOV,
 ];
 
 export const DIFFICULTY = {

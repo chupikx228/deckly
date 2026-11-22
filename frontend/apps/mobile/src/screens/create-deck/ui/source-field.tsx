@@ -6,6 +6,11 @@ import { Button, Text, TextField } from '@/shared/ui';
 import type { GenerationForm } from '../model/use-generation-form';
 import { GENERATION_SOURCE } from '../model/wizard-options';
 
+const FILE_SOURCES = [GENERATION_SOURCE.DOCUMENT, GENERATION_SOURCE.RECORDING] as const;
+
+const isFileSource = (form: GenerationForm): boolean =>
+  FILE_SOURCES.some((source) => source === form.source);
+
 export interface SourceFieldProps {
   form: GenerationForm;
 }
@@ -13,7 +18,12 @@ export interface SourceFieldProps {
 export const SourceField = ({ form }: SourceFieldProps) => {
   const { t } = useTranslation('generation');
 
-  if (form.source === GENERATION_SOURCE.DOCUMENT) {
+  if (isFileSource(form)) {
+    const isRecording = form.source === GENERATION_SOURCE.RECORDING;
+
+    const chooseKey = isRecording ? 'wizard.chooseRecording' : 'wizard.chooseFile';
+    const replaceKey = isRecording ? 'wizard.replaceRecording' : 'wizard.replaceFile';
+
     return (
       <View className="gap-2">
         {form.file === null ? null : (
@@ -23,7 +33,7 @@ export const SourceField = ({ form }: SourceFieldProps) => {
         )}
 
         <Button
-          label={form.file === null ? t('wizard.chooseFile') : t('wizard.replaceFile')}
+          label={t(form.file === null ? chooseKey : replaceKey)}
           variant="secondary"
           onPress={form.pickFile}
         />
@@ -33,14 +43,18 @@ export const SourceField = ({ form }: SourceFieldProps) => {
 
   if (form.source === GENERATION_SOURCE.ARTICLE) {
     return (
-      <TextField
-        placeholder={t('wizard.urlPlaceholder')}
-        value={form.articleUrl}
-        autoCapitalize="none"
-        autoCorrect={false}
-        keyboardType="url"
-        onChangeText={form.setArticleUrl}
-      />
+      <View className="gap-1.5">
+        <TextField
+          placeholder={t('wizard.urlPlaceholder')}
+          value={form.articleUrl}
+          autoCapitalize="none"
+          autoCorrect={false}
+          keyboardType="url"
+          onChangeText={form.setArticleUrl}
+        />
+
+        <Text variant="caption">{t('wizard.urlHint')}</Text>
+      </View>
     );
   }
 

@@ -16,7 +16,11 @@
     "replaceFile": "Choose another file",
     "uploading": "Uploading… {{percent}}%",
     "sourceArticle": "Link",
-    "urlPlaceholder": "https://en.wikipedia.org/wiki/..."
+    "urlPlaceholder": "https://en.wikipedia.org/wiki/...",
+    "sourceRecording": "Recording",
+    "chooseRecording": "Choose audio or video",
+    "replaceRecording": "Choose another recording",
+    "urlHint": "An article, a wiki page, or a YouTube video."
   },
   "difficulty": {
     "beginner": "Beginner",

@@ -16,7 +16,11 @@
     "replaceFile": "Выбрать другой файл",
     "uploading": "Загрузка… {{percent}}%",
     "sourceArticle": "Ссылка",
-    "urlPlaceholder": "https://ru.wikipedia.org/wiki/..."
+    "urlPlaceholder": "https://ru.wikipedia.org/wiki/...",
+    "sourceRecording": "Запись",
+    "chooseRecording": "Выбрать аудио или видео",
+    "replaceRecording": "Выбрать другую запись",
+    "urlHint": "Статья, страница вики или видео с YouTube."
   },
   "difficulty": {
     "beginner": "Начальный",

@@ -1,220 +1,53 @@
 import {
   DOCUMENT_CONTENT_TYPE,
-  ERROR_CODE,
   GENERATABLE_DOCUMENT_TYPES,
-  JOB_STAGE_ORDER,
+  GENERATABLE_RECORDING_TYPES,
   JOB_STATUS,
   NOTE_TYPE,
-  type GeneratedNote,
-  type GenerationJob,
   type Document,
-  type DocumentContentType,
-  type GenerationRequest,
-  type JobStatus,
 } from '@deckly/api-contract';
 
 import { UPLOAD } from '@/shared/config';
 import { createId } from '@/shared/lib';
 
-import { ApiError } from '../errors';
 import type { DocumentUpload, GenerationTransport, UploadProgressHandler } from '../transport';
+import {
+  documentRegenerationUnsupported,
+  documentTooLarge,
+  recordingTooLong,
+  recordingUnavailable,
+  unsupportedArticleUrl,
+  unsupportedDocumentType,
+  unsupportedRecordingUrl,
+  validationFailed,
+} from './mock-errors';
+import {
+  documents,
+  idempotencyKeys,
+  jobs,
+  readJob,
+  resolveStatus,
+  resolveSubject,
+  toJob,
+} from './mock-jobs';
 import { createMockNotes } from './mock-notes';
+import {
+  MOCK_ARTICLE_MS,
+  MOCK_ARTICLE_SIZE,
+  MOCK_LONG_RECORDING_MARKER,
+  MOCK_RECORDING_MS,
+  MOCK_RECORDING_SECONDS,
+  MOCK_RECORDING_SIZE,
+  MOCK_UNAVAILABLE_VIDEO_MARKER,
+  isArticleUrl,
+  isYouTubeVideoUrl,
+  simulateUpload,
+  toContentType,
+  toSourceFilename,
+  wait,
+} from './mock-sources';
 
-export const MOCK_STAGE_DURATION_MS = 1_400;
-export const MOCK_FAILURE_TOPIC_MARKER = 'fail';
-
-const TOTAL_DURATION_MS = MOCK_STAGE_DURATION_MS * JOB_STAGE_ORDER.length;
-
-interface MockJob {
-  readonly jobId: string;
-  readonly request: GenerationRequest;
-  readonly createdAt: number;
-  readonly notes: GeneratedNote[];
-  isCancelled: boolean;
-}
-
-const jobs = new Map<string, MockJob>();
-const documents = new Map<string, Document>();
-
-const MOCK_DOCUMENT_SUBJECT = 'Uploaded document';
-const MOCK_UPLOAD_STEPS = 5;
-const MOCK_UPLOAD_STEP_MS = 160;
-
-const resolveSubject = (request: GenerationRequest): string => {
-  if (request.topic !== undefined) {
-    return request.topic;
-  }
-
-  const uploaded = request.documentId === undefined ? undefined : documents.get(request.documentId);
-
-  return uploaded?.filename ?? MOCK_DOCUMENT_SUBJECT;
-};
-const idempotencyKeys = new Map<string, string>();
-
-const notFound = (): ApiError =>
-  new ApiError({
-    type: 'about:blank',
-    title: 'Job not found',
-    status: 404,
-    code: ERROR_CODE.JOB_NOT_FOUND,
-  });
-
-const documentTooLarge = (): ApiError =>
-  new ApiError({
-    type: 'about:blank',
-    title: 'Document too large',
-    status: 413,
-    code: ERROR_CODE.DOCUMENT_TOO_LARGE,
-  });
-
-const unsupportedArticleUrl = (): ApiError =>
-  new ApiError({
-    type: 'about:blank',
-    title: 'Unsupported article URL',
-    status: 422,
-    code: ERROR_CODE.UNSUPPORTED_ARTICLE_URL,
-  });
-
-const unsupportedDocumentType = (): ApiError =>
-  new ApiError({
-    type: 'about:blank',
-    title: 'Unsupported document type',
-    status: 415,
-    code: ERROR_CODE.UNSUPPORTED_DOCUMENT_TYPE,
-  });
-
-const EXTENSION_CONTENT_TYPE: Readonly<Record<string, DocumentContentType>> = {
-  pdf: DOCUMENT_CONTENT_TYPE.PDF,
-  pptx: DOCUMENT_CONTENT_TYPE.PPTX,
-};
-
-const toContentType = (file: DocumentUpload): DocumentContentType | undefined => {
-  const declared = GENERATABLE_DOCUMENT_TYPES.find((type) => type === file.mimeType);
-
-  if (declared !== undefined) {
-    return declared;
-  }
-
-  return EXTENSION_CONTENT_TYPE[file.name.split('.').pop()?.toLowerCase() ?? ''];
-};
-
-const MOCK_ARTICLE_MS = 900;
-const MOCK_ARTICLE_SIZE = 48_000;
-
-const ARTICLE_URL = /^https?:\/\/[^\s/?#@]+\.[^\s/?#@]+(?:[/?#]\S*)?$/i;
-
-const wait = (ms: number): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-
-const toArticleFilename = (url: string): string => {
-  const withoutScheme = url.replace(/^https?:\/\//i, '');
-
-  return withoutScheme.split('/')[0] ?? withoutScheme;
-};
-
-const simulateUpload = (onProgress: UploadProgressHandler): Promise<void> =>
-  new Promise((resolve) => {
-    let step = 0;
-
-    const tick = (): void => {
-      step += 1;
-      onProgress(step / MOCK_UPLOAD_STEPS);
-
-      if (step >= MOCK_UPLOAD_STEPS) {
-        resolve();
-        return;
-      }
-
-      setTimeout(tick, MOCK_UPLOAD_STEP_MS);
-    };
-
-    setTimeout(tick, MOCK_UPLOAD_STEP_MS);
-  });
-
-const validationFailed = (title: string): ApiError =>
-  new ApiError({
-    type: 'about:blank',
-    title,
-    status: 400,
-    code: ERROR_CODE.VALIDATION_FAILED,
-  });
-
-const documentRegenerationUnsupported = (): ApiError =>
-  new ApiError({
-    type: 'about:blank',
-    title: 'Document regeneration unsupported',
-    status: 422,
-    code: ERROR_CODE.DOCUMENT_REGENERATION_UNSUPPORTED,
-  });
-
-const shouldFail = (topic: string): boolean =>
-  topic.toLowerCase().includes(MOCK_FAILURE_TOPIC_MARKER);
-
-const resolveStatus = (job: MockJob, elapsed: number): JobStatus => {
-  if (job.isCancelled) {
-    return JOB_STATUS.CANCELLED;
-  }
-
-  if (elapsed < MOCK_STAGE_DURATION_MS) {
-    return JOB_STATUS.QUEUED;
-  }
-
-  if (elapsed < TOTAL_DURATION_MS) {
-    return JOB_STATUS.RUNNING;
-  }
-
-  return shouldFail(resolveSubject(job.request)) ? JOB_STATUS.FAILED : JOB_STATUS.SUCCEEDED;
-};
-
-const toJob = (job: MockJob, now: number): GenerationJob => {
-  const elapsed = now - job.createdAt;
-  const status = resolveStatus(job, elapsed);
-  const stageIndex = Math.min(
-    Math.floor(elapsed / MOCK_STAGE_DURATION_MS),
-    JOB_STAGE_ORDER.length - 1,
-  );
-
-  return {
-    jobId: job.jobId,
-    status,
-    stage: status === JOB_STATUS.SUCCEEDED ? null : (JOB_STAGE_ORDER[stageIndex] ?? null),
-    progress: Math.min(elapsed / TOTAL_DURATION_MS, 1),
-    createdAt: new Date(job.createdAt).toISOString(),
-    updatedAt: new Date(now).toISOString(),
-    result:
-      status === JOB_STATUS.SUCCEEDED
-        ? {
-            deck: {
-              title: resolveSubject(job.request),
-              description: `Generated from "${resolveSubject(job.request)}"`,
-              tags: [],
-            },
-            notes: job.notes,
-          }
-        : null,
-    error:
-      status === JOB_STATUS.FAILED
-        ? {
-            type: 'about:blank',
-            title: 'Generation failed',
-            status: 200,
-            code: ERROR_CODE.GENERATION_FAILED,
-          }
-        : null,
-  };
-};
-
-const readJob = (jobId: string): MockJob => {
-  const job = jobs.get(jobId);
-
-  if (job === undefined) {
-    throw notFound();
-  }
-
-  return job;
-};
+export { MOCK_FAILURE_TOPIC_MARKER, MOCK_STAGE_DURATION_MS } from './mock-jobs';
 
 export const mockTransport: GenerationTransport = {
   uploadDocument: async (file: DocumentUpload, onProgress: UploadProgressHandler) => {
@@ -222,7 +55,7 @@ export const mockTransport: GenerationTransport = {
       throw documentTooLarge();
     }
 
-    const contentType = toContentType(file);
+    const contentType = toContentType(file, GENERATABLE_DOCUMENT_TYPES);
 
     if (contentType === undefined) {
       throw unsupportedDocumentType();
@@ -241,6 +74,69 @@ export const mockTransport: GenerationTransport = {
     documents.set(uploaded.documentId, uploaded);
 
     return uploaded;
+  },
+
+  uploadRecording: async (file: DocumentUpload, onProgress: UploadProgressHandler) => {
+    if (file.sizeBytes > UPLOAD.MAX_RECORDING_BYTES) {
+      throw documentTooLarge();
+    }
+
+    const contentType = toContentType(file, GENERATABLE_RECORDING_TYPES);
+
+    if (contentType === undefined) {
+      throw unsupportedDocumentType();
+    }
+
+    if (file.name.toLowerCase().includes(MOCK_LONG_RECORDING_MARKER)) {
+      throw recordingTooLong();
+    }
+
+    await simulateUpload(onProgress);
+
+    const uploaded: Document = {
+      documentId: createId(),
+      filename: file.name,
+      sizeBytes: file.sizeBytes,
+      contentType,
+      uploadedAt: new Date().toISOString(),
+      durationSeconds: MOCK_RECORDING_SECONDS,
+    };
+
+    documents.set(uploaded.documentId, uploaded);
+
+    return uploaded;
+  },
+
+  fetchRecording: async (url: string) => {
+    const trimmed = url.trim();
+
+    if (!isYouTubeVideoUrl(trimmed)) {
+      throw unsupportedRecordingUrl();
+    }
+
+    if (trimmed.toLowerCase().includes(MOCK_UNAVAILABLE_VIDEO_MARKER)) {
+      throw recordingUnavailable();
+    }
+
+    if (trimmed.toLowerCase().includes(MOCK_LONG_RECORDING_MARKER)) {
+      throw recordingTooLong();
+    }
+
+    await wait(MOCK_RECORDING_MS);
+
+    const recording: Document = {
+      documentId: createId(),
+      filename: toSourceFilename(trimmed),
+      sizeBytes: MOCK_RECORDING_SIZE,
+      contentType: DOCUMENT_CONTENT_TYPE.M4A,
+      uploadedAt: new Date().toISOString(),
+      durationSeconds: MOCK_RECORDING_SECONDS,
+      sourceUrl: trimmed,
+    };
+
+    documents.set(recording.documentId, recording);
+
+    return recording;
   },
 
   createGeneration: (request, idempotencyKey) => {
@@ -278,7 +174,7 @@ export const mockTransport: GenerationTransport = {
   fetchArticle: async (url: string) => {
     const trimmed = url.trim();
 
-    if (!ARTICLE_URL.test(trimmed)) {
+    if (!isArticleUrl(trimmed)) {
       throw unsupportedArticleUrl();
     }
 
@@ -290,7 +186,7 @@ export const mockTransport: GenerationTransport = {
 
     const article: Document = {
       documentId: createId(),
-      filename: toArticleFilename(trimmed),
+      filename: toSourceFilename(trimmed),
       sizeBytes: MOCK_ARTICLE_SIZE,
       contentType: DOCUMENT_CONTENT_TYPE.TXT,
       uploadedAt: new Date().toISOString(),

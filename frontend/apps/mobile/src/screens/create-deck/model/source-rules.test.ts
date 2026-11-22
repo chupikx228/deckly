@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
-import { ARTICLE_URL_MAX_LENGTH } from '@deckly/api-contract';
+import { ARTICLE_URL_MAX_LENGTH, RECORDING_URL_MAX_LENGTH } from '@deckly/api-contract';
 
 import type { DocumentUpload } from '@/shared/api';
 import { DIFFICULTY, LOCALE, NOTE_TYPE } from '@/shared/config';
 
-import { hasUsableSource, isLikelyArticleUrl } from './source-rules';
+import {
+  hasUsableSource,
+  isLikelyArticleUrl,
+  isRecordingUrl,
+  resolveSubmitRoute,
+} from './source-rules';
 import type { WizardFields } from './use-wizard-fields';
 import { GENERATION_SOURCE, type GeneratableType } from './wizard-options';
 
@@ -133,5 +138,147 @@ describe('hasUsableSource', () => {
 
   it('rejects the document source with no file picked', () => {
     expect(hasUsableSource(makeFields({ source: GENERATION_SOURCE.DOCUMENT }), null)).toBe(false);
+  });
+
+  it('accepts a picked file when the recording source is chosen', () => {
+    expect(hasUsableSource(makeFields({ source: GENERATION_SOURCE.RECORDING }), file)).toBe(true);
+  });
+
+  it('rejects the recording source with no file picked', () => {
+    expect(hasUsableSource(makeFields({ source: GENERATION_SOURCE.RECORDING }), null)).toBe(false);
+  });
+});
+
+const recording: DocumentUpload = {
+  uri: 'file:///tmp/lecture.m4a',
+  name: 'lecture.m4a',
+  mimeType: 'audio/mp4',
+  sizeBytes: 7_400_000,
+};
+
+describe('isRecordingUrl', () => {
+  it('accepts a watch link', () => {
+    expect(isRecordingUrl('https://www.youtube.com/watch?v=jNQXAC9IVRw')).toBe(true);
+  });
+
+  it('accepts a link with no www', () => {
+    expect(isRecordingUrl('https://youtube.com/watch?v=jNQXAC9IVRw')).toBe(true);
+  });
+
+  it('accepts the mobile and music hosts', () => {
+    expect(isRecordingUrl('https://m.youtube.com/watch?v=jNQXAC9IVRw')).toBe(true);
+    expect(isRecordingUrl('https://music.youtube.com/watch?v=jNQXAC9IVRw')).toBe(true);
+  });
+
+  it('accepts a short link', () => {
+    expect(isRecordingUrl('https://youtu.be/jNQXAC9IVRw')).toBe(true);
+  });
+
+  it('accepts shorts, live and embed links', () => {
+    expect(isRecordingUrl('https://www.youtube.com/shorts/abc')).toBe(true);
+    expect(isRecordingUrl('https://www.youtube.com/live/abc')).toBe(true);
+    expect(isRecordingUrl('https://www.youtube.com/embed/abc')).toBe(true);
+  });
+
+  it('claims a playlist link so the server can name it, not the article endpoint', () => {
+    expect(isRecordingUrl('https://www.youtube.com/playlist?list=PL1')).toBe(true);
+  });
+
+  it('claims a channel link for the same reason', () => {
+    expect(isRecordingUrl('https://www.youtube.com/@someone')).toBe(true);
+  });
+
+  it('ignores case in the host', () => {
+    expect(isRecordingUrl('HTTPS://WWW.YOUTUBE.COM/watch?v=abc')).toBe(true);
+  });
+
+  it('ignores surrounding whitespace', () => {
+    expect(isRecordingUrl('  https://youtu.be/abc  ')).toBe(true);
+  });
+
+  it('rejects a host that merely starts with a youtube name', () => {
+    expect(isRecordingUrl('https://www.youtube.com.evil.test/watch?v=abc')).toBe(false);
+    expect(isRecordingUrl('https://youtu.be.evil.test/abc')).toBe(false);
+  });
+
+  it('rejects a host that merely ends with a youtube name', () => {
+    expect(isRecordingUrl('https://notyoutube.com/watch?v=abc')).toBe(false);
+  });
+
+  it('rejects an ordinary article link', () => {
+    expect(isRecordingUrl('https://en.wikipedia.org/wiki/Spaced_repetition')).toBe(false);
+  });
+});
+
+describe('the url field is checked against one length for both endpoints', () => {
+  it('keeps the article and recording maximums equal', () => {
+    expect(ARTICLE_URL_MAX_LENGTH).toBe(RECORDING_URL_MAX_LENGTH);
+  });
+});
+
+describe('resolveSubmitRoute', () => {
+  it('trims the topic it sends', () => {
+    expect(resolveSubmitRoute(makeFields({ topic: '  Road signs  ' }), null)).toEqual({
+      kind: 'topic',
+      topic: 'Road signs',
+    });
+  });
+
+  it('refuses a source that is not usable yet', () => {
+    expect(resolveSubmitRoute(makeFields({ topic: 'DN' }), null)).toBeNull();
+  });
+
+  it('sends a picked document to the document route', () => {
+    const fields = makeFields({ source: GENERATION_SOURCE.DOCUMENT });
+
+    expect(resolveSubmitRoute(fields, file)).toEqual({ kind: 'document', file });
+  });
+
+  it('sends a picked recording to the recording route', () => {
+    const fields = makeFields({ source: GENERATION_SOURCE.RECORDING });
+
+    expect(resolveSubmitRoute(fields, recording)).toEqual({ kind: 'recording', file: recording });
+  });
+
+  it('refuses a file source with nothing picked', () => {
+    expect(
+      resolveSubmitRoute(makeFields({ source: GENERATION_SOURCE.RECORDING }), null),
+    ).toBeNull();
+  });
+
+  it('sends an article link to the article route', () => {
+    const fields = makeFields({
+      source: GENERATION_SOURCE.ARTICLE,
+      articleUrl: 'https://en.wikipedia.org/wiki/Spaced_repetition',
+    });
+
+    expect(resolveSubmitRoute(fields, null)).toEqual({
+      kind: 'article',
+      url: 'https://en.wikipedia.org/wiki/Spaced_repetition',
+    });
+  });
+
+  it('sends a youtube link to the recording route from the same field', () => {
+    const fields = makeFields({
+      source: GENERATION_SOURCE.ARTICLE,
+      articleUrl: '  https://youtu.be/jNQXAC9IVRw  ',
+    });
+
+    expect(resolveSubmitRoute(fields, null)).toEqual({
+      kind: 'recordingUrl',
+      url: 'https://youtu.be/jNQXAC9IVRw',
+    });
+  });
+
+  it('never routes a file left over from another source', () => {
+    const fields = makeFields({
+      source: GENERATION_SOURCE.ARTICLE,
+      articleUrl: 'https://example.com/a',
+    });
+
+    expect(resolveSubmitRoute(fields, file)).toEqual({
+      kind: 'article',
+      url: 'https://example.com/a',
+    });
   });
 });

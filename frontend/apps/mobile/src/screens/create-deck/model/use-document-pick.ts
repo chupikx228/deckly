@@ -1,4 +1,4 @@
-import { GENERATABLE_DOCUMENT_TYPES } from '@deckly/api-contract';
+import type { DocumentContentType } from '@deckly/api-contract';
 import * as DocumentPicker from 'expo-document-picker';
 import { useCallback, useState } from 'react';
 
@@ -6,16 +6,17 @@ import type { DocumentUpload } from '@/shared/api';
 
 export interface DocumentPick {
   readonly file: DocumentUpload | null;
-  readonly pickFile: () => void;
+  readonly pickFile: (allowed: readonly DocumentContentType[]) => void;
+  readonly clearFile: () => void;
 }
 
 export const useDocumentPick = (): DocumentPick => {
   const [file, setFile] = useState<DocumentUpload | null>(null);
 
-  const pickFile = useCallback(() => {
+  const pickFile = useCallback((allowed: readonly DocumentContentType[]) => {
     void (async () => {
       const result = await DocumentPicker.getDocumentAsync({
-        type: [...GENERATABLE_DOCUMENT_TYPES],
+        type: [...allowed],
         copyToCacheDirectory: true,
         multiple: false,
       });
@@ -39,5 +40,9 @@ export const useDocumentPick = (): DocumentPick => {
     })();
   }, []);
 
-  return { file, pickFile };
+  const clearFile = useCallback(() => {
+    setFile(null);
+  }, []);
+
+  return { file, pickFile, clearFile };
 };

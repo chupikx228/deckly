@@ -1,28 +1,16 @@
-import { ERROR_CODE, type GenerationRequest } from '@deckly/api-contract';
-import { useCallback, useMemo, useState } from 'react';
+import type { GenerationRequest } from '@deckly/api-contract';
+import { useCallback, useMemo } from 'react';
 
-import { useCreateGeneration, useFetchArticle, useUploadDocument } from '@/features/generate-deck';
-import { ApiError, type DocumentUpload } from '@/shared/api';
-import { UPLOAD } from '@/shared/config';
+import { useCreateGeneration } from '@/features/generate-deck';
 
-const PERCENT = 100;
-const TOO_LARGE_STATUS = 413;
-
-const documentTooLarge = (): ApiError =>
-  new ApiError({
-    type: 'about:blank',
-    title: 'Document too large',
-    status: TOO_LARGE_STATUS,
-    code: ERROR_CODE.DOCUMENT_TOO_LARGE,
-  });
+import type { SubmitRoute } from './source-rules';
+import { useSourceDocument } from './use-source-document';
 
 export type GenerationRequestBase = Omit<GenerationRequest, 'topic' | 'documentId'>;
 
 export interface SubmitInput {
   readonly base: GenerationRequestBase;
-  readonly topic: string | null;
-  readonly file: DocumentUpload | null;
-  readonly articleUrl: string | null;
+  readonly route: SubmitRoute;
 }
 
 export interface GenerationSubmit {
@@ -35,23 +23,16 @@ export interface GenerationSubmit {
 }
 
 export const useGenerationSubmit = (): GenerationSubmit => {
-  const [uploadRatio, setUploadRatio] = useState(0);
-  const [refusal, setRefusal] = useState<Error | null>(null);
-
-  const uploadDocument = useUploadDocument();
-  const fetchArticle = useFetchArticle();
+  const source = useSourceDocument();
   const createGeneration = useCreateGeneration();
 
-  const isSubmitting =
-    uploadDocument.isPending || fetchArticle.isPending || createGeneration.isPending;
+  const isSubmitting = source.isPending || createGeneration.isPending;
 
   const submit = useCallback(
-    (input: SubmitInput, onCreated: (jobId: string) => void) => {
+    ({ base, route }: SubmitInput, onCreated: (jobId: string) => void) => {
       if (isSubmitting) {
         return;
       }
-
-      setRefusal(null);
 
       const start = (request: GenerationRequest): void => {
         createGeneration.mutate(request, {
@@ -61,70 +42,40 @@ export const useGenerationSubmit = (): GenerationSubmit => {
         });
       };
 
-      if (input.topic !== null) {
-        start({ ...input.base, topic: input.topic });
+      if (route.kind === 'topic') {
+        start({ ...base, topic: route.topic });
         return;
       }
 
-      if (input.articleUrl !== null) {
-        fetchArticle.mutate(input.articleUrl, {
-          onSuccess: (article) => {
-            start({ ...input.base, documentId: article.documentId });
-          },
-        });
-
-        return;
-      }
-
-      if (input.file === null) {
-        return;
-      }
-
-      if (input.file.sizeBytes > UPLOAD.MAX_BYTES) {
-        setRefusal(documentTooLarge());
-        return;
-      }
-
-      setUploadRatio(0);
-
-      uploadDocument.mutate(
-        { file: input.file, onProgress: setUploadRatio },
-        {
-          onSuccess: (uploaded) => {
-            start({ ...input.base, documentId: uploaded.documentId });
-          },
-        },
-      );
+      source.resolve(route, (document) => {
+        start({ ...base, documentId: document.documentId });
+      });
     },
-    [createGeneration, fetchArticle, isSubmitting, uploadDocument],
+    [createGeneration, isSubmitting, source],
   );
 
   const reset = useCallback(() => {
-    setRefusal(null);
-    uploadDocument.reset();
-    fetchArticle.reset();
+    source.reset();
     createGeneration.reset();
-  }, [createGeneration, fetchArticle, uploadDocument]);
+  }, [createGeneration, source]);
 
   return useMemo(
     () => ({
-      isUploading: uploadDocument.isPending,
+      isUploading: source.isUploading,
       isSubmitting,
-      uploadPercent: Math.round(uploadRatio * PERCENT),
-      error: refusal ?? uploadDocument.error ?? fetchArticle.error ?? createGeneration.error,
+      uploadPercent: source.uploadPercent,
+      error: source.error ?? createGeneration.error,
       submit,
       reset,
     }),
     [
       createGeneration.error,
-      fetchArticle.error,
       isSubmitting,
-      refusal,
       reset,
+      source.error,
+      source.isUploading,
+      source.uploadPercent,
       submit,
-      uploadDocument.error,
-      uploadDocument.isPending,
-      uploadRatio,
     ],
   );
 };
