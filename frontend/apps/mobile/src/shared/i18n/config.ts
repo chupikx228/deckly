@@ -30,6 +30,7 @@ export const initI18n = (locale: Locale | null): I18nInstance => {
     ns: I18N_NAMESPACES,
     interpolation: { escapeValue: false },
     returnNull: false,
+    react: { useSuspense: false },
   });
 
   return i18n;
