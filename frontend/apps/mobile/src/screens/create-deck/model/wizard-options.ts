@@ -3,6 +3,7 @@ import { DIFFICULTY, LOCALE, NOTE_TYPE, type Difficulty, type Locale } from '@/s
 export const GENERATION_SOURCE = {
   TOPIC: 'topic',
   DOCUMENT: 'document',
+  ARTICLE: 'article',
 } as const;
 
 export type GenerationSource = (typeof GENERATION_SOURCE)[keyof typeof GENERATION_SOURCE];
@@ -10,11 +11,13 @@ export type GenerationSource = (typeof GENERATION_SOURCE)[keyof typeof GENERATIO
 export const GENERATION_SOURCE_OPTIONS = [
   GENERATION_SOURCE.TOPIC,
   GENERATION_SOURCE.DOCUMENT,
+  GENERATION_SOURCE.ARTICLE,
 ] as const;
 
 export const GENERATION_SOURCE_LABEL_KEY = {
   [GENERATION_SOURCE.TOPIC]: 'wizard.sourceTopic',
   [GENERATION_SOURCE.DOCUMENT]: 'wizard.sourceDocument',
+  [GENERATION_SOURCE.ARTICLE]: 'wizard.sourceArticle',
 } as const satisfies Record<GenerationSource, string>;
 
 export const CARD_COUNT_OPTIONS = [10, 20, 30, 50] as const;

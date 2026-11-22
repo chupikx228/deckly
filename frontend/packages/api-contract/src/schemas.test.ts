@@ -11,6 +11,7 @@ import {
 import {
   generationJobSchema,
   generationRequestSchema,
+  articleUrlRequestSchema,
   documentSchema,
   mediaSchema,
   problemSchema,
@@ -248,6 +249,23 @@ describe('isTerminalJobStatus', () => {
 
   it('treats an absent status as non-terminal', () => {
     expect(isTerminalJobStatus(undefined)).toBe(false);
+  });
+});
+
+describe('articleUrlRequestSchema', () => {
+  it('accepts a link', () => {
+    expect(articleUrlRequestSchema.safeParse({ url: 'https://example.com/a' }).success).toBe(true);
+  });
+
+  it('rejects an empty link', () => {
+    expect(articleUrlRequestSchema.safeParse({ url: '' }).success).toBe(false);
+  });
+
+  it('rejects a link of 2049 characters', () => {
+    const url = `https://example.com/${'a'.repeat(2049 - 20)}`;
+
+    expect(url).toHaveLength(2049);
+    expect(articleUrlRequestSchema.safeParse({ url }).success).toBe(false);
   });
 });
 

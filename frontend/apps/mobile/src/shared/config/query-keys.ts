@@ -9,6 +9,7 @@ export const MUTATION_KEY = {
   CREATE_GENERATION: 'create-generation',
   CANCEL_GENERATION: 'cancel-generation',
   UPLOAD_DOCUMENT: 'upload-document',
+  FETCH_ARTICLE: 'fetch-article',
   REGENERATE_NOTE: 'regenerate-note',
 } as const;
 
@@ -34,6 +35,8 @@ export const mutationKeys = {
     [MUTATION_KEY.CANCEL_GENERATION, jobId] as const,
   uploadDocument: (): readonly [typeof MUTATION_KEY.UPLOAD_DOCUMENT] =>
     [MUTATION_KEY.UPLOAD_DOCUMENT] as const,
+  fetchArticle: (): readonly [typeof MUTATION_KEY.FETCH_ARTICLE] =>
+    [MUTATION_KEY.FETCH_ARTICLE] as const,
   regenerateNote: (clientId: string): readonly [typeof MUTATION_KEY.REGENERATE_NOTE, string] =>
     [MUTATION_KEY.REGENERATE_NOTE, clientId] as const,
 } as const;

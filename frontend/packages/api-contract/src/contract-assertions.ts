@@ -23,6 +23,7 @@ import type {
   generationResultSchema,
   healthSchema,
   mediaSchema,
+  articleUrlRequestSchema,
   documentSchema,
   documentSourceSchema,
   problemSchema,
@@ -88,6 +89,9 @@ export type AssertGenerationJob = Expect<
 >;
 export type AssertGenerationJobCreated = Expect<
   SameShape<z.infer<typeof generationJobCreatedSchema>, Wire<'GenerationJobCreated'>>
+>;
+export type AssertArticleUrlRequest = Expect<
+  SameShape<z.input<typeof articleUrlRequestSchema>, Wire<'ArticleUrlRequest'>>
 >;
 export type AssertDocument = Expect<SameShape<z.infer<typeof documentSchema>, Wire<'Document'>>>;
 export type AssertHealth = Expect<SameShape<z.infer<typeof healthSchema>, Wire<'Health'>>>;

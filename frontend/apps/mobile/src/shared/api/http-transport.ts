@@ -1,4 +1,5 @@
 import {
+  articleUrlRequestSchema,
   documentSchema,
   generatedNoteSchema,
   generationJobCreatedSchema,
@@ -151,6 +152,13 @@ const postDocument = (file: DocumentUpload, onProgress: UploadProgressHandler): 
 
 export const httpTransport: GenerationTransport = {
   uploadDocument: postDocument,
+
+  fetchArticle: (url) =>
+    requestJson(
+      '/documents/from-url',
+      { method: 'POST', body: articleUrlRequestSchema.parse({ url }) },
+      documentSchema,
+    ),
 
   createGeneration: (request, idempotencyKey) =>
     requestJson(

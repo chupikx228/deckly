@@ -23,6 +23,12 @@ export const useUploadDocument = () =>
       generationApi.uploadDocument(file, onProgress),
   });
 
+export const useFetchArticle = () =>
+  useMutation({
+    mutationKey: mutationKeys.fetchArticle(),
+    mutationFn: (url: string) => generationApi.fetchArticle(url),
+  });
+
 export const useCancelGeneration = (jobId: string) => {
   const queryClient = useQueryClient();
 

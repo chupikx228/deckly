@@ -14,7 +14,9 @@
     "sourceDocument": "Document",
     "chooseFile": "Choose a PDF or slides",
     "replaceFile": "Choose another file",
-    "uploading": "Uploading… {{percent}}%"
+    "uploading": "Uploading… {{percent}}%",
+    "sourceArticle": "Link",
+    "urlPlaceholder": "https://en.wikipedia.org/wiki/..."
   },
   "difficulty": {
     "beginner": "Beginner",

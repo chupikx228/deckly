@@ -46,5 +46,8 @@
   "service": {
     "unavailable": "The generation service cannot be reached. Check your connection before generating.",
     "degraded": "The generation service is running slowly. Generation may take longer than usual."
+  },
+  "article": {
+    "looksLikeFile": "This link points to a file, not a web page. Upload it as a document instead."
   }
 }
