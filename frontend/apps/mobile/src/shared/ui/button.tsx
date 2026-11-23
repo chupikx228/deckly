@@ -67,8 +67,9 @@ export const Button = ({
       ) : (
         <Text
           variant="body"
+          numberOfLines={1}
           className={[
-            'font-semibold tracking-[-0.1px]',
+            'shrink font-semibold tracking-[-0.1px]',
             isDisabled ? DISABLED_LABEL_CLASS : LABEL_CLASS[variant],
           ].join(' ')}
         >

@@ -14,7 +14,7 @@
   },
   "actions": {
     "study": "Повторять",
-    "addNote": "Добавить карточку",
+    "addNote": "Добавить",
     "createDeck": "Новая колода",
     "rename": "Переименовать",
     "archive": "В архив",
@@ -37,7 +37,7 @@
     "titlePlaceholder": "Неправильные глаголы",
     "descriptionLabel": "Описание",
     "descriptionPlaceholder": "Необязательно",
-    "create": "Создать колоду"
+    "create": "Создать"
   },
   "note": {
     "invalid": "Не удалось прочитать эту карточку",
