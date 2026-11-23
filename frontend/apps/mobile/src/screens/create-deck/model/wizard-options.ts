@@ -1,4 +1,4 @@
-import { DIFFICULTY, LOCALE, NOTE_TYPE, type Difficulty, type Locale } from '@/shared/config';
+import { DIFFICULTY, LOCALE, LOCALE_LABEL, NOTE_TYPE, type Difficulty } from '@/shared/config';
 
 export const GENERATION_SOURCE = {
   TOPIC: 'topic',
@@ -55,7 +55,4 @@ export const DIFFICULTY_LABEL_KEY = {
 
 export const CONTENT_LANGUAGE_OPTIONS = [LOCALE.EN, LOCALE.RU] as const;
 
-export const CONTENT_LANGUAGE_LABEL: Readonly<Record<Locale, string>> = {
-  [LOCALE.EN]: 'English',
-  [LOCALE.RU]: 'Русский',
-};
+export const CONTENT_LANGUAGE_LABEL = LOCALE_LABEL;
