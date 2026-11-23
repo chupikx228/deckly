@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { I18nextProvider } from 'react-i18next';
+import { View } from 'react-native';
 
 import { detectDeviceLocale, i18n, initI18n } from '@/shared/i18n';
 import { useSettingsStore } from '@/shared/model';
@@ -21,5 +22,9 @@ export const I18nProvider = ({ children }: I18nProviderProps) => {
     }
   }, [instance, storedLocale]);
 
-  return <I18nextProvider i18n={i18n}>{children}</I18nextProvider>;
+  return (
+    <I18nextProvider i18n={i18n}>
+      <Suspense fallback={<View className="flex-1 bg-background" />}>{children}</Suspense>
+    </I18nextProvider>
+  );
 };
